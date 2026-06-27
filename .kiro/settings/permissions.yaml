@@ -1,0 +1,28 @@
+rules:
+  - capability: shell
+    effect: allow
+    match:
+      - git *
+      - npm *
+      - npx *
+
+  - capability: fs_read
+    effect: allow
+
+  - capability: fs_write
+    effect: allow
+    match:
+      - src/**
+      - tests/**
+  
+  - capability: fs_write
+    effect: allow
+    match:
+      - src/**
+      - tests/**
+      - package.json
+      - tsconfig*.json
+      - "*.config.ts"
+      - "*.config.js"
+      - .eslintrc*
+      - .gitignore

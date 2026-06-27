@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TRPG Session Engine — 디자인 스타일 시안 4종</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin:0; padding:32px; background:#0b0c10; color:#fff;
+    font-family: "Pretendard","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;
+  }
+  .page-h1 { font-size:24px; margin:0 0 4px; }
+  .page-sub { color:#8b90a0; margin:0 0 28px; }
+  .style-label {
+    display:flex; align-items:baseline; gap:12px; margin:44px 0 14px;
+  }
+  .style-label .k { font-size:20px; font-weight:800; }
+  .style-label .d { font-size:13px; color:#8b90a0; }
+  .toc { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:24px; }
+  .toc a { background:#1a1d27; color:#cfd3df; text-decoration:none; padding:6px 14px;
+    border-radius:999px; font-size:13px; border:1px solid #2a2f3c; }
+  .toc a:hover { color:#fff; border-color:#6aa9ff; }
+  .wrap { max-width:1000px; }
+
+  /* =================================================================
+     A. MINIMALISM
+  ================================================================== */
+  .min {
+    background:#fafafa; color:#111; border-radius:4px; overflow:hidden;
+    font-weight:300; border:1px solid #e8e8e8;
+  }
+  .min .top { display:flex; align-items:center; padding:22px 28px; border-bottom:1px solid #ededed; }
+  .min .top .brand { font-weight:600; letter-spacing:-.01em; }
+  .min .top .meta { margin-left:auto; color:#999; font-size:13px; font-weight:400; }
+  .min .grid { display:grid; grid-template-columns:1fr 240px; }
+  .min .main { padding:40px 28px; }
+  .min .side { padding:40px 28px; border-left:1px solid #ededed; }
+  .min .round { font-size:12px; letter-spacing:.18em; text-transform:uppercase; color:#aaa; margin-bottom:24px; }
+  .min .narr { font-size:19px; line-height:1.9; color:#222; max-width:46ch; margin-bottom:36px; font-weight:300; }
+  .min .check { font-size:13px; color:#888; padding-top:20px; border-top:1px solid #eee; display:flex; gap:16px; }
+  .min .check b { color:#111; font-weight:600; }
+  .min .side h5 { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:#bbb; margin:0 0 16px; font-weight:600; }
+  .min .pl { display:flex; align-items:center; gap:10px; font-size:14px; padding:9px 0; color:#333; }
+  .min .pl .s { width:6px; height:6px; border-radius:50%; background:#ccc; }
+  .min .pl .s.on { background:#111; }
+  .min .pl .x { margin-left:auto; font-size:12px; color:#999; }
+  .min .timer { margin-top:30px; font-size:34px; font-weight:200; letter-spacing:-.02em; }
+  .min .timer small { display:block; font-size:11px; letter-spacing:.1em; color:#bbb; text-transform:uppercase; margin-top:4px; font-weight:600; }
+  .min .bar { display:flex; gap:10px; padding:20px 28px; border-top:1px solid #ededed; align-items:center; }
+  .min .bar input { flex:1; border:none; border-bottom:1px solid #ddd; padding:10px 2px; font-size:15px; background:transparent; outline:none; font-family:inherit; }
+  .min .bar button { border:none; background:none; font-size:14px; color:#111; cursor:pointer; padding:8px 4px; font-family:inherit; }
+  .min .bar button.go { font-weight:600; }
+  .min .bar button.mut { color:#aaa; }
+
+  /* =================================================================
+     B. MAXIMALISM
+  ================================================================== */
+  .max {
+    border-radius:18px; overflow:hidden; position:relative;
+    background:
+      radial-gradient(circle at 0% 0%, #ff3d81 0%, transparent 40%),
+      radial-gradient(circle at 100% 0%, #7b2ff7 0%, transparent 45%),
+      radial-gradient(circle at 50% 100%, #00d4ff 0%, transparent 50%),
+      #160a2e;
+    color:#fff; border:3px solid #ffd84d;
+    font-family:"Georgia",serif;
+  }
+  .max .top { display:flex; align-items:center; gap:14px; padding:18px 24px;
+    background:rgba(0,0,0,.35); border-bottom:3px solid #ffd84d; }
+  .max .top .brand { font-size:22px; font-weight:800; font-family:"Georgia",serif;
+    background:linear-gradient(90deg,#ffd84d,#ff7ac6,#7ad0ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .max .top .pill { background:#ffd84d; color:#160a2e; font-weight:800; padding:5px 14px; border-radius:999px; font-size:12px; font-family:sans-serif; }
+  .max .top .spacer { flex:1; }
+  .max .top .live { background:#00ffa3; color:#06231a; padding:5px 14px; border-radius:999px; font-size:12px; font-weight:800; font-family:sans-serif; }
+  .max .grid { display:grid; grid-template-columns:1fr 270px; gap:0; }
+  .max .main { padding:26px; }
+  .max .side { padding:26px; background:rgba(0,0,0,.28); border-left:3px solid rgba(255,216,77,.5); }
+  .max .narr { background:linear-gradient(135deg,rgba(255,122,198,.22),rgba(122,208,255,.18));
+    border:2px solid #ff7ac6; border-radius:14px; padding:20px; margin-bottom:18px;
+    box-shadow:0 0 30px rgba(255,61,129,.4), inset 0 0 20px rgba(255,255,255,.06); }
+  .max .narr .who { font-family:sans-serif; font-weight:800; color:#ffd84d; letter-spacing:.1em; font-size:12px; text-shadow:0 0 10px #ffd84d; }
+  .max .narr p { margin:6px 0 0; font-size:18px; line-height:1.7; }
+  .max .dice { display:flex; align-items:center; gap:14px; background:rgba(0,0,0,.4);
+    border:2px dashed #00d4ff; border-radius:14px; padding:14px; box-shadow:0 0 24px rgba(0,212,255,.4); }
+  .max .dice .d { font-size:32px; filter:drop-shadow(0 0 8px #ffd84d); }
+  .max .dice .m { font-family:sans-serif; font-size:12px; color:#bfeaff; }
+  .max .dice .out { margin-left:auto; font-family:sans-serif; font-weight:800; background:linear-gradient(90deg,#00ffa3,#00d4ff);
+    color:#06231a; padding:6px 16px; border-radius:999px; box-shadow:0 0 16px #00ffa3; }
+  .max .side h5 { font-family:sans-serif; font-size:12px; letter-spacing:.1em; color:#ffd84d; margin:0 0 14px; text-transform:uppercase; }
+  .max .pl { display:flex; align-items:center; gap:9px; font-family:sans-serif; font-size:14px; padding:8px 10px;
+    margin-bottom:6px; border-radius:10px; background:rgba(255,255,255,.06); border:1px solid rgba(255,216,77,.3); }
+  .max .pl .s { width:9px; height:9px; border-radius:50%; background:#6b7080; box-shadow:0 0 8px currentColor; }
+  .max .pl .s.on { background:#00ffa3; }
+  .max .pl .x { margin-left:auto; font-size:11px; font-weight:800; }
+  .max .x.ready { color:#00ffa3; } .max .x.pass{ color:#7ad0ff; } .max .x.auto{ color:#ffd84d; }
+  .max .ring { width:104px; height:104px; border-radius:50%; margin:18px auto 6px;
+    background:conic-gradient(#ff3d81 0 280deg,#2a1a44 280deg 360deg); display:grid; place-items:center;
+    box-shadow:0 0 30px rgba(255,61,129,.6); position:relative; }
+  .max .ring::after{ content:""; position:absolute; inset:12px; border-radius:50%; background:#160a2e; }
+  .max .ring span{ position:relative; font-family:sans-serif; font-weight:800; font-size:22px; }
+  .max .force { width:100%; margin-top:18px; border:none; padding:14px; border-radius:12px; cursor:pointer;
+    font-family:sans-serif; font-weight:800; font-size:14px; color:#fff;
+    background:linear-gradient(90deg,#ff3d81,#7b2ff7); box-shadow:0 0 24px rgba(123,47,247,.6); }
+  .max .bar { display:flex; gap:10px; padding:18px 24px; background:rgba(0,0,0,.4); border-top:3px solid #ffd84d; align-items:center; }
+  .max .bar input{ flex:1; background:rgba(255,255,255,.08); border:2px solid #7ad0ff; border-radius:12px;
+    color:#fff; padding:12px 14px; font-family:sans-serif; font-size:14px; outline:none; }
+  .max .bar button{ border:none; border-radius:12px; padding:12px 20px; font-family:sans-serif; font-weight:800; cursor:pointer; }
+  .max .bar .go{ background:linear-gradient(90deg,#ffd84d,#ff7ac6); color:#160a2e; box-shadow:0 0 18px #ff7ac6; }
+  .max .bar .pass{ background:rgba(255,255,255,.12); color:#fff; border:2px solid rgba(255,255,255,.3); }
+
+  /* =================================================================
+     C. BRUTALISM
+  ================================================================== */
+  .bru {
+    background:#fff; color:#000; border:4px solid #000;
+    font-family:"Courier New",monospace; box-shadow:12px 12px 0 #000;
+  }
+  .bru .top { display:flex; align-items:center; gap:0; border-bottom:4px solid #000; }
+  .bru .top .brand { padding:16px 20px; font-weight:700; font-size:18px; border-right:4px solid #000; text-transform:uppercase; }
+  .bru .top .rd { padding:16px 20px; border-right:4px solid #000; font-weight:700; background:#ffe600; }
+  .bru .top .live { margin-left:auto; padding:16px 20px; background:#000; color:#0f0; font-weight:700; }
+  .bru .grid { display:grid; grid-template-columns:1fr 260px; }
+  .bru .main { padding:0; }
+  .bru .side { border-left:4px solid #000; }
+  .bru .blk { border-bottom:4px solid #000; padding:20px; }
+  .bru .blk h5 { margin:0 0 14px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; background:#000; color:#fff; display:inline-block; padding:3px 8px; }
+  .bru .narr { font-size:17px; line-height:1.6; }
+  .bru .narr .who { font-weight:700; text-decoration:underline; }
+  .bru .dice { display:flex; gap:14px; align-items:center; border:3px solid #000; padding:12px; }
+  .bru .dice .d{ font-size:26px; }
+  .bru .dice .m{ font-size:13px; font-weight:700; }
+  .bru .dice .out{ margin-left:auto; background:#0f0; color:#000; font-weight:700; padding:6px 14px; border:3px solid #000; }
+  .bru .pl{ display:flex; align-items:center; gap:10px; font-size:14px; font-weight:700; padding:10px; border-bottom:3px solid #000; }
+  .bru .pl:last-child{ border-bottom:none; }
+  .bru .pl .s{ width:14px; height:14px; border:3px solid #000; }
+  .bru .pl .s.on{ background:#000; }
+  .bru .pl .x{ margin-left:auto; font-size:11px; border:2px solid #000; padding:2px 6px; }
+  .bru .x.auto{ background:#ffe600; }
+  .bru .timer{ text-align:center; }
+  .bru .timer .t{ font-size:44px; font-weight:700; border:4px solid #000; display:inline-block; padding:6px 18px; background:#ffe600; }
+  .bru .timer small{ display:block; margin-top:8px; font-size:11px; text-transform:uppercase; font-weight:700; }
+  .bru .force{ width:100%; border:4px solid #000; background:#ff2d2d; color:#000; font-family:inherit; font-weight:700;
+    text-transform:uppercase; padding:14px; cursor:pointer; box-shadow:6px 6px 0 #000; }
+  .bru .bar{ display:flex; gap:0; border-top:4px solid #000; }
+  .bru .bar input{ flex:1; border:none; border-right:4px solid #000; padding:16px; font-family:inherit; font-size:15px; outline:none; }
+  .bru .bar button{ border:none; border-right:4px solid #000; padding:16px 22px; font-family:inherit; font-weight:700; text-transform:uppercase; cursor:pointer; background:#fff; }
+  .bru .bar button:last-child{ border-right:none; }
+  .bru .bar .go{ background:#0f0; }
+  .bru .bar .pass{ background:#fff; }
+
+  /* =================================================================
+     D. GLASSMORPHISM
+  ================================================================== */
+  .glass-stage {
+    border-radius:24px; padding:30px; overflow:hidden;
+    background:
+      radial-gradient(circle at 20% 20%, #5b6cff55, transparent 50%),
+      radial-gradient(circle at 80% 30%, #ff6ec755, transparent 50%),
+      radial-gradient(circle at 50% 90%, #2ad0ff55, transparent 50%),
+      linear-gradient(135deg,#1b1f3a,#0d1024);
+  }
+  .gl {
+    border-radius:20px; overflow:hidden; color:#eef1ff;
+    background:rgba(255,255,255,.07); backdrop-filter:blur(18px);
+    border:1px solid rgba(255,255,255,.18); box-shadow:0 20px 60px rgba(0,0,0,.4);
+    font-family:"Pretendard",system-ui,sans-serif;
+  }
+  .gl .top{ display:flex; align-items:center; gap:12px; padding:18px 24px; border-bottom:1px solid rgba(255,255,255,.12); }
+  .gl .top .brand{ font-weight:700; }
+  .gl .top .pill{ background:rgba(255,255,255,.14); padding:5px 14px; border-radius:999px; font-size:12px; border:1px solid rgba(255,255,255,.2); }
+  .gl .top .spacer{ flex:1; }
+  .gl .top .live{ display:flex; align-items:center; gap:6px; font-size:12px; color:#9affd0; }
+  .gl .top .live .dot{ width:8px; height:8px; border-radius:50%; background:#9affd0; box-shadow:0 0 10px #9affd0; }
+  .gl .grid{ display:grid; grid-template-columns:1fr 260px; gap:16px; padding:18px; }
+  .gl .card{ background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.14); border-radius:16px; padding:18px; }
+  .gl .card+.card{ margin-top:14px; }
+  .gl h5{ margin:0 0 12px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:#aab2e0; }
+  .gl .narr .who{ color:#ffd9a8; font-weight:700; font-size:12px; }
+  .gl .narr p{ margin:6px 0 0; font-size:16px; line-height:1.7; }
+  .gl .dice{ display:flex; align-items:center; gap:12px; margin-top:14px;
+    background:rgba(255,255,255,.05); border:1px solid rgba(255,217,168,.4); border-radius:12px; padding:12px; }
+  .gl .dice .d{ font-size:26px; }
+  .gl .dice .m{ font-size:12px; color:#c9cdf0; }
+  .gl .dice .out{ margin-left:auto; font-weight:700; font-size:13px; color:#9affd0;
+    background:rgba(154,255,208,.12); padding:5px 14px; border-radius:999px; }
+  .gl .pl{ display:flex; align-items:center; gap:9px; font-size:14px; padding:9px 0; border-bottom:1px solid rgba(255,255,255,.08); }
+  .gl .pl:last-child{ border-bottom:none; }
+  .gl .pl .s{ width:8px; height:8px; border-radius:50%; background:#6b7080; }
+  .gl .pl .s.on{ background:#9affd0; box-shadow:0 0 8px #9affd0; }
+  .gl .pl .x{ margin-left:auto; font-size:11px; color:#aab2e0; }
+  .gl .ring{ width:96px; height:96px; border-radius:50%; margin:14px auto 6px;
+    background:conic-gradient(#ffd9a8 0 285deg, rgba(255,255,255,.1) 285deg 360deg);
+    display:grid; place-items:center; position:relative; }
+  .gl .ring::after{ content:""; position:absolute; inset:11px; border-radius:50%; background:rgba(30,34,60,.7); backdrop-filter:blur(4px); }
+  .gl .ring span{ position:relative; font-weight:700; font-size:20px; }
+  .gl .force{ width:100%; margin-top:14px; border:1px solid rgba(255,110,110,.5); border-radius:12px;
+    background:rgba(255,110,110,.16); color:#ffd0d0; padding:12px; cursor:pointer; font-family:inherit; font-weight:600; }
+  .gl .bar{ display:flex; gap:10px; padding:16px 18px; border-top:1px solid rgba(255,255,255,.12); align-items:center; }
+  .gl .bar input{ flex:1; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.2); border-radius:12px;
+    color:#fff; padding:12px 14px; outline:none; font-family:inherit; }
+  .gl .bar button{ border:none; border-radius:12px; padding:12px 20px; font-weight:600; cursor:pointer; font-family:inherit; }
+  .gl .bar .go{ background:rgba(255,255,255,.9); color:#1b1f3a; }
+  .gl .bar .pass{ background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.2); }
+  .gl .center{ text-align:center; }
+  .gl .tiny{ font-size:11px; color:#aab2e0; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+  <h1 class="page-h1">디자인 스타일 시안 4종 — 세션 진행 화면</h1>
+  <p class="page-sub">동일한 핵심 화면(세션 진행)을 4가지 디자인 형식으로 표현. 사이트 전체 연결 없이 단일 화면 시안.</p>
+
+  <div class="toc">
+    <a href="#min">A. Minimalism</a>
+    <a href="#max">B. Maximalism</a>
+    <a href="#bru">C. Brutalism</a>
+    <a href="#gl">D. Glassmorphism</a>
+  </div>
+
+  <!-- ===================== A. MINIMALISM ===================== -->
+  <div id="min" class="style-label"><span class="k">A. Minimalism</span><span class="d">여백 · 모노톤 · 얇은 선 · 절제된 타이포</span></div>
+  <div class="min">
+    <div class="top">
+      <span class="brand">ready-gm</span>
+      <span class="meta">메아리의 선술집 · Round 3</span>
+    </div>
+    <div class="grid">
+      <div class="main">
+        <div class="round">Free-Chat Phase</div>
+        <p class="narr">횃불이 깜빡이며 통로 끝의 문이 서서히 모습을 드러낸다. 차가운 공기가 너희의 목덜미를 스친다.</p>
+        <div class="check"><span>Borin · 힘 · Hard</span><span>Roll +2</span><b>SUCCESS</b></div>
+      </div>
+      <div class="side">
+        <h5>Party</h5>
+        <div class="pl"><span class="s on"></span>Aria<span class="x">확정</span></div>
+        <div class="pl"><span class="s"></span>Borin<span class="x">대기</span></div>
+        <div class="pl"><span class="s on"></span>Cara<span class="x">패스</span></div>
+        <div class="pl"><span class="s on"></span>Dane<span class="x">자동</span></div>
+        <div class="timer">01:12<small>auto-pass</small></div>
+      </div>
+    </div>
+    <div class="bar">
+      <input placeholder="행동을 입력하세요" />
+      <button class="go">확정</button>
+      <button>패스</button>
+      <button class="mut">수정</button>
+    </div>
+  </div>
+
+  <!-- ===================== B. MAXIMALISM ===================== -->
+  <div id="max" class="style-label"><span class="k">B. Maximalism</span><span class="d">강렬한 색 · 그라데이션 · 네온 글로우 · 장식 과잉</span></div>
+  <div class="max">
+    <div class="top">
+      <span class="brand">⚔ ready-gm</span>
+      <span class="pill">ROUND 3 · FREE-CHAT</span>
+      <span class="spacer"></span>
+      <span class="live">● LIVE</span>
+    </div>
+    <div class="grid">
+      <div class="main">
+        <div class="narr">
+          <div class="who">★ GAME MASTER ★</div>
+          <p>횃불이 깜빡이며 통로 끝의 문이 서서히 모습을 드러낸다! 차가운 공기가 너희의 목덜미를 스친다...</p>
+        </div>
+        <div class="dice">
+          <span class="d">🎲</span>
+          <div class="m">BORIN · 힘(MIGHT) · HARD<br>ROLL +2</div>
+          <span class="out">SUCCESS!</span>
+        </div>
+      </div>
+      <div class="side">
+        <h5>◆ PARTY ◆</h5>
+        <div class="pl"><span class="s on"></span>Aria<span class="x ready">확정</span></div>
+        <div class="pl"><span class="s"></span>Borin<span class="x">대기</span></div>
+        <div class="pl"><span class="s on"></span>Cara<span class="x pass">패스</span></div>
+        <div class="pl"><span class="s on"></span>Dane<span class="x auto">자동</span></div>
+        <div class="ring"><span>01:12</span></div>
+        <button class="force">⚡ 강제 진행 ⚡</button>
+      </div>
+    </div>
+    <div class="bar">
+      <input placeholder="당신의 운명을 입력하라..." />
+      <button class="go">확정</button>
+      <button class="pass">패스</button>
+    </div>
+  </div>
+
+  <!-- ===================== C. BRUTALISM ===================== -->
+  <div id="bru" class="style-label"><span class="k">C. Brutalism</span><span class="d">날것 · 두꺼운 검정 테두리 · 모노스페이스 · 하드 그림자</span></div>
+  <div class="bru">
+    <div class="top">
+      <span class="brand">READY-GM</span>
+      <span class="rd">ROUND_3 / FREE-CHAT</span>
+      <span class="live">● LIVE</span>
+    </div>
+    <div class="grid">
+      <div class="main">
+        <div class="blk">
+          <h5>GM_NARRATION</h5>
+          <div class="narr"><span class="who">[GM]</span> 횃불이 깜빡이며 통로 끝의 문이 서서히 모습을 드러낸다. 차가운 공기가 목덜미를 스친다.</div>
+        </div>
+        <div class="blk">
+          <h5>DICE_CHECK</h5>
+          <div class="dice"><span class="d">🎲</span><span class="m">BORIN / 힘 / HARD<br>ROLL +2</span><span class="out">SUCCESS</span></div>
+        </div>
+      </div>
+      <div class="side">
+        <div class="blk" style="padding:0">
+          <div class="pl"><span class="s on"></span>ARIA<span class="x">확정</span></div>
+          <div class="pl"><span class="s"></span>BORIN<span class="x">대기</span></div>
+          <div class="pl"><span class="s on"></span>CARA<span class="x">패스</span></div>
+          <div class="pl"><span class="s on"></span>DANE<span class="x auto">자동</span></div>
+        </div>
+        <div class="blk timer">
+          <span class="t">01:12</span>
+          <small>AUTO-PASS</small>
+        </div>
+        <div class="blk" style="border-bottom:none">
+          <button class="force">강제 진행</button>
+        </div>
+      </div>
+    </div>
+    <div class="bar">
+      <input placeholder="ACTION_INPUT..." />
+      <button class="go">확정</button>
+      <button class="pass">패스</button>
+      <button>수정</button>
+    </div>
+  </div>
+
+  <!-- ===================== D. GLASSMORPHISM ===================== -->
+  <div id="gl" class="style-label"><span class="k">D. Glassmorphism</span><span class="d">반투명 유리 · 블러 · 부드러운 빛 · 컬러풀 배경</span></div>
+  <div class="glass-stage">
+    <div class="gl">
+      <div class="top">
+        <span class="brand">⚔ ready-gm</span>
+        <span class="pill">Round 3 · Free-Chat</span>
+        <span class="spacer"></span>
+        <span class="live"><span class="dot"></span>Live</span>
+      </div>
+      <div class="grid">
+        <div>
+          <div class="card narr">
+            <h5>GM 내레이션</h5>
+            <div class="who">[GM]</div>
+            <p>횃불이 깜빡이며 통로 끝의 문이 서서히 모습을 드러낸다. 차가운 공기가 너희의 목덜미를 스친다.</p>
+            <div class="dice">
+              <span class="d">🎲</span>
+              <span class="m">Borin · 힘 · Hard &nbsp;|&nbsp; Roll +2</span>
+              <span class="out">Success</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <h5>파티 & 준비 상태</h5>
+            <div class="pl"><span class="s on"></span>Aria<span class="x">확정</span></div>
+            <div class="pl"><span class="s"></span>Borin<span class="x">대기</span></div>
+            <div class="pl"><span class="s on"></span>Cara<span class="x">패스</span></div>
+            <div class="pl"><span class="s on"></span>Dane<span class="x">자동</span></div>
+          </div>
+          <div class="card center">
+            <h5>타이머</h5>
+            <div class="ring"><span>01:12</span></div>
+            <div class="tiny">시간 종료 시 자동 패스</div>
+            <button class="force">강제 진행</button>
+          </div>
+        </div>
+      </div>
+      <div class="bar">
+        <input placeholder="행동을 입력하세요..." />
+        <button class="go">확정</button>
+        <button class="pass">패스</button>
+      </div>
+    </div>
+  </div>
+
+  </div>
+</body>
+</html>

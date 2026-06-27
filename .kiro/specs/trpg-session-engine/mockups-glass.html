@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TRPG Session Engine — 글래스모피즘 시안 (전체 화면)</title>
+<style>
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:32px; min-height:100vh;
+    color:#e8eaf2; font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;
+    background:
+      radial-gradient(circle at 18% 12%, #3a4a7022, transparent 50%),
+      radial-gradient(circle at 82% 18%, #4a3f6322, transparent 52%),
+      radial-gradient(circle at 50% 95%, #2e4a5522, transparent 55%),
+      linear-gradient(135deg,#161922,#10131b 70%);
+    background-attachment:fixed;
+  }
+  .page-h1 { font-size:24px; margin:0 0 4px; }
+  .page-sub { color:#aab2e0; margin:0 0 26px; }
+  .toc { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:24px; }
+  .toc a { background:rgba(255,255,255,.08); color:#dfe3ff; text-decoration:none; padding:6px 14px;
+    border-radius:999px; font-size:13px; border:1px solid rgba(255,255,255,.16); backdrop-filter:blur(8px); }
+  .toc a:hover { border-color:#9fb0ff; color:#fff; }
+
+  .screen-label { display:flex; align-items:center; gap:10px; margin:42px 0 14px; font-size:14px;
+    color:#aab2e0; letter-spacing:.04em; text-transform:uppercase; }
+  .screen-label .num { background:rgba(255,255,255,.9); color:#1b1f3a; font-weight:800;
+    width:26px; height:26px; border-radius:50%; display:grid; place-items:center; font-size:13px; }
+  .screen-label .reqs { margin-left:auto; font-size:11px; color:#6f76a0; text-transform:none; }
+
+  /* glass shell */
+  .gl { border-radius:22px; overflow:hidden; max-width:1040px;
+    background:rgba(255,255,255,.07); backdrop-filter:blur(20px);
+    border:1px solid rgba(255,255,255,.18); box-shadow:0 24px 70px rgba(0,0,0,.45); }
+  .gl.narrow { max-width:680px; }
+
+  .top { display:flex; align-items:center; gap:12px; padding:16px 22px; border-bottom:1px solid rgba(255,255,255,.12); }
+  .top .brand { font-weight:700; color:#ffd9a8; }
+  .top .room { color:#aab2e0; font-size:14px; }
+  .top .pill { background:rgba(255,255,255,.12); padding:5px 14px; border-radius:999px; font-size:12px;
+    border:1px solid rgba(255,255,255,.2); }
+  .top .spacer { flex:1; }
+  .live { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#9affd0; }
+  .live .dot { width:8px; height:8px; border-radius:50%; background:#9affd0; box-shadow:0 0 10px #9affd0; }
+  .live.reconnecting { color:#ffce6b; } .live.reconnecting .dot{ background:#ffce6b; box-shadow:0 0 10px #ffce6b; }
+
+  .body { padding:24px; }
+  .center { max-width:480px; margin:0 auto; }
+  .card { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.14); border-radius:16px;
+    padding:20px; margin-bottom:16px; }
+  .card h3 { margin:0 0 14px; font-size:16px; }
+  h5 { margin:0 0 12px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:#aab2e0; }
+  label.field { display:block; font-size:13px; color:#aab2e0; margin-bottom:6px; }
+  .input,.textarea { width:100%; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.2);
+    border-radius:12px; color:#fff; padding:11px 14px; font-size:14px; margin-bottom:14px; outline:none; font-family:inherit; }
+  .textarea { min-height:80px; resize:vertical; }
+  .input::placeholder,.textarea::placeholder{ color:#8089b5; }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; border:none;
+    border-radius:12px; padding:11px 20px; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; }
+  .btn.primary { background:rgba(255,255,255,.92); color:#1b1f3a; }
+  .btn.secondary { background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.22); }
+  .btn.ghost { background:transparent; color:#aab2e0; border:1px solid rgba(255,255,255,.18); }
+  .btn.gm { background:rgba(255,217,168,.2); color:#ffd9a8; border:1px solid rgba(255,217,168,.5); }
+  .btn.danger { background:rgba(255,110,110,.18); color:#ffd0d0; border:1px solid rgba(255,110,110,.5); }
+  .btn.block { width:100%; }
+  .btn.disabled { opacity:.4; cursor:not-allowed; }
+  .row { display:flex; gap:12px; align-items:center; }
+  .row.between { justify-content:space-between; }
+  .muted { color:#aab2e0; font-size:13px; }
+  .tiny { font-size:11px; color:#8089b5; }
+  .note { font-size:12px; color:#7f86b0; margin-top:6px; }
+
+  .link-field { display:flex; gap:8px; }
+  .link-field .input { margin:0; }
+
+  /* chips / roster */
+  .chip { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
+    background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.1); margin-bottom:8px; }
+  .avatar { width:30px; height:30px; border-radius:50%; background:rgba(255,255,255,.14);
+    display:grid; place-items:center; font-size:13px; font-weight:700; }
+  .crown { color:#ffd9a8; }
+  .spacer { flex:1; }
+  .tag { font-size:11px; padding:3px 9px; border-radius:999px; background:rgba(255,255,255,.1); color:#aab2e0; }
+  .tag.ready { color:#9affd0; background:rgba(154,255,208,.14); }
+  .tag.pass { color:#8fc2ff; background:rgba(106,169,255,.14); }
+  .tag.auto { color:#ffce6b; background:rgba(255,206,107,.14); }
+  .empty-seat { padding:9px 12px; border:1px dashed rgba(255,255,255,.16); border-radius:12px;
+    color:#6f76a0; font-size:12px; margin-bottom:8px; }
+  .badge-default { font-size:10px; background:rgba(255,217,168,.9); color:#1b1f3a; padding:2px 8px;
+    border-radius:999px; font-weight:700; margin-left:8px; }
+
+  /* modals */
+  .modal-wrap { display:flex; gap:16px; flex-wrap:wrap; margin-top:16px; }
+  .modal { background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); border-radius:16px;
+    padding:18px; width:290px; backdrop-filter:blur(10px); }
+  .modal h4 { margin:0 0 8px; font-size:15px; }
+  .modal.warn h4 { color:#ffce6b; } .modal.danger h4 { color:#ff9a9a; }
+  .modal p { font-size:13px; color:#aab2e0; margin:0 0 16px; }
+
+  /* scenario */
+  .scenario { display:flex; gap:12px; padding:14px; border:1px solid rgba(255,255,255,.16); border-radius:14px;
+    background:rgba(255,255,255,.05); }
+  .radio { width:18px; height:18px; border-radius:50%; border:2px solid #9fb0ff; display:grid; place-items:center; flex:none; margin-top:2px; }
+  .radio .inner { width:9px; height:9px; border-radius:50%; background:#9fb0ff; }
+  .scenario .title { font-weight:600; }
+  .scenario .desc { font-size:13px; color:#aab2e0; }
+
+  /* attributes */
+  .attr-grid { display:grid; grid-template-columns:1fr auto; gap:10px 16px; align-items:center; }
+  .attr-name { font-size:14px; }
+  .attr-val { background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); border-radius:8px;
+    padding:7px 12px; font-size:13px; min-width:96px; text-align:center; }
+  .setup-strip { display:flex; gap:8px; flex-wrap:wrap; margin:16px 0; }
+  .setup-pill { font-size:12px; padding:6px 12px; border-radius:999px; background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.14); display:flex; align-items:center; gap:6px; }
+
+  .ready-dot { width:9px; height:9px; border-radius:50%; background:#6b7080; }
+  .ready-dot.ready { background:#9affd0; box-shadow:0 0 8px #9affd0; }
+
+  /* in-session */
+  .session-grid { display:grid; grid-template-columns:1fr 270px; gap:16px; }
+  .stack { display:flex; flex-direction:column; gap:16px; }
+  .narration { background:rgba(255,255,255,.05); border-left:3px solid #ffd9a8; border-radius:10px; padding:14px; margin-bottom:12px; }
+  .narration .who { color:#ffd9a8; font-weight:700; font-size:12px; margin-bottom:4px; }
+  .narration p { margin:0; font-size:15px; line-height:1.7; }
+  .dice-card { background:rgba(255,255,255,.05); border:1px solid rgba(255,217,168,.4); border-radius:12px;
+    padding:12px; display:flex; align-items:center; gap:14px; }
+  .dice-card .die { font-size:26px; }
+  .dice-card .meta { font-size:12px; color:#c9cdf0; }
+  .outcome { margin-left:auto; font-weight:700; font-size:13px; padding:5px 14px; border-radius:999px; }
+  .outcome.success { color:#9affd0; background:rgba(154,255,208,.14); }
+  .chat-line { font-size:14px; padding:4px 0; }
+  .chat-line .name { color:#8fc2ff; font-weight:600; }
+  .chat-input { display:flex; gap:8px; margin-top:10px; }
+  .chat-input .input { margin:0; }
+  .readiness-row { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.08); font-size:13px; }
+  .readiness-row:last-child { border-bottom:none; }
+  .timer { display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .ring { width:96px; height:96px; border-radius:50%;
+    background:conic-gradient(#ffce6b 0deg 290deg, rgba(255,255,255,.1) 290deg 360deg);
+    display:grid; place-items:center; position:relative; }
+  .ring::after { content:""; position:absolute; inset:11px; border-radius:50%; background:rgba(27,31,58,.7); backdrop-filter:blur(4px); }
+  .ring .t { position:relative; font-size:20px; font-weight:700; }
+  .actionbar { margin-top:16px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.16);
+    border-radius:14px; padding:14px; display:flex; gap:10px; align-items:center; }
+  .actionbar .input { margin:0; flex:1; }
+  .phase-badge { font-size:11px; padding:3px 10px; border-radius:999px; background:rgba(106,169,255,.16); color:#8fc2ff; font-weight:600; }
+  .toast { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.14); border-left:3px solid #ffce6b;
+    border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:8px; }
+
+  .summary-list { margin:0; padding-left:18px; }
+  .summary-list li { font-size:14px; padding:4px 0; }
+  .ended-banner { text-align:center; color:#aab2e0; font-size:13px; margin-top:12px;
+    padding:10px; border:1px dashed rgba(255,255,255,.16); border-radius:12px; }
+  .big-title { text-align:center; font-size:30px; letter-spacing:.12em; color:#ffd9a8; margin:8px 0 22px;
+    text-shadow:0 0 24px rgba(255,217,168,.4); }
+</style>
+</head>
+<body>
+  <h1 class="page-h1">TRPG Session Engine — 글래스모피즘 전체 시안</h1>
+  <p class="page-sub">선택된 디자인 방향(D · Glassmorphism)으로 7개 화면 통일 · 반투명 유리 + 블러 + 컬러풀 배경</p>
+
+  <div class="toc">
+    <a href="#s1">1. 방 생성 & 초대</a>
+    <a href="#s2">2. 방 참가</a>
+    <a href="#s3">3. 시나리오 선택</a>
+    <a href="#s4">4. 캐릭터 생성</a>
+    <a href="#s5">5. 로비 & 시작</a>
+    <a href="#s6">6. 세션 진행</a>
+    <a href="#s7">7. 엔딩 & 요약</a>
+  </div>
+
+  <!-- ===== 1 ===== -->
+  <div id="s1" class="screen-label"><span class="num">1</span> 방 생성 & 초대 <span class="reqs">R1.1–1.4</span></div>
+  <div class="gl narrow">
+    <div class="top"><span class="brand">⚔ ready-gm</span><span class="spacer"></span>
+      <span class="live reconnecting"><span class="dot"></span>연결 중</span></div>
+    <div class="body"><div class="center">
+      <div class="card">
+        <h3>새 세션 만들기</h3>
+        <label class="field">표시 이름</label>
+        <input class="input" value="Aria" />
+        <button class="btn primary block">방 만들기</button>
+      </div>
+      <div class="card">
+        <h3>방이 생성되었습니다 — "메아리의 선술집"</h3>
+        <label class="field">초대 링크</label>
+        <div class="link-field">
+          <input class="input" value="https://ready-gm/r/AB12CD34" readonly />
+          <button class="btn secondary">복사</button>
+        </div>
+        <div class="row between" style="margin-top:14px">
+          <span class="muted">플레이어: 1 / 6</span>
+          <button class="btn primary">로비로 이동</button>
+        </div>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- ===== 2 ===== -->
+  <div id="s2" class="screen-label"><span class="num">2</span> 방 참가 <span class="reqs">R2.1, 2.2, 2.4, 2.6</span></div>
+  <div class="gl narrow">
+    <div class="top"><span class="brand">⚔ ready-gm</span><span class="spacer"></span>
+      <span class="live"><span class="dot"></span>Live</span></div>
+    <div class="body"><div class="center">
+      <div class="card">
+        <h3>"메아리의 선술집"에 초대되었습니다</h3>
+        <div class="row between" style="margin-bottom:14px">
+          <span class="muted">호스트: Aria</span><span class="muted">플레이어: 3 / 6</span>
+        </div>
+        <label class="field">사용할 표시 이름</label>
+        <input class="input" value="Borin" />
+        <div class="tiny" style="color:#ff9a9a; margin:-8px 0 12px">※ 이미 사용 중인 이름입니다</div>
+        <button class="btn primary block">방 참가</button>
+      </div>
+      <div class="modal-wrap">
+        <div class="modal warn"><h4>방을 찾을 수 없음</h4>
+          <p>잘못된 링크이거나 세션이 더 이상 존재하지 않습니다.</p>
+          <button class="btn ghost">확인</button></div>
+        <div class="modal danger"><h4>방이 가득 참</h4>
+          <p>이 방에는 이미 6명의 플레이어가 있습니다.</p>
+          <button class="btn ghost">확인</button></div>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- ===== 3 ===== -->
+  <div id="s3" class="screen-label"><span class="num">3</span> 시나리오 선택 <span class="reqs">R3.1, 3.3, 3.4, 3.5</span></div>
+  <div class="gl">
+    <div class="top"><span class="brand">⚔ ready-gm</span><span class="room">· 메아리의 선술집</span><span class="spacer"></span>
+      <span class="live"><span class="dot"></span>Live</span></div>
+    <div class="body">
+      <div class="card">
+        <h3>시나리오 선택 <span class="muted" style="font-size:12px">(호스트만 선택 · 그 외 미리보기)</span></h3>
+        <div class="scenario">
+          <div class="radio"><span class="inner"></span></div>
+          <div><div class="title">햇빛 없는 지하묘지 <span class="badge-default">기본</span></div>
+            <div class="desc">2–6인용 원샷 던전 탐험. 예상 플레이 2시간.</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>시나리오 요약 <span class="muted" style="font-size:12px">(모든 플레이어에게 표시)</span></h3>
+        <p class="muted" style="margin:0">마을의 아이들이 예배당 아래 오래된 지하묘지로 사라졌다. 마지막으로 목격된 곳은...</p>
+      </div>
+      <button class="btn primary">시나리오 확정</button>
+      <div class="note">시나리오가 하나뿐이면 기본 선택(R3.4), 여러 개면 호스트가 명시적으로 선택해야 시작 가능(R3.5).</div>
+    </div>
+  </div>
+
+  <!-- ===== 4 ===== -->
+  <div id="s4" class="screen-label"><span class="num">4</span> AI 보조 캐릭터 생성 <span class="reqs">R4.1–4.6</span></div>
+  <div class="gl">
+    <div class="top"><span class="brand">⚔ ready-gm</span><span class="room">· 메아리의 선술집</span><span class="spacer"></span>
+      <span class="live"><span class="dot"></span>Live</span></div>
+    <div class="body">
+      <div class="session-grid" style="grid-template-columns:1fr 1fr">
+        <div class="card">
+          <h3>캐릭터 정보</h3>
+          <label class="field">이름</label>
+          <input class="input" value="Borin Stonefist" />
+          <label class="field">컨셉 / 설명</label>
+          <textarea class="textarea">잃어버린 견습생을 찾아 헤매는 노련한 드워프 대장장이</textarea>
+          <button class="btn gm block">AI에게 제안 요청</button>
+        </div>
+        <div class="card">
+          <h3>AI가 제안한 능력치 <span class="muted" style="font-size:12px">(EZFudge)</span></h3>
+          <div class="attr-grid">
+            <span class="attr-name">힘 (Might)</span><span class="attr-val">Great +2</span>
+            <span class="attr-name">민첩 (Agility)</span><span class="attr-val">Fair 0</span>
+            <span class="attr-name">기지 (Wits)</span><span class="attr-val">Good +1</span>
+            <span class="attr-name">정신 (Spirit)</span><span class="attr-val">Fair 0</span>
+          </div>
+          <div class="row" style="margin-top:16px">
+            <button class="btn secondary">수정</button>
+            <button class="btn ghost">AI 다시 제안</button>
+          </div>
+        </div>
+      </div>
+      <div class="setup-strip">
+        <span class="setup-pill"><span class="ready-dot ready"></span>Aria · 완료</span>
+        <span class="setup-pill"><span class="ready-dot"></span>Borin · 작성 중</span>
+        <span class="setup-pill"><span class="ready-dot"></span>Cara · 작성 중</span>
+      </div>
+      <button class="btn primary block">캐릭터 확정 (능력치 잠금)</button>
+    </div>
+  </div>
+
+  <!-- ===== 5 ===== -->
+  <div id="s5" class="screen-label"><span class="num">5</span> 로비 & 시작 <span class="reqs">R1.5, 4.7, 5.1, 5.2</span></div>
+  <div class="gl">
+    <div class="top"><span class="brand">⚔ ready-gm</span><span class="room">· 메아리의 선술집</span><span class="spacer"></span>
+      <span class="live"><span class="dot"></span>Live</span></div>
+    <div class="body">
+      <div class="row between" style="margin-bottom:16px">
+        <h3 style="margin:0">로비</h3>
+        <div class="link-field" style="max-width:360px">
+          <input class="input" value="https://ready-gm/r/AB12CD34" readonly />
+          <button class="btn secondary">복사</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>파티 (3/6)</h3>
+        <div class="chip"><span class="avatar">A</span><span class="crown">👑</span>Aria<span class="spacer"></span><span class="tag ready">✔ 캐릭터 완료</span></div>
+        <div class="chip"><span class="avatar">B</span>Borin<span class="spacer"></span><span class="tag ready">✔ 캐릭터 완료</span></div>
+        <div class="chip"><span class="avatar">C</span>Cara<span class="spacer"></span><span class="tag">… 캐릭터 작성 중</span></div>
+        <div class="empty-seat">빈 자리</div>
+        <div class="empty-seat">빈 자리</div>
+        <div class="empty-seat">빈 자리</div>
+      </div>
+      <div class="card"><div class="muted">시나리오: <strong style="color:#fff">햇빛 없는 지하묘지</strong></div></div>
+      <button class="btn primary disabled">세션 시작 (Cara의 캐릭터 대기 중)</button>
+      <div class="note">모든 플레이어가 캐릭터를 확정해야 시작 버튼 활성화(R4.7/R5.1). 비호스트는 "호스트가 시작하기를 기다리는 중…".</div>
+    </div>
+  </div>
+
+  <!-- ===== 6 ===== -->
+  <div id="s6" class="screen-label"><span class="num">6</span> 세션 진행 (핵심 화면) <span class="reqs">R6–R11, R13</span></div>
+  <div class="gl">
+    <div class="top"><span class="brand">⚔ ready-gm</span><span class="room">· 메아리의 선술집</span>
+      <span class="phase-badge">Round 3 · Free-Chat</span><span class="spacer"></span>
+      <span class="live"><span class="dot"></span>Live</span></div>
+    <div class="body">
+      <div class="session-grid">
+        <div class="stack">
+          <div class="card">
+            <h5>GM 내레이션</h5>
+            <div class="narration"><div class="who">[GM]</div>
+              <p>횃불이 깜빡이며 통로 끝의 문이 서서히 모습을 드러낸다. 차가운 공기가 너희의 목덜미를 스친다...</p></div>
+            <div class="dice-card"><span class="die">🎲</span>
+              <div><div>Borin · 힘(Might) · Hard</div><div class="meta">Roll +2</div></div>
+              <span class="outcome success">SUCCESS</span></div>
+          </div>
+          <div class="card">
+            <h5>자유 대화</h5>
+            <div class="chat-line"><span class="name">Borin:</span> 문을 천천히 밀어본다.</div>
+            <div class="chat-line"><span class="name">Aria:</span> 내가 뒤를 살필게.</div>
+            <div class="chat-input"><input class="input" placeholder="메시지 입력..." /><button class="btn primary">전송</button></div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="card">
+            <h5>파티 & 준비 상태</h5>
+            <div class="readiness-row"><span class="crown">👑</span>Aria<span class="spacer"></span><span class="tag ready">확정</span></div>
+            <div class="readiness-row"><span class="ready-dot"></span>Borin<span class="spacer"></span><span class="tag">대기</span></div>
+            <div class="readiness-row"><span class="ready-dot ready"></span>Cara<span class="spacer"></span><span class="tag pass">패스</span></div>
+            <div class="readiness-row"><span class="ready-dot ready"></span>Dane<span class="spacer"></span><span class="tag auto">⏱ 자동패스</span></div>
+          </div>
+          <div class="card">
+            <h5>준비 체크 타이머</h5>
+            <div class="timer"><div class="ring"><span class="t">01:12</span></div><span class="tiny">시간 종료 시 자동 패스</span></div>
+          </div>
+          <div class="card">
+            <h5>호스트 컨트롤</h5>
+            <button class="btn danger block">강제 진행</button>
+            <div class="note">기다리지 않고 라운드 진행 (호스트 전용)</div>
+          </div>
+        </div>
+      </div>
+      <div class="actionbar">
+        <span class="phase-badge">행동</span>
+        <input class="input" placeholder="확정할 행동 입력..." />
+        <button class="btn primary">확정</button>
+        <button class="btn secondary">패스</button>
+        <button class="btn ghost">수정</button>
+      </div>
+      <div style="margin-top:16px">
+        <div class="toast">⏱ Dane님의 행동이 자동 패스되었습니다.</div>
+        <div class="toast" style="border-left-color:#8fc2ff">호스트가 라운드를 진행시켰습니다.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 7 ===== -->
+  <div id="s7" class="screen-label"><span class="num">7</span> 엔딩 & 세션 요약 <span class="reqs">R15.1, 15.2, 15.5–15.7</span></div>
+  <div class="gl narrow">
+    <div class="top"><span class="brand">⚔ ready-gm</span><span class="room">· 메아리의 선술집</span><span class="spacer"></span>
+      <span class="muted" style="font-size:12px">라운드 종료</span></div>
+    <div class="body">
+      <div class="big-title">THE END</div>
+      <div class="card"><h3 style="color:#ffd9a8">맺음 내레이션</h3>
+        <div class="narration"><div class="who">[GM]</div>
+          <p>아이들은 무사히 구출되었고, 마을은 다시 평온을 되찾았다. 너희의 이름은 오래도록 전해질 것이다...</p></div></div>
+      <div class="card"><h3>세션 요약</h3>
+        <ul class="summary-list">
+          <li>일행은 지하 묘지로 내려갔다</li>
+          <li>보린이 함정을 발견했다 (Success)</li>
+          <li>최종 결전에서 그림자 군주를 물리쳤다</li>
+        </ul>
+        <button class="btn secondary" style="margin-top:14px">요약 복사</button></div>
+      <div class="ended-banner">세션이 종료되었습니다. 새 라운드를 시작할 수 없습니다.</div>
+    </div>
+  </div>
+
+</body>
+</html>
