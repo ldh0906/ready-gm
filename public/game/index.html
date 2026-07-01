@@ -1,0 +1,1204 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm — 게임 플레이</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 15px/1.65 system-ui, "Malgun Gothic", sans-serif;
+    background: #0f1115;
+    color: #e7e9ee;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---- 헤더: 연결 상태 · 라운드 · 단계 · 준비 · 카운트다운 · busy ---- */
+  header {
+    padding: 10px 16px;
+    background: #171a21;
+    border-bottom: 1px solid #262b36;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    flex: 0 0 auto;
+  }
+  header strong { font-size: 15px; }
+  header .badge {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #222836;
+    color: #9fb0c8;
+  }
+  header .conn {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #222836;
+    color: #9fb0c8;
+  }
+  header .conn.active { color: #7fd1b9; }
+  .meta {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    font-size: 13px;
+    color: #9fb0c8;
+  }
+  .pill { padding: 2px 8px; border-radius: 999px; background: #222836; }
+  .countdown { color: #f0c040; }
+  .spinner { color: #f0c040; }
+
+  /* ---- 진행 시계 (Progress Clocks) — 노출 시나리오에서만 표시 ---- */
+  .clocks-bar {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 8px 16px;
+    background: #141822;
+    border-bottom: 1px solid #262b36;
+  }
+  .clock { display: flex; align-items: center; gap: 8px; }
+  .clock-label { font-size: 12px; color: #c4ccda; white-space: nowrap; }
+  .clock-gauge { display: inline-flex; gap: 3px; }
+  .clock-gauge .seg {
+    width: 12px; height: 12px; border-radius: 3px;
+    background: #2b3242; border: 1px solid #3a4255;
+  }
+  .clock-gauge .seg.on {
+    background: #f0a93f; border-color: #f0c040;
+    box-shadow: 0 0 6px rgba(240, 169, 63, .5);
+  }
+  .clock.full .clock-label { color: #ef8b8b; font-weight: 700; }
+  .clock.full .clock-gauge .seg.on {
+    background: #ef6b8b; border-color: #ef8b8b;
+    box-shadow: 0 0 6px rgba(239, 107, 107, .6);
+  }
+
+  /* ---- 인계 무효 안내 ---- */
+  .notice-bar {
+    color: #ef8b8b;
+    font-size: 14px;
+    background: #2a1b1f;
+    border-bottom: 1px solid #5a2b33;
+    padding: 10px 16px;
+    flex: 0 0 auto;
+  }
+
+  /* ---- 2분할 본문: GM 서사(좌) + 채팅·행동 로그(우) ---- */
+  #app { flex: 1 1 auto; display: flex; min-height: 0; }
+  .story {
+    flex: 2 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #262b36;
+  }
+  .sidebar {
+    flex: 1 1 0;
+    min-width: 280px;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    background: #12151d;
+  }
+  .paneHead {
+    padding: 8px 14px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: #8b98ac;
+    border-bottom: 1px solid #262b36;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+  .scroll { flex: 1 1 auto; overflow: auto; padding: 14px; min-height: 0; }
+
+  .gm {
+    background: #1b2330;
+    border-left: 3px solid #5b8def;
+    padding: 12px 14px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+    white-space: pre-wrap;
+  }
+  .gm.opening { border-left-color: #9b6bef; }
+  .gm.closing { border-left-color: #ef6b8b; }
+  .gm .who { display: block; font-size: 12px; color: #9fb0c8; margin-bottom: 4px; }
+
+  .li {
+    padding: 7px 10px;
+    border-radius: 8px;
+    margin-bottom: 6px;
+    white-space: pre-wrap;
+    font-size: 14px;
+  }
+  .li.chat { background: #1a1f29; }
+  .li.chat b { color: #7fd1b9; }
+  .li.chat .chat-handle { color: #9fb0c8; font-size: 12px; margin-left: 2px; }
+  .li.act { background: #1d2233; border-left: 3px solid #f0a93f; }
+  .li.pass { background: #1a1f29; color: #9fb0c8; }
+  .li.sys { color: #8b98ac; font-size: 13px; }
+
+  /* ---- 입력 푸터 ---- */
+  footer {
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    border-top: 1px solid #262b36;
+    background: #12151d;
+  }
+  #controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, button { font: inherit; }
+  #msg {
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 8px 10px;
+    flex: 1;
+    min-width: 180px;
+  }
+  button {
+    background: #2f6df0;
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  button.secondary { background: #2b3242; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #sendBtn { background: #f0a93f; color: #241a00; font-weight: 700; }
+
+  /* 전달 실패 / 세션 종료 안내 영역 */
+  .notice {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #f0c040;
+  }
+  .notice.ended { color: #7fd1b9; }
+
+  /* ---- 멀티플레이 표시 계층: 단계/차례 · 본인 상태 · 로스터 (multiplayer-game-ux) ---- */
+  .roster-panel {
+    flex: 0 0 auto;
+    background: #141822;
+    border-bottom: 1px solid #262b36;
+    padding: 8px 16px;
+  }
+  .roster-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #c4ccda;
+  }
+  .turn-indicator .phase-label { color: #9fb0c8; margin-right: 8px; }
+  .turn-indicator .turn-detail { color: #7fd1b9; }
+  .self-status { margin-left: auto; color: #f0c040; }
+  .roster {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .roster-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: #1a1f29;
+    border: 1px solid #262b36;
+    font-size: 13px;
+    flex: 0 1 auto;
+    overflow-wrap: anywhere;
+  }
+  .roster-row.self { border-color: #2f6df0; background: #19223a; }
+  .roster-row .r-name { font-weight: 700; color: #e7e9ee; min-width: 0; word-break: break-word; }
+  .roster-row .r-self {
+    font-size: 11px; padding: 1px 6px; border-radius: 999px;
+    background: #2f6df0; color: #fff;
+  }
+  .roster-row .r-conn,
+  .roster-row .r-ready,
+  .roster-row .r-acted {
+    font-size: 11px; padding: 1px 6px; border-radius: 999px;
+    background: #222836; color: #9fb0c8; white-space: nowrap;
+  }
+  .roster-row .r-conn.connected { color: #7fd1b9; }
+  .roster-row .r-conn.disconnected { color: #ef8b8b; }
+  .roster-row .r-ready.on { color: #7fd1b9; }
+  .roster-row .r-acted.on { color: #f0a93f; }
+
+  /* 어두운 배경과 구분되는 보이는 포커스 표시 (로스터 상호작용 요소 포함, 요구사항 8.4) */
+  a:focus-visible,
+  input:focus-visible,
+  button:focus-visible,
+  .roster-row:focus-visible {
+    outline: 3px solid #f0c040;
+    outline-offset: 2px;
+  }
+
+  /* ---- 주사위 패널 (in-session 다이스 롤러) ---- */
+  .dice-panel {
+    flex: 0 0 auto;
+    border-top: 1px solid #262b36;
+    background: #12151d;
+    padding: 8px 14px 10px;
+  }
+  .dice-panel summary {
+    cursor: pointer;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: #8b98ac;
+    list-style: none;
+    user-select: none;
+  }
+  .dice-panel summary::-webkit-details-marker { display: none; }
+  .dice-panel summary::before { content: "🎲 "; }
+  .dice-controls { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; align-items: center; }
+  .dice-controls button { padding: 6px 10px; font-size: 13px; }
+  .dice-controls .die-btn { background: #2b3242; }
+  .dice-controls .seq-btn { background: #3a2b5a; }
+  #diceTray {
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end;
+    min-height: 0; padding: 4px 2px 18px;
+  }
+  #diceTray:empty { display: none; }
+  #diceResult { font-size: 13px; color: #c4ccda; min-height: 0; }
+  #diceResult b { color: #7fd1b9; }
+
+  .dice-die {
+    --size: 64px; --c1: #2f6df0; --c2: #1b3a8f;
+    position: relative; width: var(--size); height: var(--size);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 800;
+    background: linear-gradient(155deg, var(--c1), var(--c2));
+    box-shadow: 0 6px 14px rgba(0,0,0,.45), inset 0 2px 5px rgba(255,255,255,.18);
+  }
+  .dice-die .dice-face { font-size: calc(var(--size) * .42); line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,.5); }
+  .dice-die .dice-type { position: absolute; top: 3px; left: 0; right: 0; text-align: center; font-size: 10px; font-weight: 700; color: rgba(255,255,255,.78); }
+  .dice-die .dice-label { position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 11px; color: #9fb0c8; }
+  .dice-die[data-sides="4"]  { --c1:#ef6b8b; --c2:#9b2b46; clip-path: polygon(50% 4%, 96% 96%, 4% 96%); }
+  .dice-die[data-sides="4"] .dice-face { transform: translateY(18%); font-size: calc(var(--size) * .34); }
+  .dice-die[data-sides="6"]  { --c1:#5b8def; --c2:#1b3a8f; border-radius: 12px; }
+  .dice-die[data-sides="8"]  { --c1:#3fcaa8; --c2:#176b57; clip-path: polygon(50% 2%, 98% 50%, 50% 98%, 2% 50%); }
+  .dice-die[data-sides="10"] { --c1:#f0a93f; --c2:#9a6410; clip-path: polygon(50% 2%, 90% 32%, 78% 96%, 22% 96%, 10% 32%); }
+  .dice-die[data-sides="12"] { --c1:#9b6bef; --c2:#532b9b; clip-path: polygon(50% 2%, 90% 22%, 98% 64%, 68% 98%, 32% 98%, 2% 64%, 10% 22%); }
+  .dice-die[data-sides="20"] { --c1:#f0c040; --c2:#9a7410; clip-path: polygon(50% 2%, 93% 25%, 93% 75%, 50% 98%, 7% 75%, 7% 25%); color:#241a00; }
+  .dice-die[data-sides="20"] .dice-type { color: rgba(0,0,0,.55); }
+  @keyframes diceShake {
+    0% { transform: translateY(0) rotate(0deg) scale(1); }
+    25% { transform: translateY(-8px) rotate(-18deg) scale(1.06); }
+    50% { transform: translateY(2px) rotate(14deg) scale(.97); }
+    75% { transform: translateY(-5px) rotate(-10deg) scale(1.03); }
+    100% { transform: translateY(0) rotate(0deg) scale(1); }
+  }
+  .dice-die.rolling { animation: diceShake .28s linear infinite; }
+  .dice-die.emphasis.rolling { animation-duration: .2s; }
+  .dice-die.emphasis { --size: 80px; }
+  @keyframes diceSettle { 0% { transform: scale(1.18); } 60% { transform: scale(.94); } 100% { transform: scale(1); } }
+  .dice-die.settled { animation: diceSettle .35s ease-out; }
+  .dice-die.crit { box-shadow: 0 0 0 3px #fff6cf, 0 0 20px 5px rgba(240,192,64,.85), 0 6px 14px rgba(0,0,0,.45); }
+  .dice-die.fumble { box-shadow: 0 0 0 3px #ffd0d0, 0 0 20px 5px rgba(239,107,107,.8), 0 6px 14px rgba(0,0,0,.45); filter: grayscale(.2); }
+  @media (prefers-reduced-motion: reduce) { .dice-die.rolling, .dice-die.settled { animation: none; } }
+
+  /* ---- 판정 결과 "운명" 주사위 바 (서버가 굴린 결과를 연출) ---- */
+  .check-bar {
+    flex: 0 0 auto;
+    border-top: 1px solid #262b36;
+    background: #12151d;
+    padding: 10px 14px;
+  }
+  .check-bar .paneHead { padding: 0 0 8px; border: 0; }
+  #checkTray { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; padding: 4px 2px 26px; overflow-x: auto; }
+  #checkTray:empty { display: none; padding: 0; }
+  .check-group { display: flex; flex-direction: column; gap: 6px; }
+  .check-group .check-who { font-size: 12px; font-weight: 700; color: #cdd8ea; white-space: nowrap; }
+  .check-group .caption { font-size: 11px; color: #9fb0c8; white-space: nowrap; }
+  .check-dice { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 24px; }
+  .roll-btn {
+    align-self: flex-start; padding: 8px 16px; border-radius: 10px; border: 1px solid #5b8def;
+    background: #1b3a8f; color: #fff; font-weight: 700; font-size: 13px; cursor: pointer;
+  }
+  .roll-btn:hover { background: #2b4aa0; }
+  .fate-die {
+    --size: 64px; --c1: #5b8def; --c2: #1b3a8f; position: relative; width: var(--size); height: var(--size);
+    display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 800; border-radius: 14px;
+    background: linear-gradient(155deg, var(--c1), var(--c2));
+    box-shadow: 0 6px 14px rgba(0,0,0,.45), inset 0 2px 5px rgba(255,255,255,.18);
+  }
+  .fate-die .fate-face { font-size: calc(var(--size) * .38); line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,.5); }
+  .fate-die .fate-type { position: absolute; top: 4px; left: 0; right: 0; text-align: center; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.78); }
+  .fate-die .fate-label { position: absolute; bottom: -22px; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 11px; color: #9fb0c8; }
+  .fate-die.rolling { animation: diceShake .22s linear infinite; }
+  .fate-die.settled { animation: diceSettle .35s ease-out; }
+  .fate-die.kept { outline: 3px solid #7fd1b9; outline-offset: 3px; }
+  .fate-die.dropped { opacity: .42; filter: grayscale(.6); }
+  @media (prefers-reduced-motion: reduce) { .fate-die.rolling, .fate-die.settled { animation: none; } }
+
+  [hidden] { display: none !important; }
+
+  /* 시각적으로 숨기되 스크린리더에는 노출되는 레이블 */
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* 320–767px: 두 패널을 세로 단일 열로 적층, 가로 스크롤 없음 */
+  @media (max-width: 767px) {
+    #app { flex-direction: column; }
+    .story { border-right: 0; border-bottom: 1px solid #262b36; }
+    .sidebar { min-width: 0; max-width: none; }
+    #controls button { flex: 1 1 auto; }
+    /* 로스터: 단일 열로 적층, 행은 전체 너비를 차지해 가로 스크롤이 없다 (요구사항 8.1) */
+    .roster { flex-direction: column; }
+    .roster-row { width: 100%; }
+    .roster-head { flex-direction: column; align-items: flex-start; }
+    .self-status { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <strong>ready-gm</strong>
+  <span class="badge">게임 · 플레이</span>
+  <span id="connStatus" class="conn" role="status" aria-live="polite">아직 연결되지 않았습니다.</span>
+  <span class="meta">
+    <span class="pill">라운드 <b id="round">-</b></span>
+    <span class="pill">단계 <b id="phase">-</b></span>
+    <span class="pill" id="ready">준비 -</span>
+    <span class="pill countdown" id="countdown" hidden></span>
+    <span class="spinner" id="busy" role="status" aria-live="polite" hidden></span>
+  </span>
+</header>
+
+<!-- 인계 무효 안내 (요구사항 1.4) -->
+<p id="handoffInvalid" class="notice-bar" role="alert" aria-live="assertive" hidden></p>
+
+<!-- 진행 시계 (Progress Clocks) — 노출 시나리오에서만 채워짐 -->
+<div id="clocks" class="clocks-bar" role="group" aria-live="polite" aria-label="진행 시계" hidden></div>
+
+<!-- 멀티플레이 표시 계층: 단계/차례 · 본인 상태 · 참가자 로스터 (multiplayer-game-ux) -->
+<!-- 갱신은 포커스를 이동시키지 않고 aria-live 라이브 영역으로 낭독된다 (요구사항 8.3) -->
+<section id="rosterPanel" class="roster-panel" aria-label="참가자 및 차례">
+  <div class="roster-head">
+    <span id="turnIndicator" class="turn-indicator" role="status" aria-live="polite" aria-label="현재 단계 및 차례"></span>
+    <span id="selfStatus" class="self-status" role="status" aria-live="polite" aria-label="본인 상태"></span>
+  </div>
+  <ul id="roster" class="roster" role="list" aria-live="polite" aria-label="참가자 로스터"></ul>
+</section>
+
+<!-- 2분할 본문 (요구사항 3.x, 4.x) -->
+<div id="app">
+  <section class="story" aria-label="GM 서사">
+    <div class="paneHead">GM 서사</div>
+    <div id="story" class="scroll" role="log" aria-live="polite" aria-label="GM 서사 로그"></div>
+  </section>
+  <aside class="sidebar" aria-label="채팅 및 행동 로그">
+    <div class="paneHead">채팅 · 행동 로그</div>
+    <div id="side" class="scroll" role="log" aria-live="polite" aria-label="채팅 및 행동 로그"></div>
+  </aside>
+</div>
+
+<!-- 주사위 패널: 세션 중 직접 굴리는 다이스 롤러 (d4~d20, 순차 굴림) -->
+<details class="dice-panel" id="dicePanel">
+  <summary>주사위</summary>
+  <div class="dice-controls" role="group" aria-label="주사위 굴리기">
+    <button class="die-btn" data-sides="4" type="button" aria-label="d4 굴리기">d4</button>
+    <button class="die-btn" data-sides="6" type="button" aria-label="d6 굴리기">d6</button>
+    <button class="die-btn" data-sides="8" type="button" aria-label="d8 굴리기">d8</button>
+    <button class="die-btn" data-sides="10" type="button" aria-label="d10 굴리기">d10</button>
+    <button class="die-btn" data-sides="12" type="button" aria-label="d12 굴리기">d12</button>
+    <button class="die-btn" data-sides="20" type="button" aria-label="d20 굴리기">d20</button>
+    <button class="seq-btn" id="diceCritBtn" type="button" aria-label="중요 판정 굴리기">중요 판정</button>
+    <button class="seq-btn secondary" id="diceClearBtn" type="button" aria-label="주사위 지우기">지우기</button>
+  </div>
+  <div id="diceTray" aria-live="polite" aria-label="주사위 트레이"></div>
+  <p id="diceResult" role="status" aria-live="polite"></p>
+</details>
+
+<!-- 판정 결과 "운명" 주사위 바: 서버가 굴린 이번 라운드 판정을 연출 (visibility=player만) -->
+<div id="checkBar" class="check-bar" hidden>
+  <div class="paneHead">판정</div>
+  <div id="checkTray" aria-live="polite" aria-label="판정 주사위 트레이"></div>
+</div>
+
+<!-- 입력 푸터 (요구사항 6.x) -->
+<footer>
+  <div id="controls">
+    <label for="msg" class="visually-hidden">행동 또는 대사 입력</label>
+    <input id="msg" type="text" placeholder='행동을 적고, 대사는 따옴표로… (예: 문을 열며 "누구 있어요?")' aria-label="행동 또는 대사 입력" />
+    <button id="sendBtn" type="button" aria-label="보내기">보내기</button>
+    <button id="passBtn" class="secondary" type="button" aria-label="패스">패스</button>
+    <button id="reviseBtn" class="secondary" type="button" aria-label="행동 수정">수정</button>
+  </div>
+  <!-- 전달 실패 / 세션 종료 안내 라이브 영역 (요구사항 8.2, 9.3) -->
+  <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+</footer>
+
+<script type="module">
+  import {
+    Phase,
+    ConnectionStatus,
+    MAX_ENTRIES,
+    HANDOFF_INVALID_MESSAGE,
+    DISCONNECTED_MESSAGE,
+    CONNECTION_LOST_MESSAGE,
+    DELIVERY_FAILED_MESSAGE,
+    SESSION_ENDED_MESSAGE,
+    createInitialState,
+    parseHandoff,
+    buildConnectParams,
+    effectivePlayerId,
+    eventToAction,
+    esc,
+    computeCountdownMs,
+    buildChatCommand,
+    buildConfirmCommand,
+    buildPassCommand,
+    buildReviseCommand,
+    reduce,
+    computeVisibility,
+    describeClock,
+    rosterModel,
+    actionLogModel,
+    currentPhaseModel,
+    readyTally,
+    selfStatus,
+    actionPermission,
+  } from "./logic.js";
+
+  const $ = (id) => document.getElementById(id);
+
+  // ---- 고정 간격 재연결 / 카운트다운 주기 (room-lobby와 동형) ------------
+  const RECONNECT_INTERVAL_MS = 3000;
+  const COUNTDOWN_INTERVAL_MS = 1000;
+
+  // ---- DOM 참조 -----------------------------------------------------------
+  const connStatusEl = $("connStatus");
+  const roundEl = $("round");
+  const phaseEl = $("phase");
+  const readyEl = $("ready");
+  const countdownEl = $("countdown");
+  const busyEl = $("busy");
+  const handoffInvalidEl = $("handoffInvalid");
+  const clocksEl = $("clocks");
+  const storyEl = $("story");
+  const sideEl = $("side");
+  const msgEl = $("msg");
+  const sendBtn = $("sendBtn");
+  const passBtn = $("passBtn");
+  const reviseBtn = $("reviseBtn");
+  const noticeEl = $("notice");
+  const checkBar = $("checkBar");
+  const checkTray = $("checkTray");
+  // 멀티플레이 표시 계층 DOM 참조 (multiplayer-game-ux)
+  const turnIndicatorEl = $("turnIndicator");
+  const selfStatusEl = $("selfStatus");
+  const rosterEl = $("roster");
+
+  // 단계 한국어 레이블 (단계/차례 표시용)
+  const PHASE_LABELS = {
+    free_chat: "자유 대화",
+    ready_check: "준비 체크",
+    resolving: "판정 중",
+    ended: "종료",
+  };
+
+  // ---- 주입 가능한 부수효과 어댑터 (테스트가 load 이전에 교체 가능) -------
+  // window.__gameConnect : connect(roomId, token, handlers) WebSocket 어댑터
+  //                        (room-lobby의 window.__lobbyConnect와 동형)
+  // window.__gameNow      : Date.now 대체(카운트다운 테스트용, 선택)
+  // window.__gameSetInterval / __gameClearInterval : 타이머 주입(선택)
+  const now = () => (window.__gameNow ? window.__gameNow() : Date.now());
+  const setIntervalImpl = (fn, ms) =>
+    (window.__gameSetInterval || window.setInterval).call(window, fn, ms);
+  const clearIntervalImpl = (id) =>
+    (window.__gameClearInterval || window.clearInterval).call(window, id);
+
+  // ---- 상태: 단일 진실 원천 ----------------------------------------------
+  // 인계는 URL 쿼리에서 1회 읽는다. 토큰은 buildConnectParams가 연결 쿼리로
+  // 전달하며, 그 외 인증은 없다(MVP, ws 연결 티켓 간극 가정).
+  const handoff = parseHandoff(location.search);
+  let state = createInitialState(handoff);
+  // 관전자(본인) 식별자: playerId(캐릭터 화면 인계) 우선, 없으면 hostPlayerId(로비 호스트 인계).
+  // /ws URL에 실어 서버가 룸 소속 플레이어로 소켓을 귀속하게 한다(아니면 호스트로 폴백).
+  const viewerPlayerId = effectivePlayerId(state.handoff);
+  let channel = null;
+  let countdownTimer = null;
+
+  // 단방향 흐름: dispatch → reduce → render. render는 상태의 순수 함수다.
+  function dispatch(action) {
+    state = reduce(state, action);
+    render();
+  }
+
+  // ---- 렌더 (상태의 함수) -------------------------------------------------
+  // 서사·사이드바는 상태 배열을 그대로 다시 그린 뒤 MAX_ENTRIES 상한을 적용한다.
+  function render() {
+    const v = computeVisibility(state);
+
+    // 인계 무효 안내 (요구사항 1.4)
+    handoffInvalidEl.hidden = v.handoffValid;
+    if (!v.handoffValid) handoffInvalidEl.textContent = HANDOFF_INVALID_MESSAGE;
+
+    // 연결 상태 표시 (요구사항 2.4, 2.5, 8.1)
+    if (v.connectionActive) {
+      connStatusEl.textContent = "실시간 연결됨";
+      connStatusEl.classList.add("active");
+    } else {
+      connStatusEl.classList.remove("active");
+      // 인계가 유효한데 끊긴 상태면 연결 끊김 안내, 아직 한 번도 연결 전이면 대기 안내.
+      if (!v.handoffValid) {
+        connStatusEl.textContent = HANDOFF_INVALID_MESSAGE;
+      } else if (state.connection === ConnectionStatus.DISCONNECTED && state.turnReceived) {
+        connStatusEl.textContent = CONNECTION_LOST_MESSAGE;
+      } else {
+        connStatusEl.textContent = DISCONNECTED_MESSAGE;
+      }
+    }
+
+    // 헤더: 라운드 / 단계 (요구사항 5.1)
+    roundEl.textContent = state.roundNumber != null ? state.roundNumber : "-";
+    phaseEl.textContent = state.phase != null ? state.phase : "-";
+
+    // 헤더: 준비 X/total (요구사항 5.2, 5.3)
+    readyEl.textContent = `준비 ${v.ready.ready}/${v.ready.total}`;
+
+    // 헤더: busy 표시 (요구사항 5.5)
+    busyEl.hidden = !v.busy;
+    if (v.busy) busyEl.textContent = "⏳ GM이 판정/서술 중…";
+
+    // 헤더: 카운트다운 — ready_check일 때만, 잔여 초 표시 (요구사항 5.4)
+    const ms = computeCountdownMs(state.readyCheckDeadline, now());
+    if (state.phase === Phase.READY_CHECK && ms != null) {
+      countdownEl.hidden = false;
+      countdownEl.textContent = `남은 시간 ${Math.ceil(ms / 1000)}초`;
+    } else {
+      countdownEl.hidden = true;
+      countdownEl.textContent = "";
+    }
+
+    // GM 서사 패널 (요구사항 3.1, 3.3, 3.4) — esc로 이스케이프, 상한 적용, 하단 스크롤
+    renderStory();
+
+    // 진행 시계 게이지 — 노출 시나리오에서만(payload에 clocks가 실릴 때) 표시
+    renderClocks();
+
+    // 채팅 + 행동 로그 사이드바 (요구사항 4.2, 4.3, 6.2, 6.3) — 상한 적용, 하단 스크롤
+    renderSide();
+
+    // 멀티플레이 표시 계층: 단계/차례 · 본인 상태 · 로스터 (multiplayer-game-ux)
+    // 기존 단방향 흐름(turn_state/readiness_updated 수신 → reduce → render)에 편승해
+    // readiness/phase/activePlayerId/turnOrder/채팅 스냅샷에서 결정적으로 재도출한다.
+    renderMultiplayer();
+
+    // 전달 실패 / 세션 종료 안내 (요구사항 8.2, 9.3)
+    if (v.ended) {
+      noticeEl.hidden = false;
+      noticeEl.classList.add("ended");
+      noticeEl.textContent = SESSION_ENDED_MESSAGE;
+    } else if (state.deliveryFailedNotice) {
+      noticeEl.hidden = false;
+      noticeEl.classList.remove("ended");
+      noticeEl.textContent = DELIVERY_FAILED_MESSAGE;
+    } else {
+      noticeEl.hidden = true;
+      noticeEl.classList.remove("ended");
+      noticeEl.textContent = "";
+    }
+
+    // 입력 컨트롤 비활성 (요구사항 1.4, 7.1, 9.2)
+    const disabled = v.inputDisabled;
+    msgEl.disabled = disabled;
+    sendBtn.disabled = disabled;
+    passBtn.disabled = disabled;
+    reviseBtn.disabled = disabled;
+  }
+
+  // 상태의 narrationEntries를 통째로 다시 그린다(<= MAX_ENTRIES이므로 비용 안전).
+  function renderStory() {
+    const frag = document.createDocumentFragment();
+    for (const entry of state.narrationEntries) {
+      const div = document.createElement("div");
+      div.className = "gm " + (entry.kind || "");
+      const label = entry.kind || "narration";
+      div.innerHTML =
+        `<span class="who">[GM · ${esc(label)}]</span>` + esc(entry.text);
+      frag.appendChild(div);
+    }
+    storyEl.replaceChildren(frag);
+    // DOM 상한(방어적): 상태가 이미 상한을 지키지만 동일 정책을 DOM에도 적용.
+    while (storyEl.childElementCount > MAX_ENTRIES) storyEl.removeChild(storyEl.firstChild);
+    storyEl.scrollTop = storyEl.scrollHeight;
+  }
+
+  // 진행 시계 게이지를 그린다. state.clocks(노출 시나리오의 narration payload로 갱신)가
+  // 비어 있으면 영역을 숨긴다. describeClock으로 값/최대치를 안전하게 정규화한다.
+  function renderClocks() {
+    const clocks = Array.isArray(state.clocks) ? state.clocks : [];
+    if (clocks.length === 0) {
+      clocksEl.hidden = true;
+      clocksEl.replaceChildren();
+      return;
+    }
+    clocksEl.hidden = false;
+    const frag = document.createDocumentFragment();
+    for (const raw of clocks) {
+      const c = describeClock(raw);
+      const wrap = document.createElement("div");
+      wrap.className = "clock" + (c.max > 0 && c.value >= c.max ? " full" : "");
+
+      const label = document.createElement("span");
+      label.className = "clock-label";
+      label.textContent = `${c.name} ${c.value}/${c.max}`;
+
+      const gauge = document.createElement("span");
+      gauge.className = "clock-gauge";
+      gauge.setAttribute("role", "img");
+      gauge.setAttribute("aria-label", `${c.name} ${c.value}/${c.max}`);
+      for (let i = 0; i < c.max; i++) {
+        const seg = document.createElement("span");
+        seg.className = i < c.value ? "seg on" : "seg";
+        gauge.appendChild(seg);
+      }
+
+      wrap.appendChild(label);
+      wrap.appendChild(gauge);
+      frag.appendChild(wrap);
+    }
+    clocksEl.replaceChildren(frag);
+  }
+
+  // 채팅(서버 권위)과 본인 행동 로그(로컬 에코)를 한 사이드바에 그린다.
+  function renderSide() {
+    const frag = document.createDocumentFragment();
+    for (const c of state.chatEntries) {
+      const div = document.createElement("div");
+      div.className = "li chat";
+      const cn = esc(c.characterName);
+      const dn = c.displayName;
+      if (typeof dn === "string" && dn.trim().length > 0 && dn !== c.characterName) {
+        // 캐릭터 이름 + 방 합류 표시 이름: "알렉스(라면)" 형태로 귀속한다.
+        div.innerHTML = `<b>${cn}</b><span class="chat-handle">(${esc(dn)})</span>: ${esc(c.text)}`;
+      } else {
+        div.innerHTML = `<b>${cn}</b>: ${esc(c.text)}`;
+      }
+      frag.appendChild(div);
+    }
+    for (const a of actionLogModel(turnStateView())) {
+      const div = document.createElement("div");
+      // 캐릭터이름(방입장이름) 형식. 합류 이름이 없거나 캐릭터명과 같으면 이름만.
+      const dn = typeof a.displayName === "string" ? a.displayName.trim() : "";
+      const nameText = dn && dn !== a.characterName ? `${a.characterName}(${dn})` : a.characterName;
+      if (a.kind === "confirm") {
+        div.className = "li act";
+        div.innerHTML = `🗡 <b>${esc(nameText)}</b> 행동 확정: ${esc(a.text)}`;
+      } else {
+        div.className = "li pass";
+        div.textContent = `${nameText} — ${a.auto ? "자동 패스" : "패스"}`;
+      }
+      frag.appendChild(div);
+    }
+    sideEl.replaceChildren(frag);
+    while (sideEl.childElementCount > MAX_ENTRIES) sideEl.removeChild(sideEl.firstChild);
+    sideEl.scrollTop = sideEl.scrollHeight;
+  }
+
+  // ---- 멀티플레이 파생 입력 (turn_state 형태 뷰) --------------------------
+  // 셀렉터는 turnState({ readiness, chatLog, phase, activePlayerId, turnOrder })를 받는다.
+  // reducer state는 채팅을 chatEntries로 보관하므로(동일 모양 { playerId, characterName, ... })
+  // chatLog로 매핑해 characterNameFor 폴백이 동작하게 한다.
+  function turnStateView() {
+    return {
+      readiness: state.readiness,
+      chatLog: state.chatEntries,
+      phase: state.phase,
+      activePlayerId: state.activePlayerId,
+      turnOrder: state.turnOrder,
+    };
+  }
+
+  // 멀티플레이 표시: 단계/차례 · 본인 상태 · 로스터를 결정적으로 재도출해 그린다.
+  function renderMultiplayer() {
+    const ts = turnStateView();
+    const roster = rosterModel(ts, viewerPlayerId);
+    const phaseModel = currentPhaseModel(ts, viewerPlayerId);
+    const self = selfStatus(state.readiness, viewerPlayerId);
+    renderTurnIndicator(phaseModel, roster);
+    renderSelfStatusView(self);
+    renderRoster(roster, phaseModel);
+  }
+
+  // 단계/차례 표시: 현재 단계 + (턴 기반) 활성 플레이어/순서 또는 (단계 기반) 행동 가능 (요구사항 2.1~2.5)
+  function renderTurnIndicator(phaseModel, roster) {
+    const nameOf = new Map(roster.map((r) => [r.playerId, r.characterName]));
+    const phaseLabel =
+      phaseModel.phase != null ? PHASE_LABELS[phaseModel.phase] || phaseModel.phase : "-";
+    let detail;
+    if (phaseModel.isTurnBased && phaseModel.activePlayerId) {
+      const activeName = nameOf.get(phaseModel.activePlayerId) || phaseModel.activePlayerId;
+      detail = `차례: ${activeName}`;
+      if (phaseModel.turnOrder.length > 0) {
+        const orderNames = phaseModel.turnOrder.map((id) => nameOf.get(id) || id);
+        detail += ` · 순서: ${orderNames.join(" → ")}`;
+      }
+    } else if (phaseModel.actablePlayerIds.length > 0) {
+      const actableNames = phaseModel.actablePlayerIds.map((id) => nameOf.get(id) || id);
+      detail = `행동 가능: ${actableNames.join(", ")}`;
+    } else {
+      detail = "행동 가능한 플레이어 없음";
+    }
+    turnIndicatorEl.innerHTML =
+      `<span class="phase-label">단계: ${esc(phaseLabel)}</span>` +
+      `<span class="turn-detail">${esc(detail)}</span>`;
+  }
+
+  // 본인 상태 표시: 준비/행동완료/관전 (요구사항 6.4)
+  function renderSelfStatusView(self) {
+    let text;
+    if (self.spectator) {
+      text = "관전 중";
+    } else {
+      const readyText = self.status === "ready" ? "준비 완료" : "준비 안 됨";
+      const actedText = self.hasActed ? "행동 완료" : "행동 대기";
+      text = `${readyText} · ${actedText}`;
+    }
+    // textContent는 자동 이스케이프되므로 별도 esc 불필요.
+    selfStatusEl.textContent = `본인: ${text}`;
+  }
+
+  // 로스터 패널: readiness당 한 행(캐릭터명 esc · 연결 배지 · 준비 · 행동완료 · 본인) (요구사항 1.3, 1.4, 4.2, 5.2)
+  function renderRoster(roster, phaseModel) {
+    const actable = new Set(phaseModel.actablePlayerIds);
+    const frag = document.createDocumentFragment();
+    for (const r of roster) {
+      const li = document.createElement("li");
+      li.className = "roster-row" + (r.isSelf ? " self" : "");
+      // 키보드 포커스 가능(요구사항 8.4의 보이는 포커스 표시 대상).
+      li.tabIndex = 0;
+      const connLabel =
+        r.connectionStatus === "connected"
+          ? "연결됨"
+          : r.connectionStatus === "disconnected"
+            ? "연결 끊김"
+            : "연결 상태 미상";
+      const readyLabel = r.status === "ready" ? "준비 완료" : "준비 안 됨";
+      const actedLabel = r.hasActed ? "행동 완료" : actable.has(r.playerId) ? "행동 가능" : "대기";
+      // 표시 이름: 캐릭터이름(방입장이름). 합류 이름이 있고 캐릭터명과 다르면 괄호로 덧붙인다.
+      const joinName =
+        typeof r.displayName === "string" && r.displayName.trim().length > 0 ? r.displayName.trim() : "";
+      const nameText =
+        joinName && joinName !== r.characterName ? `${r.characterName}(${joinName})` : r.characterName;
+      // 비어 있지 않은 접근성 레이블(요구사항 8.2). setAttribute는 HTML로 해석되지 않는다.
+      li.setAttribute(
+        "aria-label",
+        `${nameText}${r.isSelf ? " (나)" : ""}, ${connLabel}, ${readyLabel}, ${actedLabel}`,
+      );
+      // 시각 배지는 aria-hidden으로 중복 낭독을 막고, 이름은 esc로 이스케이프한다(요구사항 1.3).
+      li.innerHTML =
+        `<span class="r-name">${esc(nameText)}</span>` +
+        (r.isSelf ? `<span class="r-self" aria-hidden="true">나</span>` : "") +
+        `<span class="r-conn ${esc(r.connectionStatus)}" aria-hidden="true">${esc(connLabel)}</span>` +
+        `<span class="r-ready ${r.status === "ready" ? "on" : ""}" aria-hidden="true">${esc(readyLabel)}</span>` +
+        `<span class="r-acted ${r.hasActed ? "on" : ""}" aria-hidden="true">${esc(actedLabel)}</span>`;
+      frag.appendChild(li);
+    }
+    rosterEl.replaceChildren(frag);
+  }
+
+  // ---- 부수효과: 실시간 채널 (주입 가능한 connect 어댑터 + 재연결) --------
+  // 기본 어댑터: /ws 경로로 WebSocket을 열고 onmessage JSON을 eventToAction으로
+  // 환원한다. buildConnectParams(roomId, token, viewerPlayerId, ticket).query로 roomId·(있으면)token·
+  // (있으면)playerId·(있으면)ticket를 전달. (auth-hardening: /ws는 ticket으로만 신원 도출)
+  // 계약: connect(roomId, token, { onOpen, onMessage, onClose }) -> { send, close }
+  function defaultConnect(roomId, token, handlers) {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const { query } = buildConnectParams(roomId, token, viewerPlayerId, handoff.ticket);
+    const ws = new WebSocket(`${proto}://${location.host}/ws?${query}`);
+    ws.onopen = () => handlers.onOpen();
+    ws.onmessage = (ev) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      handlers.onMessage(parsed);
+    };
+    ws.onclose = () => handlers.onClose();
+    return {
+      send: (obj) => ws.send(JSON.stringify(obj)),
+      close: () => ws.close(),
+    };
+  }
+
+  const connect = window.__gameConnect || defaultConnect;
+
+  function openChannel() {
+    channel = connect(state.handoff.roomId, state.handoff.token, {
+      onOpen: () => dispatch(eventToAction({ type: "connection-open" })),
+      onMessage: (parsed) => {
+        const action = eventToAction(parsed);
+        if (action) dispatch(action);
+        // 서버가 굴린 이번 라운드 판정을 "운명" 주사위로 연출(visibility=player만).
+        // 결과는 resolution 내레이션 payload의 checks로 전달된다.
+        if (parsed && parsed.type === "narration" && parsed.narration) {
+          maybeAnimateChecks(parsed.narration.checks);
+        }
+      },
+      onClose: () => {
+        dispatch(eventToAction({ type: "connection-lost" }));
+        scheduleReconnect();
+      },
+    });
+  }
+
+  function scheduleReconnect() {
+    // 종료된 세션은 재연결하지 않는다(요구사항 9.4).
+    if (state.ended) return;
+    setTimeout(() => {
+      if (!state.ended) openChannel();
+    }, RECONNECT_INTERVAL_MS);
+  }
+
+  // ---- 카운트다운 타이머 (1초 간격 재렌더) (요구사항 5.4) ----------------
+  function startCountdownTimer() {
+    if (countdownTimer != null) return;
+    countdownTimer = setIntervalImpl(() => {
+      // 세션 종료 시 타이머를 멈춘다.
+      if (state.ended) {
+        stopCountdownTimer();
+        return;
+      }
+      render();
+    }, COUNTDOWN_INTERVAL_MS);
+  }
+
+  function stopCountdownTimer() {
+    if (countdownTimer != null) {
+      clearIntervalImpl(countdownTimer);
+      countdownTimer = null;
+    }
+  }
+
+  // ---- 명령 전송 가드 ------------------------------------------------------
+  // 입력 잠금/종료/미연결이면 전송하지 않고 로컬 에코도 dispatch 하지 않는다
+  // (요구사항 7.3, 8.4).
+  function canSend() {
+    return !computeVisibility(state).inputDisabled && state.connection === ConnectionStatus.OPEN;
+  }
+
+  // 단계별 행동 제출 권한(actionPermission)을 현재 상태에서 도출한다.
+  // canSend()(입력 잠금·연결 가드)와 AND로 결합해 명령별로 게이팅한다(요구사항 3.2, 3.4).
+  function permission() {
+    return actionPermission(
+      {
+        phase: state.phase,
+        readiness: state.readiness,
+        activePlayerId: state.activePlayerId,
+      },
+      viewerPlayerId,
+    );
+  }
+
+  function sendCommand(cmd) {
+    try {
+      if (channel) channel.send(cmd);
+    } catch {
+      /* 전송 실패는 서버 delivery_failed로 표면화된다. */
+    }
+  }
+
+  // ---- 사용자 동작 배선 ---------------------------------------------------
+  // 입력 해석: 따옴표(" " 또는 “ ”) 안은 대사(채팅), 나머지는 행동(확정)으로 보낸다.
+  function parseUtterance(text) {
+    const quoteRe = /["“”]([^"“”]*)["“”]/g;
+    const says = [];
+    let m;
+    while ((m = quoteRe.exec(text)) !== null) {
+      const s = m[1].trim();
+      if (s) says.push(s);
+    }
+    const action = text.replace(quoteRe, " ").replace(/\s+/g, " ").trim();
+    return { says, action };
+  }
+
+  // 보내기: 대사("")는 채팅으로(서버가 echo), 행동은 확정으로 전송 + 본인 로컬 에코.
+  function submit() {
+    if (!canSend()) return;
+    const perm = permission();
+    const text = msgEl.value.trim();
+    if (!text) return;
+    const { says, action } = parseUtterance(text);
+    // 말하기: canChat이 허용할 때만 전송한다(요구사항 3.4).
+    for (const s of says) {
+      if (!perm.canChat) break;
+      const c = buildChatCommand(s);
+      if (c) sendCommand(c);
+    }
+    const confirmText = action || (says.length === 0 ? text : "");
+    // 행동 확정: canConfirm이 허용할 때만 전송 + 로컬 에코한다(불허면 둘 다 안 함, 요구사항 3.4).
+    if (confirmText && perm.canConfirm) {
+      const c = buildConfirmCommand(confirmText);
+      if (c) {
+        sendCommand(c);
+        dispatch({ type: "CONFIRM_ACTION", playerId: viewerPlayerId, action: c.action });
+      }
+    }
+    msgEl.value = "";
+  }
+
+  sendBtn.addEventListener("click", submit);
+
+  // 패스: 전송 + 본인 로컬 에코 (요구사항 6.3) — canPass 게이팅(요구사항 3.4)
+  passBtn.addEventListener("click", () => {
+    if (!canSend()) return;
+    if (!permission().canPass) return;
+    sendCommand(buildPassCommand());
+    dispatch({ type: "PASS", playerId: viewerPlayerId });
+  });
+
+  // 수정: 전송만(서버 readiness로 반영) (요구사항 6.4) — canRevise 게이팅(요구사항 3.4)
+  reviseBtn.addEventListener("click", () => {
+    if (!canSend()) return;
+    if (!permission().canRevise) return;
+    const cmd = buildReviseCommand(msgEl.value);
+    if (cmd) {
+      sendCommand(cmd);
+      msgEl.value = "";
+    }
+  });
+
+  // Enter 키로 보내기 (요구사항 11.3)
+  msgEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+
+  // ---- 판정 결과 "운명" 주사위 연출 (ai.html 포팅) -----------------------
+  const ATTR_LABELS = { Might: "힘", Agility: "민첩", Wits: "지혜", Spirit: "정신" };
+  const DIFF_LABELS = { Trivial: "사소", Easy: "쉬움", Average: "보통", Hard: "어려움", Formidable: "지난" };
+  const OUTCOME_LABELS = {
+    "Failure": "실패",
+    "Partial Success": "부분 성공",
+    "Success": "성공",
+    "Critical Success": "대성공",
+  };
+  const fsign = (n) => (n > 0 ? "+" + n : String(n));
+  const frand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+  // 관전자(본인)의 캐릭터 이름. readiness에 게이트웨이가 주입한 characterName을 쓴다.
+  // 본인이 굴려야 하는 판정을 가려내는 데 사용한다.
+  function viewerCharacterName() {
+    const list = Array.isArray(state.readiness) ? state.readiness : [];
+    const entry = list.find((r) => r && r.playerId === viewerPlayerId);
+    return entry && typeof entry.characterName === "string" ? entry.characterName : "";
+  }
+
+  // 판정 하나의 DOM을 만들고 주사위 연출을 수행하는 내부 실행기를 돌려준다.
+  // manual=true면 "굴리기" 버튼을 노출하고, 버튼을 눌러야 연출이 시작된다(본인 주사위).
+  function renderCheck(check, manual) {
+    const group = document.createElement("div");
+    group.className = "check-group";
+    // 누가 무슨 주사위를 굴리는지 상단에 표기한다.
+    const attrLabel = check.attributeLabel || ATTR_LABELS[check.attribute] || check.attribute;
+    const whoName = typeof check.characterName === "string" ? check.characterName.trim() : "";
+    const who = document.createElement("div");
+    who.className = "check-who";
+    who.textContent = whoName ? `${whoName} · ${attrLabel}` : attrLabel;
+    group.appendChild(who);
+    const dieRow = document.createElement("div");
+    dieRow.className = "check-dice";
+    group.appendChild(dieRow);
+    const caption = document.createElement("div");
+    caption.className = "caption";
+    group.appendChild(caption);
+    checkTray.appendChild(group);
+    while (checkTray.children.length > 12) checkTray.removeChild(checkTray.firstChild);
+
+    const advLabel =
+      check.advantage === "advantage" ? "유리(높은 합 채택)"
+      : check.advantage === "disadvantage" ? "불리(낮은 합 채택)" : "보통";
+    const rolls = Array.isArray(check.rolls) && check.rolls.length > 0 ? check.rolls : [check.roll];
+
+    // 실제 주사위 연출. 서버가 이미 결과를 확정했으므로 여기서는 표현만 한다.
+    const animate = () => {
+      const dice = rolls.map((_, i) => {
+        const die = document.createElement("div");
+        die.className = "fate-die rolling";
+        die.setAttribute("role", "img");
+        die.innerHTML =
+          `<span class="fate-type">${esc(attrLabel)}</span>` +
+          `<span class="fate-face">…</span>` +
+          `<span class="fate-label">${rolls.length === 2 ? (i + 1) + "차" : "판정"}</span>`;
+        dieRow.appendChild(die);
+        return die;
+      });
+      return new Promise((resolve) => {
+        const faces = dice.map((d) => d.querySelector(".fate-face"));
+        const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const stepMs = reduced ? 150 : 80;
+        const durationMs = reduced ? 540 : 1000;
+        const cycle = setInterval(() => {
+          faces.forEach((f) => { f.textContent = fsign(frand(-4, 4)); });
+        }, stepMs);
+        setTimeout(() => {
+          clearInterval(cycle);
+          dice.forEach((die, i) => {
+            die.classList.remove("rolling");
+            die.classList.add("settled");
+            faces[i].textContent = fsign(rolls[i]);
+            die.setAttribute("aria-label", `운명 주사위 ${fsign(rolls[i])}`);
+          });
+          if (rolls.length === 2) {
+            let keptIdx = rolls.findIndex((r) => r === check.roll);
+            if (keptIdx === -1) {
+              keptIdx = check.advantage === "advantage"
+                ? (rolls[0] >= rolls[1] ? 0 : 1)
+                : (rolls[0] <= rolls[1] ? 0 : 1);
+            }
+            dice.forEach((die, i) => die.classList.add(i === keptIdx ? "kept" : "dropped"));
+          }
+          const d = DIFF_LABELS[check.difficulty] || check.difficulty;
+          const o = OUTCOME_LABELS[check.outcome] || check.outcome;
+          const advText = check.advantage === "none" ? "" : ` · ${advLabel}`;
+          const prefix = whoName ? `${whoName} · ` : "";
+          caption.textContent = `${prefix}${attrLabel} · ${d}${advText} → ${o}`;
+          resolve();
+        }, durationMs);
+      });
+    };
+
+    if (!manual) return animate();
+    // 본인 주사위: 버튼을 눌러야 굴러간다.
+    return new Promise((resolve) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "roll-btn";
+      btn.textContent = "굴리기";
+      dieRow.appendChild(btn);
+      btn.addEventListener("click", () => {
+        btn.remove();
+        void animate().then(resolve);
+      }, { once: true });
+    });
+  }
+
+  async function revealChecks(checks) {
+    const myName = viewerCharacterName();
+    for (const check of checks) {
+      const manual =
+        myName.length > 0 &&
+        typeof check.characterName === "string" &&
+        check.characterName === myName;
+      await renderCheck(check, manual);
+    }
+  }
+
+  // resolution 내레이션이 실어 온 이번 라운드 판정을 연출한다. 서버가 이미
+  // visibility="player"만 골라 보내므로 그대로 쓰되, 같은 판정 재전송은 시그니처로 막는다.
+  let lastCheckSig = "";
+  function maybeAnimateChecks(checks) {
+    if (!Array.isArray(checks) || checks.length === 0) return;
+    const sig = JSON.stringify(
+      checks.map((c) => [c.characterName, c.attribute, c.difficulty, c.advantage, c.rolls, c.roll, c.outcome]),
+    );
+    if (sig === lastCheckSig) return;
+    lastCheckSig = sig;
+    checkBar.hidden = false;
+    checkTray.replaceChildren();
+    void revealChecks(checks);
+  }
+
+  // ---- 부팅 ---------------------------------------------------------------
+  render();
+  // 인계가 유효할 때만 채널을 연다(무효면 안내만 표시, 요구사항 1.3/1.4).
+  if (state.handoffValid) {
+    openChannel();
+    startCountdownTimer();
+  }
+</script>
+<script type="module">
+  // 주사위 패널 배선: 세션 중 직접 굴리는 다이스 롤러. 기존 게임 로직과 독립적인
+  // 별도 모듈로 두어 부수효과 계층(채널/리듀서) 테스트와 간섭하지 않는다.
+  import { createDiceTray } from "./dice-tray.js";
+
+  const trayEl = document.getElementById("diceTray");
+  const resultEl = document.getElementById("diceResult");
+  if (trayEl) {
+    const tray = createDiceTray(trayEl);
+    const diceButtons = Array.from(document.querySelectorAll(".dice-panel button"));
+
+    const setBusy = (busy) => {
+      for (const b of diceButtons) b.disabled = busy;
+    };
+    const summarize = (plans) => {
+      const parts = plans.map((p) => {
+        const tag =
+          p.criticality === "crit" ? " (대성공!)" : p.criticality === "fumble" ? " (대실패!)" : "";
+        return `${p.label ? p.label + " " : ""}d${p.sides} → ${p.result}${tag}`;
+      });
+      const total = plans.reduce((s, p) => s + p.result, 0);
+      resultEl.innerHTML =
+        `결과: ${parts.map((t) => `<b>${t}</b>`).join(" · ")}` +
+        (plans.length > 1 ? ` (합계 ${total})` : "");
+    };
+    const run = async (specs) => {
+      setBusy(true);
+      resultEl.textContent = "굴리는 중…";
+      try {
+        summarize(await tray.rollSequence(specs));
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    for (const b of document.querySelectorAll(".dice-panel .die-btn")) {
+      b.addEventListener("click", () => run([{ sides: Number(b.getAttribute("data-sides")) }]));
+    }
+    const critBtn = document.getElementById("diceCritBtn");
+    if (critBtn) {
+      critBtn.addEventListener("click", () =>
+        run([
+          { sides: 6, speed: "fast", label: "보너스" },
+          { sides: 20, speed: "slow", emphasis: true, label: "운명의 판정" },
+        ]),
+      );
+    }
+    const clearBtn = document.getElementById("diceClearBtn");
+    if (clearBtn) {
+      clearBtn.addEventListener("click", () => {
+        tray.clear();
+        resultEl.textContent = "";
+      });
+    }
+  }
+</script>
+</body>
+</html>

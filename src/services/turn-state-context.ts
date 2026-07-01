@@ -16,7 +16,7 @@
  *
  * Requirements: 10.2, 12.4, 12.5, 16.3.
  */
-import type { ActionKind, AttributeKey, AttributeLevel } from "../core/types.js";
+import type { ActionKind, AttributeLevel } from "../core/types.js";
 import type {
   CheckRecord,
   NarrativeContextEntry,
@@ -34,13 +34,25 @@ export interface ContextScenario {
   summary: string;
   openingSeed: string;
   endingCondition: string;
+  /**
+   * Optional per-scenario GM rules/tone overlay (see
+   * {@link import("./scenario-service.js").Scenario.rulesBrief}). Injected into
+   * the AI GM prompts on top of the universal EZFudge resolution.
+   */
+  rulesBrief?: string;
 }
 
 /** A single character as the AI GM sees it (no engine-internal ids). */
 export interface ContextCharacter {
   name: string;
   concept: string;
-  attributes: Record<AttributeKey, AttributeLevel>;
+  /**
+   * The character's attribute map, keyed by whatever attribute system the
+   * scenario uses (EZFudge Might/Agility/Wits/Spirit, or custom keys like
+   * Sneaky/Fast/Tenacious). Kept as an open string-keyed record so custom-stat
+   * scenarios flow through unchanged.
+   */
+  attributes: Record<string, AttributeLevel>;
 }
 
 /** One active player's pending action for the current round. */
@@ -136,6 +148,9 @@ export function toContext(
       summary: scenario.summary,
       openingSeed: scenario.openingSeed,
       endingCondition: scenario.endingCondition,
+      // Carry the per-scenario rules overlay through ONLY when present, so
+      // scenarios without one introduce no key (exactOptionalPropertyTypes).
+      ...(scenario.rulesBrief !== undefined ? { rulesBrief: scenario.rulesBrief } : {}),
     },
     characters: characters.map((character) => ({
       name: character.name,

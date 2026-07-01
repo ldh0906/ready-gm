@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { TurnState } from "../core/turn-state.js";
 import type { Connection, ServerEvent } from "./connection.js";
 import { RealtimeGateway } from "./gateway.js";
@@ -261,5 +261,88 @@ describe("RealtimeGateway — heartbeat re-establishment (R13.3, R13.4)", () => 
     expect(stale.closed).toBe(true);
     expect(gw.connectionCount("room-1")).toBe(1);
     expect(responsive.pingCount).toBe(2);
+  });
+});
+
+describe("RealtimeGateway — reconnect dedup (S8)", () => {
+  it("drops a stale connection when the same player reconnects", () => {
+    const gw = new RealtimeGateway({ getTurnState: () => undefined });
+    const first = new FakeConnection("c1", "room-1", "p1");
+    gw.connect(first);
+
+    const second = new FakeConnection("c2", "room-1", "p1");
+    gw.connect(second);
+
+    // The stale socket is closed and only the fresh one remains registered.
+    expect(first.closed).toBe(true);
+    expect(gw.connectionCount("room-1")).toBe(1);
+
+    // Broadcasts reach only the live connection, not the dead one.
+    gw.broadcast("room-1", {
+      type: "narration",
+      roomId: "room-1",
+      narration: { kind: "opening", roundNumber: 1, text: "x" },
+    });
+    expect(second.ofType("narration")).toHaveLength(1);
+    expect(first.ofType("narration")).toHaveLength(0);
+  });
+
+  it("keeps distinct players in the room on connect", () => {
+    const gw = new RealtimeGateway({ getTurnState: () => undefined });
+    gw.connect(new FakeConnection("c1", "room-1", "p1"));
+    gw.connect(new FakeConnection("c2", "room-1", "p2"));
+    expect(gw.connectionCount("room-1")).toBe(2);
+  });
+});
+
+describe("RealtimeGateway — startHeartbeat (S4)", () => {
+  it("schedules periodic sweeps that reap a non-responsive connection", () => {
+    vi.useFakeTimers();
+    try {
+      const gw = new RealtimeGateway({ getTurnState: () => undefined });
+      const conn = new FakeConnection("c1", "room-1", "p1");
+      gw.connect(conn);
+      const stop = gw.startHeartbeat(1000);
+
+      vi.advanceTimersByTime(1000); // sweep 1: probe (alive -> false)
+      expect(conn.pingCount).toBe(1);
+      expect(conn.closed).toBe(false);
+
+      vi.advanceTimersByTime(1000); // sweep 2: no pong since -> reap
+      expect(conn.closed).toBe(true);
+      expect(gw.connectionCount("room-1")).toBe(0);
+
+      stop();
+      const pingsBefore = conn.pingCount;
+      vi.advanceTimersByTime(5000); // disposed: no further sweeps
+      expect(conn.pingCount).toBe(pingsBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a responsive connection alive across sweeps", () => {
+    vi.useFakeTimers();
+    try {
+      const gw = new RealtimeGateway({ getTurnState: () => undefined });
+      const conn = new FakeConnection("c1", "room-1", "p1");
+      gw.connect(conn);
+      const stop = gw.startHeartbeat(1000);
+
+      vi.advanceTimersByTime(1000); // probe
+      conn.receivePong(); // client answers -> alive again
+      vi.advanceTimersByTime(1000); // still alive -> probed, not reaped
+      expect(conn.closed).toBe(false);
+      expect(gw.connectionCount("room-1")).toBe(1);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a non-positive interval", () => {
+    const gw = new RealtimeGateway({ getTurnState: () => undefined });
+    expect(() => gw.startHeartbeat(0)).toThrow(RangeError);
+    expect(() => gw.startHeartbeat(-100)).toThrow(RangeError);
   });
 });

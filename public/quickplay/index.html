@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TRPG Session Engine — 로컬 플레이테스트</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin:0; font:15px/1.65 system-ui,"Malgun Gothic",sans-serif; background:#0f1115; color:#e7e9ee; display:flex; flex-direction:column; }
+  header { padding:10px 16px; background:#171a21; border-bottom:1px solid #262b36; display:flex; gap:10px; align-items:center; flex:0 0 auto; }
+  header .badge { font-size:12px; padding:2px 8px; border-radius:999px; background:#222836; color:#9fb0c8; }
+  .meta { margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; font-size:13px; color:#9fb0c8; }
+  .pill { padding:2px 8px; border-radius:999px; background:#222836; }
+  .spinner { color:#f0c040; }
+
+  #setup { max-width:760px; margin:18px auto; background:#161922; border:1px solid #262b36; border-radius:10px; padding:16px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  input, button { font:inherit; }
+  input[type=text]{ background:#0f1320; color:#e7e9ee; border:1px solid #2b3242; border-radius:8px; padding:8px 10px; flex:1; min-width:180px; }
+  button { background:#2f6df0; color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer; }
+  button.secondary { background:#2b3242; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .sys { color:#8b98ac; font-size:13px; }
+
+  /* Two-pane game layout: story (main) + side log (scrollable bar). */
+  #app { flex:1 1 auto; display:none; min-height:0; }
+  #app.live { display:flex; }
+  .story { flex:2 1 0; min-width:0; display:flex; flex-direction:column; border-right:1px solid #262b36; }
+  .sidebar { flex:1 1 0; min-width:280px; max-width:420px; display:flex; flex-direction:column; background:#12151d; }
+  .paneHead { padding:8px 14px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:#8b98ac; border-bottom:1px solid #262b36; display:flex; align-items:center; gap:8px; }
+  .scroll { flex:1 1 auto; overflow:auto; padding:14px; min-height:0; }
+
+  .gm { background:#1b2330; border-left:3px solid #5b8def; padding:12px 14px; border-radius:8px; margin-bottom:10px; white-space:pre-wrap; }
+  .gm.opening { border-left-color:#9b6bef; }
+  .gm.closing { border-left-color:#ef6b8b; }
+  .gm .who { display:block; font-size:12px; color:#9fb0c8; margin-bottom:4px; }
+
+  .li { padding:7px 10px; border-radius:8px; margin-bottom:6px; white-space:pre-wrap; font-size:14px; }
+  .li.chat { background:#1a1f29; }
+  .li.chat b { color:#7fd1b9; }
+  .li.chat .chat-handle { color:#9fb0c8; font-size:12px; margin-left:2px; }
+  .li.act  { background:#1d2233; border-left:3px solid #f0a93f; }
+  .li.pass { background:#1a1f29; color:#9fb0c8; }
+  .li.sys  { color:#8b98ac; font-size:13px; }
+
+  footer { flex:0 0 auto; padding:10px 14px; border-top:1px solid #262b36; background:#12151d; }
+  #controls { display:none; gap:8px; }
+  #controls.live { display:flex; }
+  #msg { }
+</style>
+</head>
+<body>
+<header>
+  <strong>TRPG Session Engine</strong>
+  <span class="badge">로컬 · GM=Codex</span>
+  <span id="conn" class="badge">연결 안 됨</span>
+  <span class="meta">
+    <span class="pill">라운드 <b id="round">-</b></span>
+    <span class="pill">단계 <b id="phase">-</b></span>
+    <span class="pill" id="ready">준비 -</span>
+    <span class="spinner" id="busy"></span>
+  </span>
+</header>
+
+<section id="setup">
+  <div class="row">
+    <input id="name" type="text" placeholder="캐릭터 이름" value="보린" />
+    <input id="concept" type="text" placeholder="컨셉" value="험상궂은 드워프 전사" />
+    <button id="start">시작</button>
+  </div>
+  <p class="sys">시작하면 방이 만들어지고 GM이 오프닝을 생성해요(수십 초 소요).</p>
+</section>
+
+<div id="app">
+  <div class="story">
+    <div class="paneHead">GM 서사</div>
+    <div id="story" class="scroll"></div>
+  </div>
+  <aside class="sidebar">
+    <div class="paneHead">채팅 · 행동 로그</div>
+    <div id="side" class="scroll"></div>
+  </aside>
+</div>
+
+<footer>
+  <div id="controls" class="row">
+    <input id="msg" type="text" placeholder="자유 대화 또는 하려는 행동…" />
+    <button id="chat" class="secondary">말하기</button>
+    <button id="confirm">행동 확정</button>
+    <button id="pass" class="secondary">패스</button>
+  </div>
+</footer>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const MAX_ENTRIES = 250; // cap DOM growth so logs never grow unbounded
+  // Shared secret for a token-protected (publicly-bound) server; empty for a
+  // local-only instance. Read from the page URL (?token=...) so the operator
+  // can hand out a single link without embedding the secret in the source.
+  const TOKEN = new URLSearchParams(location.search).get("token") || "";
+  let ws=null, roomId=null, playerId=null, ticket=null, myName="";
+
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+  function append(paneId, cls, html) {
+    const pane = $(paneId);
+    const d = document.createElement("div");
+    d.className = (paneId === "story" ? "gm " : "li ") + cls;
+    d.innerHTML = html;
+    pane.appendChild(d);
+    while (pane.childElementCount > MAX_ENTRIES) pane.removeChild(pane.firstChild);
+    pane.scrollTop = pane.scrollHeight;
+  }
+  const story = (cls, who, text) => append("story", cls, `<span class="who">[GM · ${esc(who)}]</span>` + esc(text));
+  const side  = (cls, html) => append("side", cls, html);
+
+  $("start").onclick = async () => {
+    $("start").disabled = true;
+    myName = $("name").value.trim() || "모험가";
+    side("sys", "방 생성 + 세션 시작 중…");
+    const res = await fetch("/play/new", {
+      method:"POST",
+      headers: TOKEN
+        ? { "content-type":"application/json", "x-playtest-token": TOKEN }
+        : { "content-type":"application/json" },
+      body: JSON.stringify({ displayName: myName, concept: $("concept").value }),
+    });
+    const data = await res.json();
+    roomId = data.roomId; playerId = data.playerId; ticket = data.connectionToken;
+    $("setup").style.display = "none";
+    $("app").classList.add("live");
+    $("controls").classList.add("live");
+    side("sys", `시나리오: ${esc(data.scenario.title)}`);
+    connect();
+  };
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const auth = TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : "";
+    // Authenticate the socket with the server-issued connection ticket; the
+    // server derives our room/player identity from it (never from these params).
+    ws = new WebSocket(`${proto}://${location.host}/ws?ticket=${encodeURIComponent(ticket)}${auth}`);
+    ws.onopen  = () => $("conn").textContent = "연결됨";
+    ws.onclose = () => $("conn").textContent = "연결 끊김";
+    ws.onmessage = (ev) => {
+      let e; try { e = JSON.parse(ev.data); } catch { return; }
+      if (e.type === "turn_state") renderState(e.state);
+      else if (e.type === "narration") story(e.narration.kind || "", e.narration.kind, e.narration.text);
+      else if (e.type === "delivery_failed") side("sys", "전송 실패, 재시도 중…");
+    };
+  }
+
+  let chatCount = 0;
+  function renderState(s) {
+    $("round").textContent = s.roundNumber;
+    $("phase").textContent = s.phase;
+    const total = s.readiness.length, ready = s.readiness.filter(r => r.status==="ready").length;
+    $("ready").textContent = `준비 ${ready}/${total}`;
+    $("busy").textContent = s.phase === "resolving" ? "⏳ GM이 판정/서술 중…" : "";
+
+    // Authoritative chat from the server (resets each round); render only new ones.
+    if (s.chatLog.length < chatCount) chatCount = 0;
+    for (let i=chatCount; i<s.chatLog.length; i++) {
+      const c = s.chatLog[i];
+      const cn = esc(c.characterName);
+      const dn = c.displayName;
+      if (typeof dn === "string" && dn.trim().length > 0 && dn !== c.characterName) {
+        side("chat", `<b>${cn}</b><span class="chat-handle">(${esc(dn)})</span>: ${esc(c.text)}`);
+      } else {
+        side("chat", `<b>${cn}</b>: ${esc(c.text)}`);
+      }
+    }
+    chatCount = s.chatLog.length;
+
+    const locked = s.phase === "resolving" || s.phase === "ended";
+    for (const id of ["chat","confirm","pass","msg"]) $(id).disabled = locked;
+    if (s.phase === "ended" && !renderState._ended) { renderState._ended = true; side("sys", "세션 종료."); }
+  }
+
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+  $("chat").onclick = () => { const t=$("msg").value.trim(); if(t){ send({type:"chat",text:t}); $("msg").value=""; } };
+  // Local-echo confirmed actions / passes so the player's own moves are visible
+  // (they live in readiness, not the chat log, so the server never echoes them).
+  $("confirm").onclick = () => { const t=$("msg").value.trim(); if(t){ send({type:"confirm",action:t}); side("act", `🗡 <b>${esc(myName)}</b> 행동 확정: ${esc(t)}`); $("msg").value=""; } };
+  $("pass").onclick = () => { send({type:"pass"}); side("pass", `${esc(myName)} — 패스`); };
+  $("msg").addEventListener("keydown", (e) => { if (e.key === "Enter") $("chat").click(); });
+</script>
+</body>
+</html>

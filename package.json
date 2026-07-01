@@ -14,7 +14,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:migrate": "tsc -p tsconfig.json && node dist/persistence/migrate.js",
-    "gm:demo": "tsc -p tsconfig.json && chcp 65001>nul && node scripts/try-codex-gm.mjs"
+    "gm:demo": "tsc -p tsconfig.json && chcp 65001>nul && node scripts/try-codex-gm.mjs",
+    "build:server": "tsc -p tsconfig.json",
+    "play": "tsc -p tsconfig.json && chcp 65001>nul && node dist/server.js",
+    "start": "node dist/server.js"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -26,6 +29,7 @@
     "@typescript-eslint/parser": "^8.18.0",
     "eslint": "^9.17.0",
     "fast-check": "^3.23.1",
+    "happy-dom": "15.11.7",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },

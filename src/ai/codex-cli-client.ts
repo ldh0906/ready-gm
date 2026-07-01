@@ -122,6 +122,10 @@ export class CodexCliAiGmClient implements AiGmClient {
 
     const args = [
       "exec",
+      // Skip loading the user's config.toml — this avoids spawning their MCP
+      // servers for per-call health checks (a major latency source) and ignores
+      // their high reasoning-effort default. Auth still resolves via CODEX_HOME.
+      "--ignore-user-config",
       "-m",
       model,
       "-c",

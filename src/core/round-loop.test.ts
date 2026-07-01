@@ -33,6 +33,9 @@ const sampleCheck: CheckRecord = {
   difficulty: "Average",
   roll: 1,
   outcome: "Success",
+  advantage: "none",
+  rolls: [1],
+  visibility: "player",
 };
 
 describe("START_SESSION (Task 7.1, R5.4)", () => {

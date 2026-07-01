@@ -57,6 +57,12 @@ export interface Character {
   attributes: Record<AttributeKey, AttributeLevel>;
   /** Locks attributes against revision when true (Requirement 4.4). */
   confirmed: boolean;
+  /**
+   * The Card_Id of the Selected_Card on a Card_Based_Sheet, preserved across
+   * record/confirm so it round-trips with the character
+   * (scenario-character-cards Requirements 6.1, 8.3). Absent on non-card sheets.
+   */
+  selectedCardId?: string;
 }
 
 /**

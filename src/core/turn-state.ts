@@ -14,7 +14,6 @@
  */
 import type {
   ActionKind,
-  AttributeKey,
   DifficultyGrade,
   OutcomeGrade,
   Phase,
@@ -34,6 +33,15 @@ export interface ReadinessEntry {
   actionKind: ActionKind;
   /** The confirmed action content, or `null` for pass/auto-pass/unset. */
   actionText: string | null;
+  /**
+   * The player's character name, for `characterName(displayName)` roster
+   * display. Display-only: injected by the realtime fan-out (gateway decorator)
+   * from room/character data and NOT part of the canonical persisted Turn_State,
+   * so the round-loop/serializer never read or write it.
+   */
+  characterName?: string;
+  /** The player's room join display name, paired with {@link characterName} for the roster. */
+  displayName?: string;
 }
 
 /** A single in-round chat message, attributed to the sender's character (R6.3, R6.4). */
@@ -43,6 +51,11 @@ export interface ChatEntry {
   text: string;
   /** ISO timestamp string; ordering is by array position (send order). */
   ts: string;
+  /**
+   * The sender's room join display name, for `characterName(displayName)`
+   * attribution; optional/absent on legacy entries.
+   */
+  displayName?: string;
 }
 
 /**
@@ -51,11 +64,39 @@ export interface ChatEntry {
  */
 export interface CheckRecord {
   characterId: string;
-  attribute: AttributeKey;
+  /**
+   * The attribute the check was resolved against — any key the acting character
+   * actually has (EZFudge Might/Agility/Wits/Spirit, or a custom-stat scenario's
+   * own keys). Kept as a free string so non-EZFudge scenarios resolve too.
+   */
+  attribute: string;
   difficulty: DifficultyGrade;
-  /** Server-side dice result (R11.2). */
+  /** The CHOSEN server-side dice total (R11.2). For an advantage/disadvantage
+   * check this is the higher/lower of the two rolls in {@link CheckRecord.rolls};
+   * for `"none"` it equals `rolls[0]`. Existing consumers keep reading `roll`. */
   roll: number;
   outcome: OutcomeGrade;
+  /**
+   * The advantage mode the check was resolved under (mirrors D&D 5e adv/disadv).
+   * The union is inlined here (rather than importing `RollAdvantage` from
+   * `./ezfudge.js`) to keep this pure-data module dependency-free. Defaults to
+   * `"none"` when a legacy record is deserialized without it.
+   */
+  advantage: "none" | "advantage" | "disadvantage";
+  /**
+   * The individual EZFudge totals the engine considered for this check: length 1
+   * for `"none"`, length 2 for advantage/disadvantage. The chosen total is
+   * surfaced as {@link CheckRecord.roll}. Defaults to `[roll]` for legacy records.
+   */
+  rolls: number[];
+  /**
+   * Whether the check was a public PLAYER check (the player actively attempted
+   * something and rolls openly) or a hidden GM roll (a trap, a passive sense
+   * against an ambush, a fate/event roll). The engine resolves both server-side;
+   * only `"player"` checks are surfaced to the client. Defaults to `"player"`
+   * when a legacy record is deserialized without it.
+   */
+  visibility: "player" | "gm";
 }
 
 /** A recent narrative memory entry (resolution/opening narration), newest last (R12.2, R12.5). */
@@ -138,6 +179,9 @@ function toPlain(state: TurnState): TurnState {
       characterName: entry.characterName,
       text: entry.text,
       ts: entry.ts,
+      // Carry the room display name through ONLY when present so entries
+      // without it serialize/deserialize unchanged (no extraneous key).
+      ...(entry.displayName !== undefined ? { displayName: entry.displayName } : {}),
     })),
     checks: state.checks.map((entry) => ({
       characterId: entry.characterId,
@@ -145,6 +189,16 @@ function toPlain(state: TurnState): TurnState {
       difficulty: entry.difficulty,
       roll: entry.roll,
       outcome: entry.outcome,
+      // Tolerate legacy records lacking the advantage fields: default to a
+      // single-roll "none" check so old persisted Turn_State JSON round-trips.
+      advantage: entry.advantage ?? "none",
+      rolls:
+        Array.isArray(entry.rolls) && entry.rolls.length > 0
+          ? entry.rolls.map((n) => n)
+          : [entry.roll],
+      // Tolerate legacy records lacking visibility: default to a public player
+      // check so existing persisted Turn_State JSON round-trips unchanged.
+      visibility: entry.visibility ?? "player",
     })),
     narrativeContext: state.narrativeContext.map((entry) => ({
       round: entry.round,

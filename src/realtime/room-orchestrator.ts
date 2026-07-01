@@ -44,8 +44,13 @@ import type { TurnState } from "../core/turn-state.js";
 import type { EngineConfig } from "../core/types.js";
 import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
 import type { TurnStateStore } from "../services/turn-state-store.js";
+import type { ClockStore } from "../services/clock-store.js";
+import { seedClocksForScenario, areClocksVisible } from "../services/scenario-clocks.js";
+import type { SceneStore } from "../services/scene-store.js";
+import { seedSceneForScenario } from "../services/scenario-scenes.js";
 import type { Character, Player, Room } from "../services/types.js";
 import type { Scenario } from "../services/scenario-service.js";
+import { sheetSchemaForScenario } from "../services/sheet-schema.js";
 import {
   toContext,
   type TurnStateContext,
@@ -142,6 +147,20 @@ export interface RoomOrchestratorDeps {
   scenarioResolver: ScenarioResolver;
   /** Durable Session_Summary persistence (Requirement 15.3). */
   sessionSummaryRepository: SessionSummaryRepository;
+  /**
+   * Optional per-room Progress Clock store. When present, the orchestrator seeds
+   * the scenario's static clocks at session start, supplies them to each round
+   * resolution, and persists the engine-applied result. When omitted, rounds
+   * resolve with no clocks (the prior behaviour).
+   */
+  clockStore?: ClockStore;
+  /**
+   * Optional per-room Scene State store. When present, the orchestrator seeds
+   * the scenario's opening scene at session start, supplies it to each round
+   * resolution for grounding, and persists the engine-applied result (revealed
+   * clues). When omitted, rounds resolve with no scene grounding.
+   */
+  sceneStore?: SceneStore;
   /** Best-effort QA event sink; defaults to no emission. */
   eventSink?: EventSink;
   /** Engine config (ready-check timeout, resolution token budget). */
@@ -150,6 +169,20 @@ export interface RoomOrchestratorDeps {
   now?: () => Date;
   /** Deterministic envelope generators for QA events (tests). */
   generators?: EnvelopeGenerators;
+  /**
+   * Schedule a one-shot timer (default `setTimeout`, unref'd so it never keeps
+   * the process alive). Injectable so tests can drive the ready-check countdown
+   * deterministically. Returns an opaque handle passed to {@link cancelTimer}.
+   */
+  scheduleTimer?: (fn: () => void, ms: number) => unknown;
+  /** Cancel a timer scheduled by {@link scheduleTimer} (default `clearTimeout`). */
+  cancelTimer?: (handle: unknown) => void;
+  /**
+   * Optional best-effort flow logger for session tracing (phase transitions,
+   * resolution start/outcome, narration delivery, timeout/force/revert). No-op
+   * when omitted; never affects game flow.
+   */
+  log?: (category: string, data?: Record<string, unknown>) => void;
 }
 
 /**
@@ -163,6 +196,8 @@ export class RoomOrchestrator {
   private readonly roomReader: RoomReader;
   private readonly scenarioResolver: ScenarioResolver;
   private readonly sessionSummaryRepository: SessionSummaryRepository;
+  private readonly clockStore: ClockStore | undefined;
+  private readonly sceneStore: SceneStore | undefined;
   private readonly eventSink: EventSink | undefined;
   private readonly config: EngineConfig;
   private readonly now: () => Date;
@@ -174,6 +209,12 @@ export class RoomOrchestrator {
   private readonly pending = new Set<Promise<unknown>>();
   /** `${roomId}:${roundNo}` → ISO timestamp the round entered resolving (all-ready). */
   private readonly allReadyAt = new Map<string, string>();
+  /** roomId → in-flight ready-check countdown handle (auto-pass unready on expiry). */
+  private readonly readyCheckTimers = new Map<string, unknown>();
+  private readonly scheduleTimer: (fn: () => void, ms: number) => unknown;
+  private readonly cancelTimer: (handle: unknown) => void;
+  /** Best-effort flow logger for session tracing (no-op when not provided). */
+  private readonly log: (category: string, data?: Record<string, unknown>) => void;
 
   constructor(deps: RoomOrchestratorDeps) {
     this.store = deps.store;
@@ -182,10 +223,25 @@ export class RoomOrchestrator {
     this.roomReader = deps.roomReader;
     this.scenarioResolver = deps.scenarioResolver;
     this.sessionSummaryRepository = deps.sessionSummaryRepository;
+    this.clockStore = deps.clockStore;
+    this.sceneStore = deps.sceneStore;
     this.eventSink = deps.eventSink;
     this.config = deps.config ?? DEFAULT_ENGINE_CONFIG;
     this.now = deps.now ?? (() => new Date());
     this.generators = deps.generators;
+    this.scheduleTimer =
+      deps.scheduleTimer ??
+      ((fn, ms) => {
+        const handle = globalThis.setTimeout(fn, ms);
+        // Never let a pending countdown keep the Node process alive.
+        if (typeof (handle as { unref?: () => void }).unref === "function") {
+          (handle as { unref: () => void }).unref();
+        }
+        return handle;
+      });
+    this.cancelTimer =
+      deps.cancelTimer ?? ((handle) => globalThis.clearTimeout(handle as ReturnType<typeof globalThis.setTimeout>));
+    this.log = deps.log ?? (() => undefined);
   }
 
   /**
@@ -271,12 +327,35 @@ export class RoomOrchestrator {
     this.store.save(after);
     this.gateway.broadcastTurnState(roomId);
 
+    // Trace the accepted command and any phase transition it caused.
+    this.log("command", {
+      roomId,
+      type: command.type,
+      from: "from" in command ? command.from : "by" in command ? command.by : undefined,
+      phase: before.phase === after.phase ? after.phase : `${before.phase}→${after.phase}`,
+      round: after.roundNumber,
+      ready: after.readiness.filter((r) => r.status === "ready").length,
+      total: after.readiness.length,
+    });
+
+    // Ready-check countdown (R8.1): arm a server-side timer when the gate opens
+    // so unready/idle/disconnected players are auto-passed at the deadline and a
+    // round can ALWAYS advance. The reducer accepts TIMEOUT_EXPIRED but nothing
+    // else fires it, so without this a single idle/extra player stalls the round
+    // forever. Clear it whenever the round leaves ready_check.
+    const enteredReadyCheck = before.phase !== "ready_check" && after.phase === "ready_check";
+    const leftReadyCheck = before.phase === "ready_check" && after.phase !== "ready_check";
+    if (leftReadyCheck) this.clearReadyCheckTimer(roomId);
+    if (enteredReadyCheck) this.armReadyCheckTimer(roomId, after.readyCheckTimeoutMs);
+
     // Session start: generate + deliver the opening narration (R5.2, R5.3).
     if (
       command.type === "START_SESSION" &&
       after.roundNumber === 1 &&
       before.roundNumber !== 1
     ) {
+      this.seedClocks(roomId);
+      this.seedScene(roomId);
       this.launchOpening(roomId, after);
     }
 
@@ -296,6 +375,48 @@ export class RoomOrchestrator {
       this.store.get(roomId) ??
       createInitialTurnState(roomId, { readyCheckTimeoutMs: this.config.readyCheckTimeoutMs })
     );
+  }
+
+  /**
+   * Arm the ready-check countdown for a room. On expiry, auto-pass every player
+   * still not ready (one TIMEOUT_EXPIRED each, serialized through the queue);
+   * the last one trips {@link maybeTriggerResolution} so the round advances even
+   * if some player never acts or disconnected. Replaces any prior timer.
+   */
+  private armReadyCheckTimer(roomId: string, timeoutMs: number): void {
+    this.clearReadyCheckTimer(roomId);
+    const handle = this.scheduleTimer(() => {
+      this.readyCheckTimers.delete(roomId);
+      const state = this.store.get(roomId);
+      if (state === undefined || state.phase !== "ready_check") return;
+      const unready = state.readiness.filter((entry) => entry.status !== "ready");
+      if (unready.length > 0) {
+        // Auto-pass everyone not yet ready; the last one trips resolution (R8.x).
+        this.log("ready_timeout", { roomId, round: state.roundNumber, autoPass: unready.map((e) => e.playerId) });
+        for (const entry of unready) {
+          void this.dispatch(roomId, { type: "TIMEOUT_EXPIRED", player: entry.playerId });
+        }
+      } else if (state.readiness.length > 0 && !state.resolutionRequested) {
+        // Everyone is ready but the round is NOT progressing — this is the
+        // recovery path for a prior resolution that failed and reverted to
+        // ready_check. Force a fresh resolution so the round never wedges.
+        const hostId = this.roomReader.getRoom(roomId)?.hostPlayerId;
+        if (hostId !== undefined) {
+          this.log("ready_force_retry", { roomId, round: state.roundNumber });
+          void this.dispatch(roomId, { type: "FORCE_PROCEED", by: hostId });
+        }
+      }
+    }, Math.max(0, timeoutMs));
+    this.readyCheckTimers.set(roomId, handle);
+  }
+
+  /** Cancel and forget a room's ready-check countdown (no-op when none armed). */
+  private clearReadyCheckTimer(roomId: string): void {
+    const handle = this.readyCheckTimers.get(roomId);
+    if (handle !== undefined) {
+      this.cancelTimer(handle);
+      this.readyCheckTimers.delete(roomId);
+    }
   }
 
   /**
@@ -321,14 +442,19 @@ export class RoomOrchestrator {
           activePlayers: this.roomReader.listPlayers(roomId).map((player) => player.id),
         };
       }
-      case "SEND_CHAT":
+      case "SEND_CHAT": {
+        // Attach the sender's room join display name when known; conditionally
+        // included so a missing name introduces no key (exactOptionalPropertyTypes).
+        const displayName = this.displayNameFor(roomId, command.from);
         return {
           type: "SEND_CHAT",
           from: command.from,
           characterName: this.characterNameFor(roomId, command.from) ?? command.from,
           text: command.text,
           ts: this.nowIso(),
+          ...(displayName !== undefined ? { displayName } : {}),
         };
+      }
       case "CONFIRM_ACTION":
         return {
           type: "CONFIRM_ACTION",
@@ -364,7 +490,11 @@ export class RoomOrchestrator {
         if (scenario === null) return;
         const ctx = toContext(startedState, scenario, this.charactersFor(roomId));
         const result = await this.coordinator.generateOpening(ctx, correlationFor(startedState));
-        if (!result.ok) return; // Withheld on failure; nothing to deliver (R14.4).
+        if (!result.ok) {
+          this.log("opening_failed", { roomId, reason: result.error.reason, message: result.error.message });
+          return; // Withheld on failure; nothing to deliver (R14.4).
+        }
+        this.log("narration", { roomId, kind: "opening", round: startedState.roundNumber });
         this.gateway.deliverNarration(roomId, {
           kind: "opening",
           roundNumber: startedState.roundNumber,
@@ -386,18 +516,32 @@ export class RoomOrchestrator {
    * in-flight resolution (Requirement 7.9).
    */
   private launchResolution(roomId: string, resolving: TurnState, allReadyAtIso: string): void {
+    this.log("resolution_start", { roomId, round: resolving.roundNumber });
     this.track(
       (async () => {
         const scenario = this.scenarioResolver.getSelectedScenario(roomId);
         if (scenario === null) {
+          this.log("resolution_no_scenario", { roomId, round: resolving.roundNumber });
           await this.enqueue(roomId, () => this.applyResolutionFailure(roomId));
           return;
         }
+        const clocks = this.clockStore?.get(roomId);
+        const scene = this.sceneStore?.get(roomId);
         const result = await this.coordinator.resolveRound({
           state: resolving,
           scenario,
           characters: this.charactersFor(roomId),
           budget: this.config.tokenBudgets.resolution,
+          ...(clocks !== undefined ? { clocks } : {}),
+          ...(scene !== undefined ? { scene } : {}),
+        });
+        this.log("resolution_returned", {
+          roomId,
+          round: resolving.roundNumber,
+          ok: result.ok,
+          ...(result.ok
+            ? {}
+            : { reason: result.error.reason, message: result.error.message }),
         });
         const narrationReturnedAtIso = this.nowIso();
         await this.enqueue(roomId, () =>
@@ -446,13 +590,60 @@ export class RoomOrchestrator {
     if (next === current) return; // Guard rejected the delivery; nothing committed.
 
     this.store.save(next);
+    // Persist the engine-applied clocks for the round just resolved. Reacting to
+    // fired clocks (`result.firedClocks` onComplete ids → spawning threats /
+    // scene changes) is deferred Front work — see blackboard-scope.ts.
+    if (this.clockStore !== undefined && result.clocks !== undefined) {
+      this.clockStore.save(roomId, result.clocks);
+    }
+    // Persist the engine-applied scene (e.g. clues the GM revealed this round).
+    if (this.sceneStore !== undefined && result.scene !== undefined) {
+      this.sceneStore.save(roomId, result.scene);
+    }
     this.gateway.broadcastTurnState(roomId);
 
     // Deliver the resolution narration for the round just resolved (R10.4, R15.5).
+    // Visible-clock scenarios also surface the current clock gauges to players.
+    const visibleClocks = this.visibleClocksFor(roomId, result.clocks);
+    // Player-visible checks (hidden GM rolls excluded) so the client can animate
+    // the EZFudge dice for this round's results. Each check carries the acting
+    // character's name (so the client shows who rolls what and can gate a
+    // player's own roll) and a scenario-localized attribute label (so custom
+    // stats like "Sneaky" display as 은밀함 rather than the raw key).
+    const characters = this.charactersFor(roomId);
+    const nameById = new Map(characters.map((c) => [c.id, c.name] as const));
+    const scenario = this.scenarioResolver.getSelectedScenario(roomId);
+    const labelByAttribute = new Map<string, string>();
+    if (scenario !== null) {
+      for (const trait of sheetSchemaForScenario(scenario).traits) {
+        labelByAttribute.set(trait.key, trait.label);
+      }
+    }
+    const visibleChecks = result.checks
+      .filter((c) => (c.visibility ?? "player") === "player")
+      .map((c) => ({
+        attribute: c.attribute,
+        attributeLabel: labelByAttribute.get(c.attribute) ?? c.attribute,
+        characterName: nameById.get(c.characterId) ?? "",
+        difficulty: c.difficulty,
+        advantage: c.advantage ?? "none",
+        rolls: Array.isArray(c.rolls) && c.rolls.length > 0 ? [...c.rolls] : [c.roll],
+        roll: c.roll,
+        outcome: c.outcome,
+      }));
     this.gateway.deliverNarration(roomId, {
       kind: "resolution",
       roundNumber,
       text: result.narration,
+      ...(visibleClocks !== undefined ? { clocks: visibleClocks } : {}),
+      ...(visibleChecks.length > 0 ? { checks: visibleChecks } : {}),
+    });
+    this.log("narration", {
+      roomId,
+      kind: "resolution",
+      round: roundNumber,
+      nextPhase: next.phase,
+      endingReached: next.phase === "ended",
     });
 
     // Best-effort latency event for the round (all-ready → narration-returned).
@@ -481,6 +672,10 @@ export class RoomOrchestrator {
     };
     this.store.save(reverted);
     this.gateway.broadcastTurnState(roomId);
+    this.log("resolution_reverted", { roomId, round: reverted.roundNumber });
+    // Re-arm the countdown so a reverted, all-ready round retries the resolution
+    // instead of wedging forever (the timer's all-ready branch forces a retry).
+    this.armReadyCheckTimer(roomId, reverted.readyCheckTimeoutMs);
   }
 
   /** Handle the no-scenario case: there is nothing to resolve, so just revert. */
@@ -566,11 +761,53 @@ export class RoomOrchestrator {
     return this.roomReader.listCharactersByRoom(roomId);
   }
 
+  /**
+   * Seed the scenario's static Progress Clocks at session start (no-op when no
+   * clock store is wired or the room has no scenario). Until a Front Planner
+   * generates clocks, these hand-authored seeds are the round's pressure gauges.
+   */
+  private seedClocks(roomId: string): void {
+    if (this.clockStore === undefined) return;
+    const scenario = this.scenarioResolver.getSelectedScenario(roomId);
+    if (scenario === null) return;
+    this.clockStore.save(roomId, seedClocksForScenario(scenario.id));
+  }
+
+  /** Seed the scenario's opening Scene State at session start (no-op when unwired). */
+  private seedScene(roomId: string): void {
+    if (this.sceneStore === undefined) return;
+    const scenario = this.scenarioResolver.getSelectedScenario(roomId);
+    if (scenario === null) return;
+    const scene = seedSceneForScenario(scenario.id);
+    if (scene !== null) this.sceneStore.save(roomId, scene);
+  }
+
+  /**
+   * The player-visible clock snapshot for a room, or `undefined` when the
+   * scenario keeps clocks hidden or none are available. Used to decide whether
+   * to attach clock gauges to delivered narration (per-scenario tone lever).
+   */
+  private visibleClocksFor(
+    roomId: string,
+    resolvedClocks: readonly { name: string; value: number; max: number }[] | undefined,
+  ): { name: string; value: number; max: number }[] | undefined {
+    const scenario = this.scenarioResolver.getSelectedScenario(roomId);
+    if (scenario === null || !areClocksVisible(scenario.id)) return undefined;
+    const clocks = resolvedClocks ?? this.clockStore?.get(roomId) ?? [];
+    if (clocks.length === 0) return undefined;
+    return clocks.map((c) => ({ name: c.name, value: c.value, max: c.max }));
+  }
+
   /** The sending player's character name for chat attribution (R6.3). */
   private characterNameFor(roomId: string, playerId: PlayerId): string | undefined {
     return this.roomReader
       .listCharactersByRoom(roomId)
       .find((character) => character.playerId === playerId)?.name;
+  }
+
+  /** The sending player's room join display name for `characterName(displayName)` attribution. */
+  private displayNameFor(roomId: string, playerId: PlayerId): string | undefined {
+    return this.roomReader.listPlayers(roomId).find((p) => p.id === playerId)?.displayName;
   }
 
   /** ISO ready-check deadline = now + the state's configured timeout (R8.1). */

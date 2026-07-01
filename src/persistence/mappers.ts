@@ -126,6 +126,33 @@ export function rowToCharacter(row: QueryResultRow): Character {
 
 /* -------------------------------- Scenario --------------------------------- */
 
+/**
+ * Scenario_Column_List alignment (Column_Ordering_Convention).
+ *
+ * The value order produced by {@link scenarioToRow} and the columns read by
+ * {@link rowToScenario} MUST match `SCENARIO_INSERT_COLUMNS`
+ * (pg-scenario-repository.ts) and the migration DDL
+ * (`migrations/0004_scenario_allocation.sql`), in this order:
+ *
+ *   0 id, 1 title, 2 summary, 3 opening_seed, 4 ending_condition,
+ *   5 genre, 6 category, 7 has_special_rules, 8 system,
+ *   9 allocation (jsonb), 10 attribute_proposal_disabled, 11 form.
+ *
+ * Existing columns keep their order; the two optional fields (`allocation`,
+ * `attributeProposalDisabled`) are appended at the tail, followed by `form`.
+ * `form` is always present in the row mapping (like genre/category),
+ * defaulting to "원샷" when the column is absent. The
+ * Column_Param_Arity_Guard test asserts
+ * `scenarioToRow(s).length === SCENARIO_INSERT_COLUMNS.length`.
+ *
+ * Optional-field round-trip: absence is preserved. A scenario without these
+ * fields maps to `null` / `false` columns, and `rowToScenario` OMITS the keys
+ * again so a round-trip yields a structurally-equal scenario. The `allocation`
+ * payload is stored and read verbatim (no structural validation), so the
+ * mapper never throws on arbitrary/invalid allocation JSON.
+ *
+ * Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 5.1, 5.3.
+ */
 export function scenarioToRow(scenario: Scenario): unknown[] {
   return [
     scenario.id,
@@ -133,17 +160,38 @@ export function scenarioToRow(scenario: Scenario): unknown[] {
     scenario.summary,
     scenario.openingSeed,
     scenario.endingCondition,
+    scenario.genre,
+    scenario.category,
+    scenario.hasSpecialRules,
+    scenario.system,
+    scenario.allocation !== undefined ? toJsonParam(scenario.allocation) : null,
+    scenario.attributeProposalDisabled === true,
+    scenario.form ?? "원샷",
   ];
 }
 
 export function rowToScenario(row: QueryResultRow): Scenario {
-  return {
+  const scenario: Scenario = {
     id: row.id as string,
     title: row.title as string,
     summary: row.summary as string,
     openingSeed: row.opening_seed as string,
     endingCondition: row.ending_condition as string,
+    genre: (row.genre as string | undefined) ?? "",
+    category: (row.category as string | undefined) ?? "",
+    hasSpecialRules: (row.has_special_rules as boolean | undefined) ?? false,
+    system: (row.system as string | undefined) ?? "EZFudge",
+    form: (row.form as string | undefined) ?? "원샷",
   };
+  // Optional allocation: preserved verbatim; key omitted when column is absent.
+  if (row.allocation !== null && row.allocation !== undefined) {
+    scenario.allocation = parseJsonColumn(row.allocation);
+  }
+  // Optional Attribute_Proposal_Disabled: only set when truthy; otherwise omit.
+  if (Boolean(row.attribute_proposal_disabled)) {
+    scenario.attributeProposalDisabled = true;
+  }
+  return scenario;
 }
 
 /* ----------------------------- SessionSummary ------------------------------ */

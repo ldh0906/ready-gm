@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm</title>
+<!-- 랜딩(`/`)은 멀티플레이 진입(방 만들기)인 /host-entry/ 로 보낸다. ?token=
+     공유 비밀 등 쿼리스트링을 그대로 이어 붙여 인증 흐름을 유지한다. 솔로
+     빠른 테스트 화면은 /quickplay/ 에 보존되어 있다. -->
+<script>
+  location.replace("/host-entry/" + location.search + location.hash);
+</script>
+<noscript><meta http-equiv="refresh" content="0; url=/host-entry/" /></noscript>
+</head>
+<body>
+  <p style="font:15px system-ui,sans-serif;color:#e7e9ee;background:#0f1115;margin:0;padding:20px">
+    방 만들기 화면으로 이동 중… 이동하지 않으면 <a href="/host-entry/" style="color:#7fd1b9">여기</a>를 누르세요.
+  </p>
+</body>
+</html>

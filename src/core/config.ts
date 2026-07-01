@@ -5,6 +5,7 @@
  * 16.2 (modelTiers), 17.1 (aiMaxRetries).
  */
 import type { EngineConfig } from "./types.js";
+import { DEFAULT_ATTRIBUTE_LADDER } from "./ezfudge.js";
 
 /**
  * Default EZFudge dice. Two dice each uniform over `[-2, +2]` are summed, giving
@@ -50,6 +51,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   },
   diceRange: { ...DEFAULT_DICE_RANGE },
   dice: { count: DEFAULT_DICE_SPEC.count, face: { ...DEFAULT_DICE_SPEC.face } },
+  attributeLadder: { ...DEFAULT_ATTRIBUTE_LADDER },
 };
 
 /**
@@ -69,5 +71,6 @@ export function makeEngineConfig(overrides: Partial<EngineConfig> = {}): EngineC
       ...overrides.dice,
       face: { ...DEFAULT_ENGINE_CONFIG.dice.face, ...overrides.dice?.face },
     },
+    attributeLadder: { ...DEFAULT_ENGINE_CONFIG.attributeLadder, ...overrides.attributeLadder },
   };
 }

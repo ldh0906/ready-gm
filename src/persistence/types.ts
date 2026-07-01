@@ -13,6 +13,8 @@
 import type { Character, Player, Room } from "../services/types.js";
 import type { Scenario } from "../services/scenario-service.js";
 import type { TurnState } from "../core/turn-state.js";
+import type { ProgressClock } from "../core/progress-clock.js";
+import type { SceneState } from "../core/scene-state.js";
 import type { EventSink } from "../observability/event-sink.js";
 import type { QaEvent } from "../observability/events.js";
 
@@ -95,4 +97,37 @@ export interface QueryableEventSink extends EventSink {
   queryBySession(sessionId: string): Promise<QaEvent[]>;
   /** Events for a single session+round, ordered by timestamp then insertion. */
   queryByRound(sessionId: string, roundNo: number): Promise<QaEvent[]>;
+}
+
+/** A persisted per-room Progress Clock set, keyed by room. */
+export interface ClockRecord {
+  roomId: string;
+  clocks: ProgressClock[];
+}
+
+/**
+ * Async durable repository for the per-room active Progress Clocks. The whole
+ * clock array is stored as one jsonb document, upserted by `roomId`. `listAll`
+ * supports hydrating the live cache on startup.
+ */
+export interface ClockRepository {
+  get(roomId: string): Promise<ProgressClock[]>;
+  save(roomId: string, clocks: readonly ProgressClock[]): Promise<void>;
+  listAll(): Promise<ClockRecord[]>;
+}
+
+/** A persisted per-room Scene State, keyed by room. */
+export interface SceneRecord {
+  roomId: string;
+  scene: SceneState;
+}
+
+/**
+ * Async durable repository for the per-room Scene State. One scene document per
+ * room (upsert by `roomId`). `listAll` supports hydrating the live cache.
+ */
+export interface SceneRepository {
+  get(roomId: string): Promise<SceneState | undefined>;
+  save(roomId: string, scene: SceneState): Promise<void>;
+  listAll(): Promise<SceneRecord[]>;
 }

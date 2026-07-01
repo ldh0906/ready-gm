@@ -1,0 +1,1422 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm — 캐릭터 시트 작성</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 15px/1.65 system-ui, "Malgun Gothic", sans-serif;
+    background: #0f1115;
+    color: #e7e9ee;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 10px 16px;
+    background: #171a21;
+    border-bottom: 1px solid #262b36;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex: 0 0 auto;
+  }
+  header .badge {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #222836;
+    color: #9fb0c8;
+  }
+
+  /* Single column layout; content never exceeds the viewport so there is no
+     horizontal scroll on narrow (320–767px) screens, and the full sheet is
+     shown on wide (≥768px) screens. (요구사항 12.1, 12.7) */
+  main {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px 16px 48px;
+  }
+
+  .intro { margin: 0 0 24px; }
+  .intro h1 { font-size: 22px; margin: 0 0 10px; }
+  .intro p { margin: 6px 0; color: #c4ccda; }
+
+  .card {
+    background: #161922;
+    border: 1px solid #262b36;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 18px;
+  }
+  .card h2 { font-size: 16px; margin: 0 0 12px; }
+
+  /* Sheet sections rendered dynamically from the Active_Sheet_Schema into
+     #sheetMount. Each section is a bordered block with a heading. */
+  .section { margin: 0 0 18px; }
+  .section:last-child { margin-bottom: 0; }
+  .section h3 {
+    font-size: 15px;
+    margin: 0 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #262b36;
+    color: #e7e9ee;
+  }
+
+  .field { margin-bottom: 14px; }
+  .field:last-child { margin-bottom: 0; }
+  .field-guidance { font-size: 13px; color: #9fb0c8; margin: 0 0 6px; }
+  .scenario-banner-title { font-size: 16px; font-weight: 600; color: #e7e9ee; margin: 0 0 6px; }
+
+  label { display: block; font-size: 13px; color: #9fb0c8; margin-bottom: 6px; }
+  input, button, select, textarea { font: inherit; }
+  input[type=text],
+  textarea {
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 10px 12px;
+    width: 100%;
+  }
+  textarea { min-height: 72px; resize: vertical; }
+  input[readonly],
+  textarea[readonly] { color: #c4ccda; }
+
+  /* Rated_Trait edit row: label, ladder select, and rung label. */
+  .trait { margin-bottom: 12px; }
+  .trait:last-child { margin-bottom: 0; }
+  .trait-control { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  select {
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  select:disabled,
+  input:disabled,
+  textarea:disabled { opacity: .5; cursor: not-allowed; }
+  .rung-label { color: #7fd1b9; font-size: 14px; flex: 0 0 auto; }
+
+  /* POINT_BUY 스테퍼: 컴팩트한 −/+ 버튼과 가운데 값 표시(다크 테마). */
+  .trait-stepper { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+  .stepper-btn {
+    background: #2b3242;
+    color: #e7e9ee;
+    border: 1px solid #3a4252;
+    border-radius: 8px;
+    padding: 8px 14px;
+    min-width: 44px;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .stepper-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .trait-value {
+    min-width: 2.5ch;
+    text-align: center;
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+    color: #e7e9ee;
+  }
+
+  .actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    background: #2f6df0;
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+  }
+  button.secondary { background: #2b3242; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Visible focus indicator distinct from the dark background, surrounding the
+     whole element with ≥3:1 contrast against adjacent surfaces. (요구사항 12.4) */
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  button:focus-visible {
+    outline: 3px solid #f0c040;
+    outline-offset: 2px;
+  }
+
+  .notice {
+    color: #ef8b8b;
+    font-size: 14px;
+    background: #2a1b1f;
+    border: 1px solid #5a2b33;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+  .status-notice {
+    color: #7fd1b9;
+    font-size: 14px;
+    background: #14241f;
+    border: 1px solid #2b5a4a;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+  .fallback-notice {
+    color: #f0c040;
+    font-size: 13px;
+    background: #241f14;
+    border: 1px solid #5a4a2b;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 18px;
+  }
+
+  .progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #f0c040;
+    font-size: 14px;
+    margin-top: 14px;
+  }
+
+  [hidden] { display: none !important; }
+
+  /* Card_Based_Sheet 역할 카드 목록 (scenario-character-cards 요구사항 4.1~4.4). */
+  .role-cards { display: flex; flex-direction: column; gap: 10px; }
+  .role-card {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 12px 14px;
+    cursor: pointer;
+  }
+  .role-card.selected {
+    border-color: #2f6df0;
+    background: #16223d;
+  }
+  .role-card-label { display: block; font-weight: 600; margin-bottom: 4px; }
+  .role-card-premise { display: block; color: #c4ccda; font-size: 14px; }
+  .role-card-guidance { display: block; color: #9fb0c8; font-size: 13px; margin-top: 6px; }
+
+  @media (max-width: 767px) {
+    main { padding: 16px 12px 40px; }
+    .actions button { width: 100%; }
+    .trait-control select { width: 100%; }
+    .trait-control .trait-stepper { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <strong>ready-gm</strong>
+  <span class="badge">캐릭터 작성 · 플레이어</span>
+</header>
+
+<main>
+  <section class="intro" aria-labelledby="sheet-intro-title">
+    <h1 id="sheet-intro-title">캐릭터 만들기</h1>
+    <p>이름과 컨셉을 적고, AI 제안을 받아 능력치를 다듬은 뒤 캐릭터를 확정하세요.</p>
+  </section>
+
+  <!-- 진행 시나리오 표시(상단) + (호스트 전용) 메인으로 돌아가기.
+       시나리오 제목/요약은 sheet-schema 응답(scenarioTitle/scenarioSummary)에서 채워지고,
+       "메인으로 돌아가기" 버튼은 호스트에게만 노출된다(로비에서 시나리오를 바꿀 수 있다). -->
+  <section class="card" id="scenarioBanner" aria-labelledby="scenario-banner-heading" hidden>
+    <h2 id="scenario-banner-heading">진행 시나리오</h2>
+    <p id="scenarioBannerTitle" class="scenario-banner-title" aria-live="polite"></p>
+    <p id="scenarioBannerSummary" class="field-guidance"></p>
+    <div class="actions">
+      <button id="backToLobbyBtn" type="button" aria-label="메인(로비)으로 돌아가 시나리오 변경" hidden>메인으로 돌아가기</button>
+    </div>
+    <p id="backToLobbyHint" class="field-guidance" hidden>시나리오를 바꾸려면 메인으로 돌아가세요. 다른 플레이어는 호스트가 다시 시작할 때까지 기다립니다.</p>
+  </section>
+
+  <!-- 인계 무효 안내 (요구사항 1.3/1.4). aria-live=assertive 라이브 영역으로
+       포커스 이동 없이 즉시 낭독한다 (요구사항 12.6). -->
+  <p id="handoffInvalid" class="notice" role="alert" aria-live="assertive" hidden></p>
+
+  <!-- 스키마 폴백 안내: 시나리오 맞춤 시트 로드 실패 시 기본 시트 사용 안내 (요구사항 13.6). -->
+  <p id="schemaFallback" class="fallback-notice" role="status" aria-live="polite" hidden></p>
+
+  <!-- Card_Based_Sheet 역할 카드 목록 (scenario-character-cards 요구사항 4.1~4.4).
+       카드 기반 시나리오가 아니면 숨긴다(isCardBasedSheet 거짓). 미리 선택된 카드 없이
+       각 카드를 roleLabel·premise(+backstoryGuidance)와 함께 렌더하고, 클릭 시 CARD_SELECTED를
+       디스패치해 단일 선택을 적용한다(직전 선택은 동기 재렌더로 즉시 해제). 모든 텍스트는 esc 이스케이프. -->
+  <section class="card" id="cardSection" aria-labelledby="card-title" hidden>
+    <h2 id="card-title">역할 카드</h2>
+    <p class="field-guidance">역할 카드를 하나 선택하세요. 선택한 역할 위에 배경 서사를 작성합니다.</p>
+    <div id="cardMount" class="role-cards" role="radiogroup" aria-label="역할 카드 선택"></div>
+  </section>
+
+  <!-- 캐릭터 시트: Active_Sheet_Schema가 정의한 Sheet_Section·Narrative_Field·
+       Rated_Trait를 동적으로 렌더할 마운트 지점 (요구사항 2.x, 13.3). -->
+  <section class="card" aria-labelledby="sheet-title">
+    <h2 id="sheet-title">캐릭터 시트</h2>
+
+    <!-- 스키마 로딩 인디케이터 (요구사항 13.9). -->
+    <div id="schemaLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>캐릭터 시트를 불러오는 중이에요…</span>
+    </div>
+
+    <!-- renderModel(schema, values) 결과가 주입되는 동적 렌더 마운트 지점.
+         7.2에서 Narrative_Field 입력·Rated_Trait 편집 요소를 여기 렌더한다. -->
+    <div id="sheetMount"></div>
+
+    <!-- 배분 모드별 컨트롤 (flexible-stat-allocation). Active_Sheet_Schema의 Allocation_Rule
+         모드에 따라 표시/숨김된다. 기본(LADDER_SELECT)에서는 모두 숨김이라 기존 화면과 동일하다. -->
+
+    <!-- POINT_BUY 남은 배분 점수 표시: 어떤 Trait_Level이 바뀌면 동기 렌더로 즉시(≤200ms) 갱신한다
+         (요구사항 3.6, 9.1). polite 라이브 영역으로 낭독한다. -->
+    <p id="pointBuyRemaining" class="field-guidance" role="status" aria-live="polite" hidden></p>
+
+    <!-- DICE_ROLL Dice_Roll_Action: 굴림은 서버가 수행하고 무작위를 클라이언트에서 만들지 않는다
+         (요구사항 5.2). Confirmed_State·진행 중에는 비활성(요구사항 10.1). -->
+    <div class="actions" id="rollActions" hidden>
+      <button id="rollBtn" type="button" aria-label="능력치 주사위 굴리기">주사위 굴리기</button>
+    </div>
+    <!-- 굴림 진행 인디케이터 (요구사항 9.1). -->
+    <div id="rollLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">🎲</span>
+      <span>주사위를 굴리는 중이에요…</span>
+    </div>
+  </section>
+
+  <!-- AI 제안·확정 동작 (요구사항 4.x, 6.x, 7.x).
+       NOTE: 별도 "저장" 버튼은 UI에서 제거했다. "확정"이 내부적으로 기록(저장) 후 확정을
+       2단계로 처리하므로 사용자에겐 버튼 하나로 충분하다. 단, 기록(저장) 경로 자체
+       (runSave/doRecordSave/buildRecordRequest, RECORD_* 액션, /character 엔드포인트,
+       SAVE_CONFIRMED_MESSAGE, computeVisibility.saveEnabled)는 그대로 남겨 두었다 —
+       추후 캠페인 기능(성장한 캐릭터의 중간 저장·불러오기)에서 재사용하기 위함이다. -->
+  <section class="card" aria-labelledby="controls-title">
+    <h2 id="controls-title">제안 · 확정</h2>
+
+    <div class="actions">
+      <button id="proposeBtn" type="button" aria-label="AI 평가 항목 제안 받기">AI 제안 받기</button>
+      <button id="confirmBtn" type="button" aria-label="캐릭터 확정">확정</button>
+    </div>
+
+    <!-- 영역별 진행 인디케이터 (요구사항 9.1). 진행 중 동작 비활성과 함께 표시. -->
+    <div id="proposalLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>AI 평가 항목 제안을 받는 중이에요…</span>
+    </div>
+    <div id="recordLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>캐릭터를 저장하는 중이에요…</span>
+    </div>
+    <div id="confirmLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>캐릭터를 확정하는 중이에요…</span>
+    </div>
+
+    <!-- 상태/확인 메시지 라이브 영역: 저장 확인·빈 컨셉·빈 이름 안내 등 (요구사항 12.6). -->
+    <p id="statusMessage" class="status-notice" role="status" aria-live="polite" hidden></p>
+
+    <!-- 오류 메시지 라이브 영역: 거부 사유·타임아웃·네트워크·서버·인증 거부 등 (요구사항 12.6). -->
+    <p id="errorMessage" class="notice" role="alert" aria-live="assertive" hidden></p>
+
+    <!-- 동일 입력 재시도 동작 (요구사항 10.4/10.6). -->
+    <div class="actions">
+      <button id="retryBtn" class="secondary" type="button" aria-label="직전 요청 다시 시도" hidden>다시 시도</button>
+    </div>
+  </section>
+
+  <!-- 준비 현황 · 호스트 세션 시작 (멀티플레이어 흐름). 기존 상태 기계와 독립적으로,
+       부수효과 계층이 ~2초마다 readiness를 폴링해 이 영역을 갱신한다. 전원 확정 시
+       호스트만 "세션 시작"을 활성화하고, 세션이 시작되면 모든 플레이어가 게임 화면으로
+       이동한다. -->
+  <section class="card" aria-labelledby="readiness-title">
+    <h2 id="readiness-title">준비 현황</h2>
+    <!-- 확정(준비) 인원을 실시간으로 낭독하는 polite 라이브 영역. -->
+    <p id="readinessText" class="field-guidance" role="status" aria-live="polite"></p>
+    <div class="actions">
+      <!-- 호스트 전용: 전원 확정 시에만 활성. -->
+      <button id="startSessionBtn" type="button" aria-label="세션 시작" hidden disabled>세션 시작</button>
+    </div>
+    <!-- 비호스트: 호스트의 세션 시작을 기다리는 안내. -->
+    <p id="waitingForHost" class="field-guidance" role="status" aria-live="polite" hidden></p>
+  </section>
+</main>
+
+<!-- 순수 로직 모듈을 import 해 부수효과(fetch·AbortController 10초 타임아웃·DOM 렌더·
+     네비게이션)에 배선한다. 단방향 흐름: 사용자 동작 → dispatch → reduce → 새 상태 →
+     computeVisibility/renderModel → DOM. 모든 외부 의존성(fetch·타이머·네비게이션)은
+     window 훅으로 주입 가능하게 만들어 작업 7.4 통합 테스트가 모킹할 수 있게 한다. -->
+<script type="module">
+  import {
+    REQUEST_TIMEOUT_MS,
+    RecordRejection,
+    HANDOFF_INVALID_MESSAGE,
+    // scenario-character-cards: 카드 목록 렌더·단일 선택·사전 검증·안내 문구.
+    CARD_REQUIRED_MESSAGE,
+    cardListModel,
+    isCardBasedSheet,
+    validateCardSelection,
+    esc,
+    BLANK_CONCEPT_MESSAGE,
+    BLANK_NAME_MESSAGE,
+    SAVE_CONFIRMED_MESSAGE,
+    CONFIRMED_MESSAGE,
+    SCHEMA_FALLBACK_MESSAGE,
+    SESSION_START_FAILED_MESSAGE,
+    NO_CHARACTER_MESSAGE,
+    PROPOSAL_INVALID_MESSAGE,
+    RECORD_REJECTION_MESSAGES,
+    ERROR_MESSAGES,
+    WAITING_FOR_HOST_MESSAGE,
+    // flexible-stat-allocation: 배분 모드별 렌더·굴림 부수효과에 쓰는 순수 함수·메시지.
+    ROLL_FAILED_MESSAGE,
+    ROLL_INVALID_RESPONSE_MESSAGE,
+    allocationEditModel,
+    pointBuyRemaining,
+    assignFixedValue,
+    buildRollRequest,
+    validateRollResponse,
+    createInitialState,
+    parseHandoff,
+    buildSchemaRequest,
+    buildCardsRequest,
+    parseCardHand,
+    buildProposalRequest,
+    buildRecordRequest,
+    buildConfirmRequest,
+    classifyOutcome,
+    classifyRecordResult,
+    renderModel,
+    renderedTraitKeys,
+    rungLabel,
+    trimForSend,
+    collectRatedTraitSet,
+    decideConfirmStep,
+    buildNextSearch,
+    reduce,
+    computeVisibility,
+    nextRequestForRetry,
+    buildReadinessRequest,
+    buildStartRequest,
+    buildReturnToLobbyRequest,
+    parseReadiness,
+    isHostViewer,
+    hostStartEnabled,
+    formatReadiness,
+  } from "./logic.js";
+
+  const $ = (id) => document.getElementById(id);
+
+  // ---- DOM 참조 -----------------------------------------------------------
+  const handoffInvalid = $("handoffInvalid");
+  const schemaFallback = $("schemaFallback");
+  // 진행 시나리오 배너 + 호스트 전용 메인으로 돌아가기.
+  const scenarioBanner = $("scenarioBanner");
+  const scenarioBannerTitle = $("scenarioBannerTitle");
+  const scenarioBannerSummary = $("scenarioBannerSummary");
+  const backToLobbyBtn = $("backToLobbyBtn");
+  const backToLobbyHint = $("backToLobbyHint");
+  const schemaLoading = $("schemaLoading");
+  const sheetMount = $("sheetMount");
+  // scenario-character-cards: 역할 카드 목록 마운트.
+  const cardSection = $("cardSection");
+  const cardMount = $("cardMount");
+  const proposeBtn = $("proposeBtn");
+  const confirmBtn = $("confirmBtn");
+  const proposalLoading = $("proposalLoading");
+  const recordLoading = $("recordLoading");
+  const confirmLoading = $("confirmLoading");
+  const statusMessage = $("statusMessage");
+  const errorMessage = $("errorMessage");
+  const retryBtn = $("retryBtn");
+  const readinessText = $("readinessText");
+  const startSessionBtn = $("startSessionBtn");
+  const waitingForHost = $("waitingForHost");
+  // flexible-stat-allocation: 배분 모드별 컨트롤.
+  const pointBuyRemainingEl = $("pointBuyRemaining");
+  const rollActions = $("rollActions");
+  const rollBtn = $("rollBtn");
+  const rollLoading = $("rollLoading");
+
+  // ---- 주입 가능한 부수효과 어댑터 (테스트가 load 이전에 교체 가능) -------
+  // window.__characterFetch              : fetch 구현 (기본 window.fetch)
+  // window.__characterNewAbortController : AbortController 팩토리 (기본 new AbortController)
+  // window.__characterNavigate           : Next_Screen 인계 네비게이터 (기본 location.assign)
+  const fetchImpl = (url, opts) =>
+    (window.__characterFetch || window.fetch).call(window, url, opts);
+  const newAbortController = () =>
+    window.__characterNewAbortController
+      ? window.__characterNewAbortController()
+      : new AbortController();
+  // Next_Screen은 본 스펙 범위 밖이므로 인계 지점만 제공한다(요구사항 8.2). 기본 대상은
+  // 게임 진행 화면이며, 테스트는 window.__characterNavigate로 실제 이동을 가로챈다.
+  const navigate =
+    window.__characterNavigate || ((search) => location.assign("/game/" + search));
+
+  // ---- 메시지 라우팅 집합 -------------------------------------------------
+  // 상태/확인 안내는 polite 라이브 영역(#statusMessage)에, 오류·거부는 assertive
+  // 라이브 영역(#errorMessage)에 표시한다(요구사항 12.6). 인계 무효·스키마 폴백은
+  // 각자 전용 영역에 표시한다.
+  const STATUS_NOTICES = new Set([
+    SAVE_CONFIRMED_MESSAGE,
+    CONFIRMED_MESSAGE,
+    BLANK_CONCEPT_MESSAGE,
+    BLANK_NAME_MESSAGE,
+  ]);
+  const ERROR_NOTICES = new Set([
+    ...Object.values(RECORD_REJECTION_MESSAGES),
+    NO_CHARACTER_MESSAGE,
+    PROPOSAL_INVALID_MESSAGE,
+    ...Object.values(ERROR_MESSAGES),
+    // 굴림 실패·무효 응답 안내는 오류 라이브 영역(#errorMessage)에 표시한다(요구사항 5.7, 5.8).
+    ROLL_FAILED_MESSAGE,
+    ROLL_INVALID_RESPONSE_MESSAGE,
+    // scenario-character-cards: 카드 미선택 사전 검증 안내(INVALID_CARD 응답 문구와 동일)를
+    // 오류 라이브 영역(#errorMessage)에 표시한다(요구사항 5.1, 6.4).
+    CARD_REQUIRED_MESSAGE,
+  ]);
+
+  // 기록(저장/확정 선행) 결과가 거부 사유/성공인지(↔ 전송 오류인지) 구분하는 집합.
+  const RECORD_RESULTS = new Set(["success", ...Object.values(RecordRejection)]);
+
+  // ---- 상태: 단일 진실 원천 ----------------------------------------------
+  // 인계는 URL 쿼리에서 1회 읽는다. 무효이면 안내만 표시하고 어떤 백엔드 요청도 시작하지
+  // 않는다(요구사항 1.3). 토큰은 build*Request가 x-playtest-token 헤더로, buildNextSearch가
+  // 쿼리로 전달하며 그 외 인증은 없다(MVP).
+  let state = createInitialState(parseHandoff(location.search));
+  // 직전 사용자 의도(재시도가 어느 흐름을 다시 실행할지 결정). state.lastRequest와 함께 쓴다.
+  let lastIntent = null;
+  // 동적 시트 구조 재빌드 추적용: activeSchema 참조가 바뀔 때만 마운트를 다시 그린다.
+  let renderedSchema = null;
+  // scenario-character-cards: 렌더된 역할 카드 버튼 목록(선택 표시·읽기 전용 동기화용).
+  /** @type {HTMLButtonElement[]} */
+  let cardEls = [];
+  /** @type {Record<string, HTMLInputElement | HTMLTextAreaElement>} */
+  let narrativeEls = {};
+  /** @type {Record<string, { select: HTMLSelectElement, rung: HTMLElement }>} */
+  let traitEls = {};
+  // 현재 Active_Sheet_Schema의 원본 정의 맵(레이블·안내·사다리 조회용).
+  let rawFields = {};
+  let rawTraits = {};
+  let rawSections = {};
+
+  // flexible-stat-allocation: 현재 배분 모드(LADDER_SELECT/POINT_BUY/FIXED_VALUE/DICE_ROLL).
+  // buildSheet에서 Active_Sheet_Schema의 Allocation_Rule로부터 도출한다.
+  let allocMode = "LADDER_SELECT";
+  // FIXED_VALUE 일대일 배정 상태(부수효과 계층 로컬 뷰 상태): { assignments, valuePool }.
+  // assignments[traitKey] = 그 항목에 배정된 Value_Pool 인스턴스 인덱스. 없으면 미배정.
+  /** @type {{ assignments: Record<string, number>, valuePool: number[] }} */
+  let fixedAssignment = { assignments: {}, valuePool: [] };
+  // DICE_ROLL 굴림 요청 진행 중 가드(중복 전송 방지·인디케이터 표시).
+  let rollInFlight = false;
+
+  // 단방향 흐름: dispatch → reduce → render. render는 상태의 순수 함수다.
+  function dispatch(action) {
+    state = reduce(state, action);
+    render();
+  }
+
+  // ---- 동적 시트 렌더 (renderModel → DOM) --------------------------------
+  // Active_Sheet_Schema가 정의한 Sheet_Section·Narrative_Field·Rated_Trait만 그린다
+  // (요구사항 2.x, 13.3, 13.4). 텍스트는 textContent/value(DOM 안전 세터)로 넣어
+  // HTML로 해석되지 않게 한다(요구사항 3.4).
+  function buildSheet() {
+    sheetMount.replaceChildren();
+    narrativeEls = {};
+    traitEls = {};
+    rawFields = {};
+    rawTraits = {};
+    rawSections = {};
+    const schema = state.activeSchema;
+    for (const f of schema.narrativeFields || []) rawFields[f.id] = f;
+    for (const t of schema.traits || []) rawTraits[t.key] = t;
+    for (const s of schema.sections || []) rawSections[s.id] = s;
+
+    // flexible-stat-allocation: Active_Sheet_Schema의 Allocation_Rule로부터 배분 모드를 도출한다.
+    // 규칙이 없으면(하위호환) LADDER_SELECT로 취급해 기존 동작을 그대로 보존한다.
+    const allocation = schema.allocation || { mode: "LADDER_SELECT" };
+    allocMode = allocation.mode || "LADDER_SELECT";
+    // FIXED_VALUE는 Value_Pool 인스턴스를 스키마 정의 순서대로 내림차순 일대일 배정한 상태로 시작한다
+    // (logic.js initialAllocation·buildInitialTraitValues와 동일한 배정이라 초기 표시·기록이 일치한다).
+    if (allocMode === "FIXED_VALUE") {
+      const pool = Array.isArray(allocation.valuePool) ? allocation.valuePool.slice() : [];
+      const instances = pool
+        .map((value, index) => ({ value, index }))
+        .sort((a, b) => b.value - a.value);
+      /** @type {Record<string, number>} */
+      const assignments = {};
+      (schema.traits || []).forEach((trait, i) => {
+        if (instances[i]) assignments[trait.key] = instances[i].index;
+      });
+      fixedAssignment = { assignments, valuePool: pool };
+    } else {
+      fixedAssignment = { assignments: {}, valuePool: [] };
+    }
+
+    // renderModel로 섹션별 그룹·옵션·표시 레벨을 도출하고, 텍스트는 원본에서 안전하게 넣는다.
+    const model = renderModel(schema, {
+      narrativeValues: state.narrativeValues,
+      traitValues: state.traitValues,
+    });
+
+    for (const section of model.sections) {
+      const sectionEl = document.createElement("div");
+      sectionEl.className = "section";
+
+      const heading = document.createElement("h3");
+      const rawSection = rawSections[section.id];
+      heading.textContent = rawSection && rawSection.label ? rawSection.label : section.id;
+      sectionEl.appendChild(heading);
+
+      // Narrative_Field 입력 요소 (요구사항 2.1, 3.x).
+      for (const field of section.narrativeFields) {
+        const raw = rawFields[field.id] || {};
+        const fieldEl = document.createElement("div");
+        fieldEl.className = "field";
+
+        const inputId = "field-" + field.id;
+        const labelEl = document.createElement("label");
+        labelEl.setAttribute("for", inputId);
+        labelEl.textContent = raw.label || field.id;
+        fieldEl.appendChild(labelEl);
+
+        const guidanceEl = document.createElement("p");
+        guidanceEl.className = "field-guidance";
+        guidanceEl.textContent = raw.guidance || raw.label || field.id;
+        fieldEl.appendChild(guidanceEl);
+
+        // 이름은 한 줄 입력, 그 외 서사 항목은 여러 줄 입력으로 그린다.
+        const isName = field.id === "name";
+        const control = document.createElement(isName ? "input" : "textarea");
+        if (isName) control.setAttribute("type", "text");
+        control.id = inputId;
+        if (Number.isInteger(field.maxLength)) control.maxLength = field.maxLength;
+        // 비어 있지 않은 접근성 레이블(요구사항 12.5).
+        control.setAttribute("aria-label", raw.label || field.id);
+        const fieldId = field.id;
+        control.addEventListener("input", () => {
+          dispatch({ type: "NARRATIVE_CHANGED", fieldId, value: control.value });
+        });
+        fieldEl.appendChild(control);
+        narrativeEls[field.id] = control;
+        sectionEl.appendChild(fieldEl);
+      }
+
+      // Rated_Trait 평가 편집 요소 (요구사항 2.2, 5.1, 5.2, 5.5).
+      for (const trait of section.traits) {
+        const raw = rawTraits[trait.key] || {};
+        const traitEl = document.createElement("div");
+        traitEl.className = "trait";
+
+        const selectId = "trait-" + trait.key;
+        const labelEl = document.createElement("label");
+        labelEl.setAttribute("for", selectId);
+        labelEl.textContent = raw.label || trait.key;
+        traitEl.appendChild(labelEl);
+
+        const controlRow = document.createElement("div");
+        controlRow.className = "trait-control";
+
+        const traitKey = trait.key;
+
+        if (allocMode === "POINT_BUY") {
+          // flexible-stat-allocation(POINT_BUY): 드롭다운 대신 −/값/+ 스테퍼로 그린다.
+          // 그룹에 role="group"+trait 레이블을 주어 값 변화를 묶어 낭독하고, 값 요소는 aria-live로
+          // 폴라이트 갱신한다. 버튼은 비어 있지 않은 aria-label을 갖는다(요구사항 12.5).
+          const stepper = document.createElement("div");
+          stepper.className = "trait-stepper";
+          stepper.setAttribute("role", "group");
+          stepper.setAttribute("aria-label", raw.label || trait.key);
+
+          const minus = document.createElement("button");
+          minus.type = "button";
+          minus.className = "stepper-btn";
+          minus.id = selectId + "-minus";
+          minus.textContent = "−";
+          minus.setAttribute("aria-label", (raw.label || trait.key) + " 낮추기");
+
+          const valueEl = document.createElement("span");
+          valueEl.className = "trait-value";
+          valueEl.id = selectId + "-value";
+          valueEl.setAttribute("aria-live", "polite");
+
+          const plus = document.createElement("button");
+          plus.type = "button";
+          plus.className = "stepper-btn";
+          plus.id = selectId + "-plus";
+          plus.textContent = "+";
+          plus.setAttribute("aria-label", (raw.label || trait.key) + " 높이기");
+
+          // 클릭 시점의 현재 Trait_Level을 수집 규칙으로 읽고 ±1을 디스패치한다(미존재 시 사다리 최소값).
+          // 핸들러에서 clamp하지 않는다 — 사다리 밖 Trait_Level은 reducer가 무시하고, 비활성 상태가
+          // 무효 클릭을 막는다(요구사항 3.2, 5.2).
+          const minLevel = (raw.ladder && Number.isInteger(raw.ladder.min)) ? raw.ladder.min : 0;
+          const currentLevel = () => {
+            const set = collectRatedTraitSet(state.traitValues, state.activeSchema);
+            const lvl = set[traitKey];
+            return Number.isInteger(lvl) ? lvl : minLevel;
+          };
+          minus.addEventListener("click", () => {
+            dispatch({ type: "TRAIT_CHANGED", traitKey, level: currentLevel() - 1 });
+          });
+          plus.addEventListener("click", () => {
+            dispatch({ type: "TRAIT_CHANGED", traitKey, level: currentLevel() + 1 });
+          });
+
+          stepper.appendChild(minus);
+          stepper.appendChild(valueEl);
+          stepper.appendChild(plus);
+          controlRow.appendChild(stepper);
+
+          const rung = document.createElement("span");
+          rung.className = "rung-label";
+          controlRow.appendChild(rung);
+
+          traitEl.appendChild(controlRow);
+          // POINT_BUY 참조 형태: { minus, plus, valueEl, rung, mode }. 다른 모드는 { select, rung, mode }.
+          traitEls[trait.key] = { minus, plus, valueEl, rung, mode: "POINT_BUY" };
+          sectionEl.appendChild(traitEl);
+          continue;
+        }
+
+        const select = document.createElement("select");
+        select.id = selectId;
+        select.setAttribute("aria-label", raw.label || trait.key);
+
+        if (allocMode === "FIXED_VALUE") {
+          // FIXED_VALUE: 선택 값을 Value_Pool 인스턴스로 제한하고, 한 값 인스턴스를 한 항목에만 배정한다
+          // (일대일 배정, 요구사항 4.5). 옵션 value=인스턴스 인덱스, 표시=그 값의 등급 레이블.
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "(미배정)";
+          select.appendChild(placeholder);
+          fixedAssignment.valuePool.forEach((poolValue, instanceIndex) => {
+            const opt = document.createElement("option");
+            opt.value = String(instanceIndex);
+            opt.textContent = rungLabel(poolValue, raw);
+            select.appendChild(opt);
+          });
+          select.addEventListener("change", () => {
+            const raw2 = select.value;
+            if (raw2 === "") return;
+            const instanceIndex = parseInt(raw2, 10);
+            // 일대일 재배정: 같은 인스턴스를 쓰던 직전 항목은 미배정으로 되돌린다(assignFixedValue).
+            fixedAssignment = assignFixedValue(fixedAssignment, traitKey, instanceIndex);
+            // 배정 결과의 Trait_Level을 상태에 반영한다(기록은 state.traitValues에서 수집된다).
+            const level = fixedAssignment.valuePool[instanceIndex];
+            dispatch({ type: "TRAIT_CHANGED", traitKey, level });
+          });
+        } else {
+          // LADDER_SELECT·POINT_BUY·DICE_ROLL: 선택 가능 값을 그 Trait_Ladder의 정수 집합으로 제한한다
+          // (요구사항 5.2). 기존 동작 보존.
+          for (const level of trait.options) {
+            const opt = document.createElement("option");
+            opt.value = String(level);
+            opt.textContent = rungLabel(level, raw);
+            select.appendChild(opt);
+          }
+          select.addEventListener("change", () => {
+            dispatch({
+              type: "TRAIT_CHANGED",
+              traitKey,
+              level: parseInt(select.value, 10),
+            });
+          });
+        }
+        controlRow.appendChild(select);
+
+        const rung = document.createElement("span");
+        rung.className = "rung-label";
+        controlRow.appendChild(rung);
+
+        traitEl.appendChild(controlRow);
+        traitEls[trait.key] = { select, rung, mode: allocMode };
+        sectionEl.appendChild(traitEl);
+      }
+
+      sheetMount.appendChild(sectionEl);
+    }
+  }
+
+  // scenario-character-cards: Card_Based_Sheet의 역할 카드 목록을 렌더한다(cardListModel → DOM).
+  // 미리 선택된 카드 없이 각 카드를 roleLabel·premise(+backstoryGuidance)와 함께 그린다. 클릭 시
+  // CARD_SELECTED를 디스패치해 단일 선택을 적용하고, 직전 선택은 동기 재렌더(syncCards)로 즉시 해제한다.
+  // 모든 텍스트는 esc로 이스케이프해 HTML로 해석되지 않게 한다(요구사항 4.1, 4.2, 4.4).
+  function buildCards() {
+    cardMount.replaceChildren();
+    cardEls = [];
+    const model = cardListModel(state.activeSchema, state.selectedCardId);
+    for (const card of model.cards) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "role-card";
+      btn.setAttribute("role", "radio");
+      // 비어 있지 않은 접근성 레이블(요구사항 12.5).
+      btn.setAttribute("aria-label", card.roleLabel || card.id);
+      let html =
+        '<span class="role-card-label">' + esc(card.roleLabel) + "</span>" +
+        '<span class="role-card-premise">' + esc(card.premise) + "</span>";
+      if (card.backstoryGuidance) {
+        html += '<span class="role-card-guidance">' + esc(card.backstoryGuidance) + "</span>";
+      }
+      btn.innerHTML = html;
+      const cardId = card.id;
+      btn.addEventListener("click", () => {
+        dispatch({ type: "CARD_SELECTED", cardId });
+      });
+      cardMount.appendChild(btn);
+      cardEls.push(btn);
+    }
+  }
+
+  // 카드 선택 표시·읽기 전용 상태를 상태에서 동기화한다(구조는 그대로 둔다).
+  // cardListModel이 항상 최대 하나의 selected만 표시하므로 직전 선택은 즉시(동기) 해제된다(요구사항 4.3).
+  function syncCards(v) {
+    const model = cardListModel(state.activeSchema, state.selectedCardId);
+    cardEls.forEach((btn, i) => {
+      const card = model.cards[i];
+      const selected = !!(card && card.selected);
+      btn.setAttribute("aria-checked", selected ? "true" : "false");
+      btn.classList.toggle("selected", selected);
+      // Confirmed_State이면 읽기 전용(비활성). 조작해도 selectedCardId는 변하지 않는다(요구사항 8.1, 8.2).
+      btn.disabled = !v.cardSelectionEnabled;
+    });
+  }
+
+  // 표시 값·활성/비활성·등급 레이블을 상태에서 동기화한다(구조는 그대로 둔다).
+  function syncSheet(v) {
+    for (const fieldId of Object.keys(narrativeEls)) {
+      const el = narrativeEls[fieldId];
+      const val = state.narrativeValues[fieldId] != null ? state.narrativeValues[fieldId] : "";
+      // 타이핑 중 커서가 튀지 않도록 다를 때만 갱신한다.
+      if (el.value !== val) el.value = val;
+      el.disabled = !v.narrativeInputsEnabled;
+    }
+    // 화면에 표시되는 Trait_Level 한 벌(요구사항 5.4 수집 규칙과 동일).
+    const levels = collectRatedTraitSet(state.traitValues, state.activeSchema);
+    // POINT_BUY면 남은 배분 점수·Base_Level을 한 번 도출해 모든 스테퍼의 +/- 활성 여부에 쓴다.
+    let pbModel = null;
+    if (state.activeSchema.allocation && state.activeSchema.allocation.mode === "POINT_BUY") {
+      pbModel = allocationEditModel(state.activeSchema.allocation, state.activeSchema, {
+        traitValues: state.traitValues,
+        confirmed: state.confirmed,
+      });
+    }
+    for (const traitKey of Object.keys(traitEls)) {
+      const entry = traitEls[traitKey];
+
+      if (entry.mode === "POINT_BUY") {
+        // POINT_BUY 스테퍼: 값·등급 레이블을 동기화하고 경계·남은 점수로 +/-를 비활성화한다.
+        const { minus, plus, valueEl, rung } = entry;
+        const level = levels[traitKey];
+        const ladder = rawTraits[traitKey].ladder;
+        const baseLevel = pbModel.pointBuy.baseLevel;
+        const remaining = pbModel.pointBuy.remaining;
+        valueEl.textContent = String(level);
+        rung.textContent = rungLabel(level, rawTraits[traitKey]);
+        // − 는 Base_Level에서, + 는 사다리 상한이거나 남은 점수가 없을 때, 그리고 편집 비활성 시 막는다.
+        minus.disabled = !v.traitEditEnabled || level <= baseLevel;
+        plus.disabled = !v.traitEditEnabled || level >= ladder.max || remaining <= 0;
+        continue;
+      }
+
+      const { select, rung } = entry;
+      // 평가 편집 활성 여부: computeVisibility가 모드·확정·forcedRandom을 반영해 도출한다.
+      // (traitEditEnabled === false ⇔ traitsReadonly, 요구사항 5.5, 10.1).
+      select.disabled = !v.traitEditEnabled;
+
+      if (entry.mode === "FIXED_VALUE") {
+        // FIXED_VALUE: 선택 표시는 일대일 배정 상태(인스턴스 인덱스)에서 동기화한다.
+        const instanceIndex = fixedAssignment.assignments[traitKey];
+        const selVal = instanceIndex === undefined ? "" : String(instanceIndex);
+        if (select.value !== selVal) select.value = selVal;
+        // 등급 레이블은 배정된 Value_Pool 값으로, 미배정이면 비운다.
+        rung.textContent =
+          instanceIndex === undefined
+            ? ""
+            : rungLabel(fixedAssignment.valuePool[instanceIndex], rawTraits[traitKey]);
+      } else {
+        // LADDER_SELECT·POINT_BUY·DICE_ROLL: 표시 Trait_Level을 사다리 선택값으로 동기화한다.
+        const lvl = levels[traitKey];
+        const lvlStr = String(lvl);
+        if (select.value !== lvlStr) select.value = lvlStr;
+        // Trait_Level에 대응하는 Ladder_Rung_Label을 함께 표시한다(요구사항 2.5, 5.1).
+        rung.textContent = rungLabel(lvl, rawTraits[traitKey]);
+      }
+    }
+  }
+
+  // ---- 렌더 (상태의 함수) -------------------------------------------------
+  function render() {
+    const v = computeVisibility(state);
+
+    // Active_Sheet_Schema가 바뀌면(채택/폴백) 시트 구조를 다시 그린다(요구사항 13.3, 13.4).
+    if (renderedSchema !== state.activeSchema) {
+      renderedSchema = state.activeSchema;
+      buildSheet();
+      // scenario-character-cards: 역할 카드 목록도 스키마 변경 시 다시 그린다(요구사항 4.1).
+      buildCards();
+    }
+    syncSheet(v);
+    // scenario-character-cards: 카드 선택 표시·읽기 전용을 동기화하고, 카드 기반이 아니면 영역을 감춘다.
+    cardSection.hidden = !isCardBasedSheet(state.activeSchema);
+    syncCards(v);
+
+    // flexible-stat-allocation: 모드별 컨트롤(POINT_BUY 남은 점수·DICE_ROLL 굴림 동작/인디케이터)을
+    // 상태에서 동기적으로 갱신한다(남은 점수·재배정 결과는 dispatch→render 동기 렌더라 ≤200ms).
+    renderAllocationControls(v);
+
+    // 인계 무효 안내 (요구사항 1.3/1.4).
+    handoffInvalid.hidden = v.handoffValid;
+    if (!v.handoffValid) handoffInvalid.textContent = HANDOFF_INVALID_MESSAGE;
+
+    // 스키마 폴백 안내: 시나리오 맞춤 시트 로드 실패 시 기본 시트 사용 (요구사항 13.6).
+    schemaFallback.hidden = !state.usingDefaultSchema;
+    if (state.usingDefaultSchema) schemaFallback.textContent = SCHEMA_FALLBACK_MESSAGE;
+
+    // 영역별 진행 인디케이터 (요구사항 9.1, 13.9).
+    schemaLoading.hidden = !v.schemaLoading;
+    proposalLoading.hidden = !v.proposalLoading;
+    recordLoading.hidden = !v.recordLoading;
+    confirmLoading.hidden = !v.confirmLoading;
+
+    // 동작 버튼: 진행 중·확정 시 비활성 (요구사항 9.3, 9.4, 7.7).
+    // scenario-character-cards: attributeProposalSupported가 거짓이면 Propose_Action을 DOM에 표시하지 않는다
+    // (요구사항 2.1, 2.2). 숨기면 활성 여부와 무관하게 제안 요청 경로(runPropose)도 진입하지 않는다.
+    proposeBtn.hidden = !v.proposeVisible;
+    proposeBtn.disabled = !v.proposeEnabled;
+    confirmBtn.disabled = !v.confirmEnabled;
+
+    // 동일 입력 재시도 동작 (요구사항 10.4).
+    retryBtn.hidden = !v.retryEnabled;
+    retryBtn.disabled = !v.retryEnabled;
+
+    // 안내/오류 메시지 라우팅 (요구사항 12.6).
+    const notice = state.notice;
+    const statusText = notice && STATUS_NOTICES.has(notice) ? notice : "";
+    const errorText = notice && ERROR_NOTICES.has(notice) ? notice : "";
+    statusMessage.hidden = !statusText;
+    statusMessage.textContent = statusText;
+    errorMessage.hidden = !errorText;
+    errorMessage.textContent = errorText;
+  }
+
+  // ---- 부수효과: REST (AbortController 10초 타임아웃) ----------------------
+
+  // flexible-stat-allocation: 배분 모드별 컨트롤 렌더(상태의 함수).
+  // POINT_BUY 남은 배분 점수, DICE_ROLL 굴림 동작·진행 인디케이터를 모드·가시성에서 도출한다.
+  function renderAllocationControls(v) {
+    // scenario-character-cards: Rated_Trait_Count가 0이면 Stat_Setting_Section(배분 컨트롤)을 표시하지 않는다.
+    // 평가 편집 요소는 renderModel이 이미 산출하지 않으므로 모드별 컨트롤만 숨기면 된다(요구사항 2.3, 2.6).
+    if (!v.statSectionVisible) {
+      pointBuyRemainingEl.hidden = true;
+      rollActions.hidden = true;
+      rollLoading.hidden = true;
+      return;
+    }
+    const allocation = state.activeSchema.allocation || { mode: "LADDER_SELECT" };
+    const mode = allocation.mode || "LADDER_SELECT";
+
+    // POINT_BUY: 남은 배분 점수 = Point_Pool − Σ(Trait_Level − Base_Level)를 즉시 표시한다(요구사항 3.6).
+    if (mode === "POINT_BUY") {
+      const set = collectRatedTraitSet(state.traitValues, state.activeSchema);
+      const remaining = pointBuyRemaining(allocation, set);
+      pointBuyRemainingEl.hidden = false;
+      pointBuyRemainingEl.textContent = "남은 배분 점수: " + remaining;
+    } else {
+      pointBuyRemainingEl.hidden = true;
+    }
+
+    // DICE_ROLL: 굴림 버튼은 DICE_ROLL 모드에서만 노출하고, Confirmed_State·진행 중·굴림 중에는 비활성한다
+    // (요구사항 5.2, 10.1). rollActionEnabled는 computeVisibility가 도출한다.
+    if (mode === "DICE_ROLL") {
+      rollActions.hidden = false;
+      rollBtn.disabled = !v.rollActionEnabled || rollInFlight;
+    } else {
+      rollActions.hidden = true;
+    }
+    // 굴림 진행 인디케이터(요구사항 9.1).
+    rollLoading.hidden = !rollInFlight;
+  }
+
+  // ---- 부수효과: REST (AbortController 10초 타임아웃) ----------------------
+  // 응답을 JSON으로 안전하게 읽는다(본문이 없거나 파싱 실패면 undefined).
+  async function readJson(res) {
+    if (!res || typeof res.json !== "function") return undefined;
+    try {
+      return await res.json();
+    } catch {
+      return undefined;
+    }
+  }
+
+  // 요청 명세를 fetch로 전송하고, 결과를 분류 함수가 받는 outcome 객체로 환원한다.
+  // 10초 내 응답이 없으면 AbortController로 취소하고 timeout으로 환원한다(요구사항 9.5, 10.1).
+  async function sendRequest(req) {
+    const controller = newAbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetchImpl(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const body = await readJson(res);
+      return { kind: "response", response: { ok: res.ok, status: res.status }, body };
+    } catch (err) {
+      clearTimeout(timer);
+      // abort()로 취소되면 타임아웃, 그 외 fetch reject는 네트워크 오류.
+      const aborted = err && err.name === "AbortError";
+      return { kind: aborted ? "timeout" : "network" };
+    }
+  }
+
+  // -- 스키마 조회 (요구사항 13.1, 13.2, 13.6, 13.9) ------------------------
+  async function doSchema(req) {
+    lastIntent = "schema";
+    dispatch({ type: "SCHEMA_STARTED" });
+    const outcome = await sendRequest(req);
+    // SCHEMA_RESOLVED 리듀서가 selectActiveSchema/validateSchema로 채택/폴백을 결정한다.
+    dispatch({ type: "SCHEMA_RESOLVED", outcome });
+    // 응답에 실린 시나리오 제목/요약(스키마 본문엔 포함되나 Active_Sheet_Schema로는 정규화되지
+    // 않음)을 상단 배너에 표기한다. textContent로만 주입해 안전하다.
+    showScenarioBanner(outcome);
+    // 카드 기반 시트로 채택되면 서버가 분배한 손패(3장)를 조회해 전체 목록을 교체한다.
+    // (비카드 시나리오는 조회하지 않아 기존 흐름을 유지한다.)
+    if (isCardBasedSheet(state.activeSchema)) {
+      await doCards();
+    }
+  }
+
+  // sheet-schema 응답 본문의 scenarioTitle/scenarioSummary로 상단 배너를 채운다. 제목이 있으면
+  // 배너를 노출한다(호스트의 "메인으로 돌아가기" 노출은 renderReadiness가 별도로 처리한다).
+  function showScenarioBanner(outcome) {
+    const body = outcome && outcome.body && typeof outcome.body === "object" ? outcome.body : {};
+    const title = typeof body.scenarioTitle === "string" ? body.scenarioTitle.trim() : "";
+    const summary = typeof body.scenarioSummary === "string" ? body.scenarioSummary : "";
+    if (title.length > 0) {
+      scenarioBannerTitle.textContent = title;
+      scenarioBannerSummary.textContent = summary;
+      scenarioBannerSummary.hidden = summary.trim().length === 0;
+      scenarioBanner.hidden = false;
+    }
+  }
+
+  // scenario-character-cards: 서버가 분배한 손패(3장)를 조회해 CARD_HAND_RESOLVED로 채택한다.
+  // 성공 시에만 손패로 교체하고, 실패(전송 오류·무효 응답)면 아무 것도 하지 않아 전체
+  // characterCards 폴백을 유지한다(조회 실패가 작성을 막지 않는다).
+  async function doCards() {
+    const outcome = await sendRequest(
+      buildCardsRequest(state.handoff.roomId, state.handoff.playerId, state.handoff.token),
+    );
+    if (classifyOutcome(outcome) === "success") {
+      dispatch({ type: "CARD_HAND_RESOLVED", cards: parseCardHand(outcome.body) });
+    }
+  }
+
+  // -- AI 평가 항목 제안 (요구사항 4.1~4.5) ---------------------------------
+  function runPropose() {
+    if (!computeVisibility(state).proposeEnabled) return;
+    const concept = trimForSend(state.narrativeValues.concept || "");
+    // 컨셉이 비어 있으면 요청을 보내지 않고 안내만 표시한다(요구사항 4.2).
+    if (concept.length < 1) {
+      dispatch({ type: "PROPOSAL_BLANK_CONCEPT" });
+      return;
+    }
+    lastIntent = "proposal";
+    doProposal(
+      buildProposalRequest(
+        state.handoff.roomId,
+        state.handoff.playerId,
+        state.narrativeValues.concept || "",
+        renderedTraitKeys(state.activeSchema),
+        state.handoff.token,
+        state.handoff.ticket,
+      ),
+    );
+  }
+
+  async function doProposal(req) {
+    dispatch({ type: "PROPOSAL_STARTED" });
+    const outcome = await sendRequest(req);
+    const classified = classifyOutcome(outcome);
+    if (classified === "success") {
+      // validateProposal로 본문을 검증·적용한다(요구사항 4.3, 4.5).
+      dispatch({ type: "PROPOSAL_SUCCEEDED", body: outcome.body });
+    } else {
+      dispatch({ type: "PROPOSAL_FAILED", kind: classified });
+    }
+  }
+
+  // -- 저장(기록) (요구사항 6.1~6.8) ----------------------------------------
+  // NOTE: 현재 UI에는 "저장" 버튼이 없다(확정 하나로 단순화). 아래 runSave/doRecordSave는
+  // 기록(저장) 경로의 흔적으로 의도적으로 남겨 둔 것이며, 추후 캠페인 기능(성장한 캐릭터의
+  // 중간 저장·불러오기)에서 버튼을 다시 배선해 재사용할 수 있다. 확정 흐름(runConfirm →
+  // doConfirmFlow)이 이미 doRecordSave와 동일한 기록 요청(currentRecordRequest)을 1단계로
+  // 사용하므로 기록 경로는 계속 검증된다.
+  function runSave() {
+    if (!computeVisibility(state).saveEnabled) return;
+    const name = trimForSend(state.narrativeValues.name || "");
+    // 이름이 비어 있으면 요청을 보내지 않고 안내만 표시한다(요구사항 6.2).
+    if (name.length < 1) {
+      dispatch({ type: "SAVE_BLANK_NAME" });
+      return;
+    }
+    // 카드 기반인데 카드 미선택이면 요청을 보내지 않고 한국어 안내만 표시한다(입력 보존). (요구사항 5.1)
+    if (cardSelectionBlocked()) {
+      dispatch({ type: "RECORD_RESULT", result: RecordRejection.INVALID_CARD });
+      return;
+    }
+    lastIntent = "save";
+    doRecordSave(currentRecordRequest());
+  }
+
+  async function doRecordSave(req) {
+    dispatch({ type: "RECORD_STARTED" });
+    const outcome = await sendRequest(req);
+    const result = classifyRecordResult(outcome);
+    if (RECORD_RESULTS.has(result)) {
+      dispatch({ type: "RECORD_RESULT", result });
+    } else {
+      // 전송 오류(network/timeout/server/auth)는 RECORD_FAILED로 회복·재시도 가능(요구사항 10.x).
+      dispatch({ type: "RECORD_FAILED", kind: result });
+    }
+  }
+
+  // -- 확정(2단계 순차: 기록 → 성공 시에만 확정) (요구사항 7.1~7.7) ----------
+  function runConfirm() {
+    if (!computeVisibility(state).confirmEnabled) return;
+    const name = trimForSend(state.narrativeValues.name || "");
+    // 이름이 비어 있으면 기록·확정 요청을 모두 보내지 않는다(요구사항 7.6).
+    if (name.length < 1) {
+      dispatch({ type: "CONFIRM_BLANK_NAME" });
+      return;
+    }
+    // 카드 기반인데 카드 미선택이면 기록·확정 요청을 모두 보내지 않고 안내만 표시한다(확정 미전이). (요구사항 5.1)
+    if (cardSelectionBlocked()) {
+      dispatch({ type: "CONFIRM_RECORD_RESULT", result: RecordRejection.INVALID_CARD });
+      return;
+    }
+    lastIntent = "confirm";
+    doConfirmFlow(currentRecordRequest());
+  }
+
+  // 1단계: 기록을 먼저 전송한다(요구사항 7.1).
+  async function doConfirmFlow(recordReq) {
+    dispatch({ type: "RECORD_STARTED" });
+    const outcome = await sendRequest(recordReq);
+    const result = classifyRecordResult(outcome);
+    if (!RECORD_RESULTS.has(result)) {
+      // 기록 단계 전송 오류 → 회복·재시도 가능. 확정은 보내지 않는다(요구사항 10.x).
+      dispatch({ type: "RECORD_FAILED", kind: result });
+      return;
+    }
+    dispatch({ type: "CONFIRM_RECORD_RESULT", result });
+    // 2단계: 기록이 성공일 때만 확정을 전송한다(요구사항 7.2/7.3/7.4).
+    if (decideConfirmStep(result) !== "send-confirm") return;
+    await doConfirm(buildConfirmRequest(state.handoff));
+  }
+
+  async function doConfirm(confirmReq) {
+    dispatch({ type: "CONFIRM_STARTED" });
+    const outcome = await sendRequest(confirmReq);
+    // 거부는 HTTP 200 또는 4xx 본문의 reason으로 노출될 수 있다(요구사항 7.5).
+    const reason =
+      outcome && outcome.body && typeof outcome.body === "object" ? outcome.body.reason : null;
+    if (reason === "NO_CHARACTER") {
+      dispatch({ type: "CONFIRM_RESULT", result: "NO_CHARACTER" });
+      return;
+    }
+    // CARD_TAKEN: 선택한 역할 카드를 다른 플레이어가 이미 확정해 점유함. 비확정 유지 + 안내 표시
+    // 후 손패를 다시 조회해(CARD_HAND_RESOLVED) 점유된 카드를 빼고 낡은 선택을 비워 재선택을 유도한다.
+    if (reason === "CARD_TAKEN") {
+      dispatch({ type: "CONFIRM_RESULT", result: "CARD_TAKEN" });
+      await doCards();
+      return;
+    }
+    // 거부 사유가 없을 때에만 성공/전송 오류 분류로 넘어간다.
+    const classified = classifyOutcome(outcome);
+    if (classified === "success") {
+      dispatch({ type: "CONFIRM_RESULT", result: "success" });
+    } else {
+      dispatch({ type: "CONFIRM_FAILED", kind: classified });
+    }
+  }
+
+  // 현재 보존된 입력으로 기록 요청 명세를 만든다(저장·확정 1단계 공용).
+  function currentRecordRequest() {
+    return buildRecordRequest(
+      state.handoff,
+      state.narrativeValues.name || "",
+      state.narrativeValues,
+      collectRatedTraitSet(state.traitValues, state.activeSchema),
+      // scenario-character-cards: Card_Based_Sheet의 Selected_Card Card_Id를 포함한다(없으면 생략). (요구사항 4.5)
+      typeof state.selectedCardId === "string" ? state.selectedCardId : undefined,
+    );
+  }
+
+  // scenario-character-cards: Card_Based_Sheet에서 카드 선택을 사전 검증한다. 무효(미선택·목록 외)이면
+  // 어떤 기록/확정 요청도 전송하지 않고 한국어 안내(CARD_REQUIRED_MESSAGE)를 표시하며 입력을 보존한다.
+  // CARD_REQUIRED_MESSAGE는 RECORD_REJECTION_MESSAGES.INVALID_CARD와 동일 문구이므로 거부 결과 액션으로
+  // 안내를 라우팅한다(확정 미전이). 카드 기반이 아니면 검증을 적용하지 않는다(요구사항 5.1, 6.4).
+  function cardSelectionBlocked() {
+    const schema = state.activeSchema;
+    if (!isCardBasedSheet(schema)) return false;
+    return !validateCardSelection(schema.characterCards, state.selectedCardId).ok;
+  }
+
+  // -- 동일 입력 재시도 (요구사항 10.6) -------------------------------------
+  function runRetry() {
+    if (!computeVisibility(state).retryEnabled) return;
+    // 보존된 입력으로 직전 실패 요청 명세를 1회 재구성한다.
+    const req = nextRequestForRetry(state);
+    if (!req) return;
+    switch (state.lastRequest) {
+      case "proposal":
+        doProposal(req);
+        break;
+      case "record":
+        // 확정 1단계(기록)에서 실패했으면 확정 흐름을, 단순 저장이면 저장을 다시 실행한다.
+        if (lastIntent === "confirm") doConfirmFlow(req);
+        else doRecordSave(req);
+        break;
+      case "confirm":
+        doConfirm(req);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // -- DICE_ROLL 굴림 (서버 측 무작위, 요구사항 5.2, 5.7, 5.8) ---------------
+  // 무작위는 서버가 생성한다. 클라이언트는 buildRollRequest로 식별 정보만 보내고 어떤 무작위도 만들지 않는다.
+  // 다른 REST 요청과 동일한 AbortController 10초 타임아웃(sendRequest)을 적용한다.
+  async function runRoll() {
+    const v = computeVisibility(state);
+    // DICE_ROLL·유효 인계·비확정·진행 중 아님일 때만 굴린다(요구사항 5.2, 10.1).
+    if (!v.rollActionEnabled || rollInFlight) return;
+    rollInFlight = true;
+    // 진행 인디케이터 표시 + 굴림 버튼 비활성(전송 즉시).
+    rollLoading.hidden = false;
+    rollBtn.disabled = true;
+
+    const outcome = await sendRequest(buildRollRequest(state.handoff));
+    rollInFlight = false;
+    const classified = classifyOutcome(outcome);
+    if (classified === "success") {
+      // 응답을 validateRollResponse로 검증해 모든 Rated_Trait에 정수 Trait_Level이 있을 때만 적용한다.
+      const validated = validateRollResponse(outcome.body, state.activeSchema);
+      if (validated.ok) {
+        dispatch({ type: "ROLL_SUCCEEDED", body: outcome.body });
+      } else {
+        // 누락·비정수 응답: 기존 Trait_Level을 유지하고 한국어 안내를 표시한다(요구사항 5.8).
+        dispatch({ type: "ROLL_INVALID_RESPONSE" });
+      }
+    } else {
+      // 타임아웃·네트워크·서버·인증 오류: 기존 Trait_Level을 유지하고 한국어 안내를 표시한다(요구사항 5.7).
+      dispatch({ type: "ROLL_FAILED", kind: classified });
+    }
+  }
+
+  // ---- 사용자 동작 배선 ---------------------------------------------------
+  proposeBtn.addEventListener("click", runPropose);
+  confirmBtn.addEventListener("click", runConfirm);
+  retryBtn.addEventListener("click", runRetry);
+  rollBtn.addEventListener("click", runRoll);
+
+  // 확정 후 다음 화면(게임)으로의 진입은 별도 "다음" 버튼이 아니라, 호스트가 "세션 시작"을
+  // 누르면 서버가 세션을 시작하고 readiness 폴링(아래)이 전원을 자동으로 이동시킨다.
+
+  // ---- 준비 현황 · 호스트 세션 시작 (멀티플레이어, ADDITIVE) ---------------
+  // 기존 dispatch/reduce 상태 기계와 독립적으로, 부수효과 계층이 readiness를 주기적으로
+  // 폴링해 준비 인원·호스트 시작 버튼·대기 안내를 렌더한다. 외부 의존성은 기존 fetch 훅을
+  // 재사용하고, 폴링 간격은 window.__characterReadinessPollMs로 주입 가능하게 한다(테스트용).
+  const READINESS_POLL_INTERVAL_MS = 2000;
+  const readinessPollMs =
+    typeof window.__characterReadinessPollMs === "number" &&
+    window.__characterReadinessPollMs > 0
+      ? window.__characterReadinessPollMs
+      : READINESS_POLL_INTERVAL_MS;
+
+  /** @type {ReturnType<typeof parseReadiness> | null} */
+  let readiness = null;
+  let readinessIntervalId = null;
+  let startInFlight = false;
+  // 세션 시작(started) 시 게임 화면으로 정확히 1회만 이동하기 위한 가드.
+  let startedNavigated = false;
+  // 호스트가 전원을 로비로 되돌릴 때(returnToLobby) 정확히 1회만 이동하기 위한 가드.
+  let returnNavigated = false;
+
+  // 준비 현황 영역을 현재 readiness·인계로부터 렌더한다(상태의 함수).
+  function renderReadiness() {
+    if (!readiness) return;
+    // 준비(확정) 인원을 항상 표시한다.
+    readinessText.textContent = formatReadiness(readiness);
+
+    if (isHostViewer(state.handoff, readiness)) {
+      // 호스트: 시작 버튼 노출, 전원 확정 시에만 활성. 대기 안내는 숨긴다.
+      startSessionBtn.hidden = false;
+      startSessionBtn.disabled = startInFlight || !hostStartEnabled(readiness);
+      waitingForHost.hidden = true;
+      // 호스트는 "메인으로 돌아가기"로 로비(시나리오 변경 화면)로 돌아갈 수 있다. 배너도 함께 노출.
+      backToLobbyBtn.hidden = false;
+      backToLobbyHint.hidden = false;
+      scenarioBanner.hidden = false;
+    } else {
+      // 비호스트: 시작 버튼 숨김, 호스트 대기 안내 표시. 메인으로 돌아가기는 호스트 전용.
+      startSessionBtn.hidden = true;
+      waitingForHost.hidden = false;
+      waitingForHost.textContent = WAITING_FOR_HOST_MESSAGE;
+      backToLobbyBtn.hidden = true;
+      backToLobbyHint.hidden = true;
+    }
+  }
+
+  // 세션이 시작되면 모든 플레이어가 게임 화면으로 1회 이동하고 폴링을 멈춘다.
+  function maybeNavigateOnStarted() {
+    if (readiness && readiness.started === true && !startedNavigated) {
+      startedNavigated = true;
+      stopReadinessPolling();
+      navigate(buildNextSearch(state.handoff));
+    }
+  }
+
+  // 호스트가 "메인으로 돌아가기"를 누르면(readiness.returnToLobby) 캐릭터 화면의 모든 플레이어가
+  // 함께 로비로 1회 이동하고 폴링을 멈춘다.
+  function maybeNavigateOnReturnToLobby() {
+    if (readiness && readiness.returnToLobby === true && !returnNavigated && !startedNavigated) {
+      returnNavigated = true;
+      stopReadinessPolling();
+      goToLobby();
+    }
+  }
+
+  function stopReadinessPolling() {
+    if (readinessIntervalId != null) {
+      clearInterval(readinessIntervalId);
+      readinessIntervalId = null;
+    }
+  }
+
+  // 1회 폴링: readiness를 조회·정규화·저장한 뒤 렌더하고, started면 이동한다.
+  // fetch 오류는 무시하고 폴링을 계속한다(회복 탄력성).
+  async function pollReadinessOnce() {
+    try {
+      const res = await fetchImpl(buildReadinessRequest(state.handoff).url, {
+        method: "GET",
+        headers: buildReadinessRequest(state.handoff).headers,
+      });
+      const body = await readJson(res);
+      readiness = parseReadiness(body);
+      renderReadiness();
+      // 로비 복귀가 요청됐으면 게임 이동보다 우선해 전원을 로비로 되돌린다.
+      maybeNavigateOnReturnToLobby();
+      maybeNavigateOnStarted();
+    } catch {
+      // 네트워크 오류 등은 무시하고 다음 주기를 기다린다.
+    }
+  }
+
+  function startReadinessPolling() {
+    // 즉시 1회 조회한 뒤 주기적으로 갱신한다.
+    pollReadinessOnce();
+    readinessIntervalId = setInterval(pollReadinessOnce, readinessPollMs);
+  }
+
+  // 호스트가 "세션 시작"을 누르면 start 요청을 1회 전송한다(전송 중 버튼 비활성).
+  // 서버가 세션을 실제로 시작했는지(started)를 정직하게 확인해, 시작하지 못했으면(예: 동시 세션
+  // 용량 초과) 호스트를 로비 화면으로 되돌리고 실패 안내를 보여준다. 성공이면 다음 폴링이
+  // started=true를 관찰해 전원을 게임 화면으로 이동시킨다.
+  async function runStartSession() {
+    if (startInFlight || !hostStartEnabled(readiness)) return;
+    startInFlight = true;
+    startSessionBtn.disabled = true;
+    let failed = false;
+    let reason = "";
+    try {
+      const req = buildStartRequest(state.handoff);
+      const res = await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
+      const body = await readJson(res);
+      const ok = body && body.ok === true && body.started === true;
+      failed = !ok;
+      // 서버가 알려준 실패 사유(AT_CAPACITY / NOT_ALL_CONFIRMED 등)를 로비로 전달해 안내한다.
+      if (!ok && body && typeof body.reason === "string") reason = body.reason;
+    } catch {
+      // 전송 오류도 시작 실패로 간주한다.
+      failed = true;
+      reason = "NETWORK";
+    } finally {
+      startInFlight = false;
+    }
+    if (failed) {
+      stopReadinessPolling();
+      goToLobby({ startErrorReason: reason || "START_FAILED" });
+      return;
+    }
+    // 버튼 활성 여부를 현재 readiness 기준으로 재계산한다(성공 시 다음 폴링이 이동을 처리).
+    renderReadiness();
+  }
+
+  // 호스트를 로비(메인) 화면으로 되돌린다. roomId·playerId·token·ticket과 (readiness가 알려준)
+  // hostPlayerId를 실어 로비 인계를 유효하게 만든다. startErrorReason이 있으면 ?startError=<사유>로
+  // 로비가 구체적 실패 안내를 표시한다(세션 시작 실패 시). 일반 "메인으로 돌아가기"는 사유 없이 이동한다.
+  function goToLobby({ withError, startErrorReason } = {}) {
+    const h = state.handoff || {};
+    const params = new URLSearchParams();
+    params.set("roomId", h.roomId || "");
+    const hostId = readiness && readiness.hostPlayerId ? readiness.hostPlayerId : "";
+    if (hostId) params.set("hostPlayerId", hostId);
+    if (h.playerId) params.set("playerId", h.playerId);
+    if (h.token) params.set("token", h.token);
+    if (h.ticket) params.set("ticket", h.ticket);
+    const reason = startErrorReason || (withError ? "1" : "");
+    if (reason) params.set("startError", reason);
+    const url = "/lobby/?" + params.toString();
+    (window.__characterNavigateLobby || ((u) => location.assign(u)))(url);
+  }
+
+  // "메인으로 돌아가기"(호스트): 서버에 로비 복귀를 알려 캐릭터 화면의 모든 플레이어가 함께
+  // 로비로 돌아오게 한 뒤, 본인도 로비로 이동한다(에러 표시 없음). 다른 플레이어는 readiness
+  // 폴링으로 returnToLobby를 보고 따라온다.
+  backToLobbyBtn.addEventListener("click", async () => {
+    if (backToLobbyBtn.disabled) return;
+    backToLobbyBtn.disabled = true;
+    stopReadinessPolling();
+    try {
+      const req = buildReturnToLobbyRequest(state.handoff);
+      await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
+    } catch {
+      // 전송 오류가 나도 본인은 로비로 이동한다(다른 플레이어는 다음 폴링에서 따라올 수 있다).
+    }
+    goToLobby();
+  });
+
+  startSessionBtn.addEventListener("click", runStartSession);
+
+  // ---- 부팅 ---------------------------------------------------------------
+  render();
+  // 인계가 유효할 때만 시나리오 스키마 조회를 시작한다(무효면 안내만, 요구사항 1.3/13.1).
+  if (state.handoffValid) {
+    doSchema(buildSchemaRequest(state.handoff.roomId, state.handoff.token));
+    // 인계가 유효하면 준비 현황 폴링도 시작한다(멀티플레이어 흐름).
+    startReadinessPolling();
+  }
+</script>
+</body>
+</html>

@@ -32,6 +32,41 @@ export function difficultyTarget(difficulty: DifficultyGrade): number {
 }
 
 /**
+ * Inclusive bounds of the EZFudge attribute ladder (design.md: Terrible=-2 …
+ * Superb=+4). These are the DEFAULT rungs; a deployment can override the band
+ * via {@link import("./types.js").EngineConfig.attributeLadder} when a scenario
+ * or rule system uses a different ladder. Attribute levels outside the active
+ * band are rejected at the boundaries (AI proposals and player edits) so
+ * difficulty math cannot be skewed by out-of-ladder values.
+ */
+export const ATTRIBUTE_LEVEL_MIN = -2;
+export const ATTRIBUTE_LEVEL_MAX = 4;
+
+/** An inclusive integer attribute ladder band. */
+export interface AttributeLadder {
+  min: number;
+  max: number;
+}
+
+/** The default EZFudge attribute ladder `[-2, +4]`. */
+export const DEFAULT_ATTRIBUTE_LADDER: AttributeLadder = {
+  min: ATTRIBUTE_LEVEL_MIN,
+  max: ATTRIBUTE_LEVEL_MAX,
+};
+
+/**
+ * Whether `level` is an integer on the given attribute `ladder` (defaults to
+ * {@link DEFAULT_ATTRIBUTE_LADDER}). Pass a configured ladder to validate
+ * against a non-default rule system.
+ */
+export function isValidAttributeLevel(
+  level: number,
+  ladder: AttributeLadder = DEFAULT_ATTRIBUTE_LADDER,
+): boolean {
+  return Number.isInteger(level) && level >= ladder.min && level <= ladder.max;
+}
+
+/**
  * Resolve an EZFudge check to an {@link OutcomeGrade}.
  *
  * `margin = (attribute + roll) - difficultyTarget(difficulty)`, then:
@@ -57,4 +92,28 @@ export function resolveCheck(
   if (margin === 0) return "Partial Success";
   if (margin <= 2) return "Success";
   return "Critical Success";
+}
+
+/**
+ * Per-check advantage mode, mirroring D&D 5e advantage/disadvantage. The engine
+ * (server) rolls the EZFudge dice twice and keeps the higher (advantage) or
+ * lower (disadvantage) summed total; `"none"` rolls once. The AI GM may PROPOSE
+ * a mode per check, but randomness always stays server-side in the
+ * {@link import("./dice.js").DiceService} — the AI never produces the value.
+ */
+export type RollAdvantage = "none" | "advantage" | "disadvantage";
+
+/**
+ * Choose the resolved roll from one or more EZFudge totals per advantage mode.
+ * `none` -> `rolls[0]`; `advantage` -> `max(rolls)`; `disadvantage` ->
+ * `min(rolls)`. Pure and deterministic; the caller (engine) supplies the
+ * server-rolled totals.
+ */
+export function chooseAdvantageRoll(rolls: readonly number[], advantage: RollAdvantage): number {
+  if (!Array.isArray(rolls) || rolls.length === 0) {
+    throw new RangeError("chooseAdvantageRoll requires at least one roll");
+  }
+  if (advantage === "advantage") return rolls.reduce((a, b) => (b > a ? b : a), rolls[0]);
+  if (advantage === "disadvantage") return rolls.reduce((a, b) => (b < a ? b : a), rolls[0]);
+  return rolls[0];
 }

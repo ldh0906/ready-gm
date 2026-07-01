@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm — 방 입장</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 15px/1.65 system-ui, "Malgun Gothic", sans-serif;
+    background: #0f1115;
+    color: #e7e9ee;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 10px 16px;
+    background: #171a21;
+    border-bottom: 1px solid #262b36;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex: 0 0 auto;
+  }
+  header .badge {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #222836;
+    color: #9fb0c8;
+  }
+
+  /* Single column layout; never exceeds the viewport so there is no
+     horizontal scroll on narrow (320–767px) screens. */
+  main {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px 16px 48px;
+  }
+
+  .intro { margin: 0 0 24px; }
+  .intro h1 { font-size: 22px; margin: 0 0 10px; }
+  .intro p { margin: 6px 0; color: #c4ccda; }
+
+  .card {
+    background: #161922;
+    border: 1px solid #262b36;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 18px;
+  }
+  .card h2 { font-size: 16px; margin: 0 0 12px; }
+
+  label { display: block; font-size: 13px; color: #9fb0c8; margin-bottom: 6px; }
+  input, button { font: inherit; }
+  input[type=text] {
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 10px 12px;
+    width: 100%;
+  }
+
+  .actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    background: #2f6df0;
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Visible focus indicator distinct from the dark background. */
+  a:focus-visible,
+  input:focus-visible,
+  button:focus-visible {
+    outline: 3px solid #f0c040;
+    outline-offset: 2px;
+  }
+
+  .field-error { color: #ef8b8b; font-size: 13px; margin-top: 8px; min-height: 1em; }
+  .form-error {
+    color: #ef8b8b;
+    font-size: 14px;
+    background: #2a1b1f;
+    border: 1px solid #5a2b33;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+  .invalid-notice {
+    color: #f0c040;
+    font-size: 14px;
+    background: #241f12;
+    border: 1px solid #5a4a2b;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+
+  .progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #f0c040;
+    font-size: 14px;
+    margin-top: 14px;
+  }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 767px) {
+    main { padding: 16px 12px 40px; }
+    .actions button { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <strong>ready-gm</strong>
+  <span class="badge">방 입장 · 초대</span>
+</header>
+
+<main>
+  <!-- 소개 -->
+  <section class="intro" aria-labelledby="intro-title">
+    <h1 id="intro-title">방에 입장하기</h1>
+    <p>초대 링크로 방에 입장합니다. 방에서 사용할 표시 이름을 입력하고 입장 버튼을 눌러 주세요.</p>
+  </section>
+
+  <!-- 초대 링크 무효 안내 영역 (경로에 토큰이 없을 때) -->
+  <p id="invalidNotice" class="invalid-notice" role="alert" aria-live="assertive" hidden></p>
+
+  <!-- Join_Form: 표시 이름 입력 + 입장 -->
+  <section class="card" aria-labelledby="form-title">
+    <h2 id="form-title">표시 이름</h2>
+    <label for="displayName">표시 이름</label>
+    <input
+      id="displayName"
+      type="text"
+      placeholder="방에서 사용할 이름"
+      autocomplete="off"
+      aria-describedby="nameError"
+    />
+    <!-- 입력과 aria-describedby로 연관된 검증 안내 영역 -->
+    <p id="nameError" class="field-error" role="alert" aria-live="assertive"></p>
+
+    <div class="actions">
+      <button id="joinBtn" type="button" aria-label="방에 입장">입장</button>
+    </div>
+
+    <!-- 진행 인디케이터 -->
+    <div id="progress" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>방에 입장하는 중이에요…</span>
+    </div>
+
+    <!-- 서버·네트워크·타임아웃·정원·권한 오류 영역 -->
+    <p id="formError" class="form-error" role="alert" aria-live="polite" hidden></p>
+  </section>
+</main>
+
+<script type="module">
+  import {
+    REQUEST_TIMEOUT_MS,
+    INVALID_LINK_MESSAGE,
+    BLANK_NAME_MESSAGE,
+    OUTCOME_MESSAGES,
+    extractInviteToken,
+    isBlankName,
+    buildJoinRequest,
+    classifyOutcome,
+    validateJoinResponse,
+    buildLobbySearch,
+  } from "./logic.js";
+
+  const $ = (id) => document.getElementById(id);
+
+  // ---- DOM 참조 -----------------------------------------------------------
+  const invalidNotice = $("invalidNotice");
+  const nameInput = $("displayName");
+  const nameError = $("nameError");
+  const joinBtn = $("joinBtn");
+  const progress = $("progress");
+  const formError = $("formError");
+
+  // ---- 주입 가능한 부수효과 어댑터 (테스트가 load 이전에 교체 가능) -------
+  // window.__joinFetch              : fetch 구현 (기본 window.fetch)
+  // window.__joinNewAbortController : AbortController 팩토리 (기본 new AbortController)
+  // window.__joinNavigate           : 로비 인계 네비게이터 (기본 location.assign)
+  const fetchImpl = (url, opts) =>
+    (window.__joinFetch || window.fetch).call(window, url, opts);
+  const newAbortController = () =>
+    window.__joinNewAbortController
+      ? window.__joinNewAbortController()
+      : new AbortController();
+  const navigate =
+    window.__joinNavigate || ((search) => location.assign("/lobby/" + search));
+
+  // ---- 인계 입력: 경로에서 초대 토큰을, 쿼리에서 접근 토큰을 1회 읽는다. ---
+  const INVITE_TOKEN = extractInviteToken(location.pathname);
+  const TOKEN = new URLSearchParams(location.search).get("token") || "";
+
+  // 입장 요청이 진행 중인지(중복 전송 방지) 추적.
+  let submitting = false;
+
+  // ---- 렌더 보조 ----------------------------------------------------------
+  function showFormError(message) {
+    formError.hidden = false;
+    formError.textContent = message;
+  }
+  function clearFormError() {
+    formError.hidden = true;
+    formError.textContent = "";
+  }
+  function setProgress(on) {
+    progress.hidden = !on;
+  }
+
+  // ---- 초대 토큰 무효 처리: 안내 표시 + 입장 비활성 -----------------------
+  const hasInviteToken = INVITE_TOKEN.length > 0;
+  if (!hasInviteToken) {
+    invalidNotice.hidden = false;
+    invalidNotice.textContent = INVALID_LINK_MESSAGE;
+    joinBtn.disabled = true;
+    nameInput.disabled = true;
+  }
+
+  // ---- 부수효과: POST /rooms/:token/join (AbortController 10초 타임아웃) ---
+  async function sendJoinRequest() {
+    const req = buildJoinRequest(INVITE_TOKEN, nameInput.value, TOKEN);
+
+    // 표준 AbortController + setTimeout으로 타임아웃을 구현한다(테스트에서
+    // 가짜 타이머·주입 컨트롤러로 제어 가능). REQUEST_TIMEOUT_MS(10초)를 사용한다.
+    const controller = newAbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    let outcome;
+    let res;
+    try {
+      res = await fetchImpl(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      outcome = classifyOutcome({
+        kind: "response",
+        response: { ok: res.ok, status: res.status },
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      // abort()로 취소되면 타임아웃, 그 외 fetch reject는 네트워크 오류.
+      const aborted = err && err.name === "AbortError";
+      outcome = classifyOutcome({ kind: aborted ? "timeout" : "network" });
+    }
+
+    if (outcome === "success") {
+      let body = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      const validated = validateJoinResponse(body);
+      if (validated.ok) {
+        // 입장 성공: 로비로 입장 플레이어 신원(playerId)과 연결 티켓(ticket)을 인계한다.
+        const search = buildLobbySearch({
+          roomId: validated.roomId,
+          playerId: validated.playerId,
+          token: TOKEN,
+          ticket: validated.connectionToken,
+        });
+        navigate(search);
+        return;
+      }
+      // 응답 본문이 형식 위반 → 서버 오류로 환원하고 재시도 허용.
+      finishWithError(OUTCOME_MESSAGES.server);
+      return;
+    }
+
+    // 실패: 분류된 한국어 메시지를 표시하고 재시도 허용.
+    finishWithError(OUTCOME_MESSAGES[outcome] || OUTCOME_MESSAGES.server);
+  }
+
+  function finishWithError(message) {
+    submitting = false;
+    setProgress(false);
+    joinBtn.disabled = false;
+    showFormError(message);
+  }
+
+  // ---- 사용자 동작 배선 ---------------------------------------------------
+  nameInput.addEventListener("input", () => {
+    // 타이핑 시 입력 인접 검증 안내는 제거한다(폼 오류는 다음 시도까지 유지).
+    nameError.textContent = "";
+  });
+
+  joinBtn.addEventListener("click", () => {
+    if (!hasInviteToken || submitting) {
+      return;
+    }
+    // 빈 이름 차단: 안내만 표시하고 요청을 보내지 않는다.
+    if (isBlankName(nameInput.value)) {
+      nameError.textContent = BLANK_NAME_MESSAGE;
+      return;
+    }
+    // 유효: 진행 상태로 전이하고 요청을 1회 전송한다.
+    nameError.textContent = "";
+    clearFormError();
+    submitting = true;
+    setProgress(true);
+    joinBtn.disabled = true;
+    sendJoinRequest();
+  });
+</script>
+</body>
+</html>

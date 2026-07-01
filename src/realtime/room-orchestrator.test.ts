@@ -21,6 +21,8 @@ import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
 import type { TurnState } from "../core/turn-state.js";
 import { InMemoryRoomStore } from "../services/room-store.js";
 import { InMemoryTurnStateStore } from "../services/turn-state-store.js";
+import { InMemoryClockStore } from "../services/clock-store.js";
+import { InMemorySceneStore } from "../services/scene-store.js";
 import { MVP_SCENARIO, ScenarioService } from "../services/scenario-service.js";
 import type { Character, Player, Room } from "../services/types.js";
 import { InMemorySessionSummaryRepository } from "../persistence/pg-session-summary-repository.js";
@@ -151,6 +153,8 @@ interface Harness {
   sink: InMemoryEventSink;
   coordinator: FakeCoordinator;
   clock: ReturnType<typeof makeClock>;
+  clockStore: InMemoryClockStore | undefined;
+  sceneStore: InMemorySceneStore | undefined;
 }
 
 /** Build a room with a host + one other player, both with confirmed characters. */
@@ -177,7 +181,12 @@ function seedRoom(roomStore: InMemoryRoomStore): void {
   for (const c of characters) roomStore.saveCharacter(c);
 }
 
-function makeHarness(coordinator: FakeCoordinator, clock = makeClock()): Harness {
+function makeHarness(
+  coordinator: FakeCoordinator,
+  clock = makeClock(),
+  clockStore?: InMemoryClockStore,
+  sceneStore?: InMemorySceneStore,
+): Harness {
   const roomStore = new InMemoryRoomStore();
   const turnStateStore = new InMemoryTurnStateStore();
   const summaries = new InMemorySessionSummaryRepository();
@@ -198,9 +207,11 @@ function makeHarness(coordinator: FakeCoordinator, clock = makeClock()): Harness
     eventSink: sink,
     config: DEFAULT_ENGINE_CONFIG,
     now: clock.now,
+    ...(clockStore ? { clockStore } : {}),
+    ...(sceneStore ? { sceneStore } : {}),
   });
 
-  return { orchestrator, gateway, connection, roomStore, turnStateStore, summaries, sink, coordinator, clock };
+  return { orchestrator, gateway, connection, roomStore, turnStateStore, summaries, sink, coordinator, clock, clockStore, sceneStore };
 }
 
 /** Start the session and drain the opening narration. */
@@ -243,6 +254,113 @@ describe("RoomOrchestrator", () => {
 
     // The resolution narration was delivered (R10.4, R15.5).
     expect(h.connection.narrations().some((n) => n.kind === "resolution" && n.roundNumber === 1)).toBe(true);
+  });
+
+  it("seeds scenario clocks, supplies them to resolution, and persists the applied result", async () => {
+    const clockStore = new InMemoryClockStore();
+    const coordinator = new FakeCoordinator({
+      resolve: (input) => ({
+        ok: true,
+        narration: "결과 내레이션",
+        checks: [],
+        endingReached: false,
+        context: input as unknown as TurnStateContext,
+        // Engine applies a +1 to every supplied clock this round.
+        clocks: (input.clocks ?? []).map((c) => ({ ...c, value: c.value + 1 })),
+        firedClocks: [],
+      }),
+    });
+    const h = makeHarness(coordinator, makeClock(), clockStore);
+
+    await start(h);
+
+    // Scenario clocks seeded at session start (the-sunless-crypt).
+    const seeded = clockStore.get(ROOM_ID);
+    expect(seeded.map((c) => c.id).sort()).toEqual(["crypt_alert", "ritual_progress"]);
+    expect(seeded.every((c) => c.value === 0)).toBe(true);
+
+    // Drive a round to resolution.
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    // The seeded clocks were supplied to resolveRound...
+    expect(coordinator.lastResolveInput?.clocks?.map((c) => c.id).sort()).toEqual([
+      "crypt_alert",
+      "ritual_progress",
+    ]);
+    // ...and the engine-applied result was persisted.
+    const persisted = clockStore.get(ROOM_ID);
+    expect(persisted.every((c) => c.value === 1)).toBe(true);
+  });
+
+  it("resolves with no clocks when no clock store is wired (prior behaviour)", async () => {
+    const coordinator = new FakeCoordinator();
+    const h = makeHarness(coordinator); // no clockStore
+
+    await start(h);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.resolveCalls).toBe(1);
+    expect(coordinator.lastResolveInput?.clocks).toBeUndefined();
+  });
+
+  it("seeds + supplies + persists the scene, and surfaces visible clocks in narration", async () => {
+    const clockStore = new InMemoryClockStore();
+    const sceneStore = new InMemorySceneStore();
+    const coordinator = new FakeCoordinator({
+      resolve: (input) => {
+        const clocks = (input.clocks ?? []).map((c) => ({ ...c, value: c.value + 1 }));
+        // Echo the supplied scene with one clue revealed (omit scene entirely
+        // when none was supplied — exactOptionalPropertyTypes forbids `undefined`).
+        if (input.scene) {
+          return {
+            ok: true,
+            narration: "결과 내레이션",
+            checks: [],
+            endingReached: false,
+            context: input as unknown as TurnStateContext,
+            clocks,
+            firedClocks: [],
+            scene: { ...input.scene, availableClues: [], revealedClues: ["small_footprints"] },
+          } satisfies ResolveRoundResult;
+        }
+        return {
+          ok: true,
+          narration: "결과 내레이션",
+          checks: [],
+          endingReached: false,
+          context: input as unknown as TurnStateContext,
+          clocks,
+          firedClocks: [],
+        } satisfies ResolveRoundResult;
+      },
+    });
+    const h = makeHarness(coordinator, makeClock(), clockStore, sceneStore);
+
+    await start(h);
+
+    // Scenario scene seeded at session start (the-sunless-crypt).
+    const seededScene = sceneStore.get(ROOM_ID);
+    expect(seededScene?.sceneId).toBe("crypt_entrance");
+    expect(seededScene?.availableClues).toContain("small_footprints");
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    // Scene was supplied to resolveRound...
+    expect(coordinator.lastResolveInput?.scene?.sceneId).toBe("crypt_entrance");
+    // ...and the engine-applied scene was persisted (clue moved to revealed).
+    expect(sceneStore.get(ROOM_ID)?.revealedClues).toContain("small_footprints");
+
+    // the-sunless-crypt is a clock-visible scenario: the resolution narration
+    // payload carries the clock gauges.
+    const resolution = h.connection.narrations().find((n) => n.kind === "resolution");
+    expect(resolution?.clocks).toBeDefined();
+    expect(resolution?.clocks?.map((c) => c.name)).toContain("묘지 경계도");
   });
 
   it("converges interleaved readiness commands and resolves exactly once", async () => {
@@ -356,6 +474,48 @@ describe("RoomOrchestrator", () => {
     expect(host?.actionText).toBe("문을 연다");
     expect(host?.status).toBe("ready");
     expect(p2?.actionKind).toBe("pass");
+  });
+
+  it("attaches the sender's room display name alongside the character name on chat", async () => {
+    const coordinator = new FakeCoordinator();
+    const h = makeHarness(coordinator);
+
+    // Re-seed the host with a character name distinct from the room join name so
+    // the UI can render `characterName(displayName)` (e.g. "알렉스(라면)").
+    h.roomStore.savePlayer({
+      id: HOST,
+      roomId: ROOM_ID,
+      displayName: "라면",
+      isHost: true,
+      characterId: "c1",
+      connectionStatus: "connected",
+    });
+    h.roomStore.saveCharacter({
+      id: "c1",
+      playerId: HOST,
+      roomId: ROOM_ID,
+      name: "알렉스",
+      concept: "scout",
+      attributes: { Might: 0, Agility: 2, Wits: 1, Spirit: 0 },
+      confirmed: true,
+    });
+
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "SEND_CHAT", from: HOST, text: "정찰한다" });
+
+    const state = h.turnStateStore.get(ROOM_ID) as TurnState;
+    expect(state.chatLog).toHaveLength(1);
+    const entry = state.chatLog[0];
+    // characterName stays the pure character name; displayName carries the room
+    // join name separately so the UI can show "알렉스(라면)".
+    expect(entry?.characterName).toBe("알렉스");
+    expect(entry?.displayName).toBe("라면");
+
+    // The broadcast Turn_State carries the same attribution.
+    const broadcast = h.connection.turnStates().at(-1) as TurnState;
+    expect(broadcast.chatLog[0]?.characterName).toBe("알렉스");
+    expect(broadcast.chatLog[0]?.displayName).toBe("라면");
   });
 
   it("treats an ended room's Turn_State as terminal", async () => {

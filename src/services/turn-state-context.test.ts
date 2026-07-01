@@ -50,7 +50,7 @@ function makeTurnState(overrides: Partial<TurnState> = {}): TurnState {
       { playerId: "p1", characterName: "Borin", text: "Careful", ts: "2024-01-01T00:00:00.000Z" },
     ],
     checks: [
-      { characterId: "c1", attribute: "Might", difficulty: "Hard", roll: 2, outcome: "Success" },
+      { characterId: "c1", attribute: "Might", difficulty: "Hard", roll: 2, outcome: "Success", advantage: "none", rolls: [2], visibility: "player" },
     ],
     narrativeContext: [
       { round: 1, text: "The crypt yawns open." },
@@ -140,7 +140,7 @@ describe("toContext (R10.2, R12.4)", () => {
     const ctx = toContext(makeTurnState(), SCENARIO, [makeCharacter()]);
 
     expect(ctx.thisRound.checks).toEqual([
-      { characterId: "c1", attribute: "Might", difficulty: "Hard", roll: 2, outcome: "Success" },
+      { characterId: "c1", attribute: "Might", difficulty: "Hard", roll: 2, outcome: "Success", advantage: "none", rolls: [2], visibility: "player" },
     ]);
   });
 

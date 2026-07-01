@@ -12,6 +12,7 @@ dist/
 # Logs
 *.log
 npm-debug.log*
+logs/
 
 # Editor / OS
 .DS_Store

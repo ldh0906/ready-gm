@@ -19,6 +19,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
 import type { EngineConfig } from "../core/types.js";
 import { InMemoryRoomStore, type RoomStore } from "./room-store.js";
+import { normalizeName } from "./names.js";
 import type { JoinResult, Player, PlayerInit, Room, RoomUnavailable } from "./types.js";
 
 /** Default base URL prepended to an invite token to form a shareable link. */
@@ -201,17 +202,18 @@ export class RoomService {
    *
    * Returns the requested name unchanged when it does not collide with an
    * existing name; otherwise appends an incrementing ` (n)` suffix until the
-   * result is unique. Comparison is case-sensitive and uses the names exactly
-   * as stored.
+   * result is unique. Comparison is trim+lowercase normalized so it matches the
+   * character-name uniqueness policy (S6) — "Alice" and "alice" are treated as
+   * the same name — while the returned value preserves the requested casing.
    */
   private assignUniqueDisplayName(requested: string, taken: readonly string[]): string {
-    const existing = new Set(taken);
-    if (!existing.has(requested)) {
+    const existing = new Set(taken.map(normalizeName));
+    if (!existing.has(normalizeName(requested))) {
       return requested;
     }
     for (let suffix = 2; ; suffix += 1) {
       const candidate = `${requested} (${suffix})`;
-      if (!existing.has(candidate)) {
+      if (!existing.has(normalizeName(candidate))) {
         return candidate;
       }
     }

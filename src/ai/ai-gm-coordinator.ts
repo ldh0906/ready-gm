@@ -34,7 +34,7 @@
  * Requirements: 4.2, 5.2, 10.1, 10.6, 11.1, 11.2, 11.4, 14.4, 15.1, 15.2, 17.1,
  * 17.2, 17.4, 18.5, 18.6.
  */
-import { resolveCheck } from "../core/ezfudge.js";
+import { chooseAdvantageRoll, isValidAttributeLevel, resolveCheck, type RollAdvantage } from "../core/ezfudge.js";
 import type {
   AttributeKey,
   AttributeLevel,
@@ -43,7 +43,16 @@ import type {
   OutcomeGrade,
 } from "../core/types.js";
 import type { CheckRecord, TurnState } from "../core/turn-state.js";
+import {
+  advanceClock,
+  isClockComplete,
+  type ProgressClock,
+} from "../core/progress-clock.js";
+import { revealClue, type SceneState } from "../core/scene-state.js";
+import { applyFiredEffects } from "../core/front-effects.js";
+import { GM_MOVES } from "../core/gm-moves.js";
 import type { DiceService } from "../core/dice.js";
+import { parseGmDecision, type ClockDelta, type GmDecision } from "./gm-decision.js";
 import {
   makeAiOutputEvent,
   makeStateMutationEvent,
@@ -63,14 +72,47 @@ import type { AiGmRouter } from "./ai-gm-router.js";
 
 /** The four EZFudge attribute keys, used for completeness validation. */
 const ATTRIBUTE_KEYS: readonly AttributeKey[] = ["Might", "Agility", "Wits", "Spirit"];
-/** Valid difficulty grades, used to validate AI-proposed checks. */
-const DIFFICULTY_GRADES: readonly DifficultyGrade[] = [
-  "Trivial",
-  "Easy",
-  "Average",
-  "Hard",
-  "Formidable",
-];
+
+/**
+ * Attribute keys (case-insensitive) treated as "speed"-like for turn ordering.
+ * When a scenario's character sheet exposes one of these, faster actors resolve
+ * first; otherwise the AI's proposed order is preserved as a proxy for the
+ * order players acted in. Covers the universal EZFudge `Agility` plus common
+ * custom keys/labels (거위 uses `Fast`).
+ */
+const SPEED_ATTRIBUTE_KEYS: ReadonlySet<string> = new Set([
+  "agility",
+  "fast",
+  "speed",
+  "민첩",
+  "속도",
+  "재빠름",
+]);
+
+/**
+ * Order resolved checks so faster actors go first when a speed-like stat exists,
+ * otherwise keep the original (proposed) order. Uses an index-decorated sort so
+ * ties — and the no-speed-stat case — remain in their original relative order
+ * (a stable proxy for "acted order"). This ordering flows into BOTH the
+ * narration (RESOLVED_CHECKS) and the client's dice-reveal sequence.
+ */
+function orderChecksBySpeed<T extends { characterName: string }>(
+  checks: readonly T[],
+  speedOf: (characterName: string) => number | undefined,
+): T[] {
+  return checks
+    .map((check, index) => ({ check, index, speed: speedOf(check.characterName) }))
+    .sort((a, b) => {
+      // Actors without a speed value keep their relative order and never jump
+      // ahead of a rated actor.
+      if (a.speed === undefined && b.speed === undefined) return a.index - b.index;
+      if (a.speed === undefined) return 1;
+      if (b.speed === undefined) return -1;
+      if (a.speed !== b.speed) return b.speed - a.speed; // faster first
+      return a.index - b.index; // stable tie-break
+    })
+    .map((entry) => entry.check);
+}
 
 /** Korean (and structured-but-Korean) narration text. */
 export type Narration = string;
@@ -92,10 +134,22 @@ export interface SessionSummary {
 export interface CheckRequest {
   /** The acting character, by name as seen in the {@link TurnStateContext}. */
   characterName: string;
-  /** The relevant attribute for the check. */
-  attribute: AttributeKey;
+  /** The relevant attribute for the check (may be a scenario-custom stat key). */
+  attribute: string;
   /** The difficulty grade chosen by the AI. */
   difficulty: DifficultyGrade;
+  /**
+   * Optional per-check advantage the AI proposes (mirrors D&D 5e adv/disadv).
+   * The engine rolls twice and keeps the higher/lower summed total; randomness
+   * stays server-side. Defaults to `"none"`.
+   */
+  advantage?: RollAdvantage;
+  /**
+   * Whether this is a public player check or a hidden GM roll. The engine
+   * resolves both server-side; only `"player"` checks are surfaced. Defaults to
+   * `"player"`.
+   */
+  visibility?: "player" | "gm";
 }
 
 /**
@@ -146,6 +200,31 @@ export interface ResolveRoundInput {
   characters: readonly Character[];
   /** Optional token budget passed to context derivation (Requirement 16.3). */
   budget?: number;
+  /**
+   * Optional active Progress Clocks for the room. When supplied, the model may
+   * propose `clockDeltas`; the engine applies them SERVER-SIDE after resolving
+   * the round's checks (the model never sets clock values directly). When
+   * omitted, clock proposals are ignored and no clock state is returned.
+   */
+  clocks?: readonly ProgressClock[];
+  /**
+   * Optional current Scene State for the room. When supplied, it grounds the
+   * decision/narration prompts and the model may reveal clues (`revealedClues`),
+   * which the engine applies server-side; the updated scene is returned. When
+   * omitted, no scene grounding is added and no scene is returned.
+   */
+  scene?: SceneState;
+}
+
+/** A single applied clock change (engine-committed), for the success result + diff. */
+export interface AppliedClockChange {
+  clockId: string;
+  /** Clock value before this round's deltas. */
+  from: number;
+  /** Clock value after this round's deltas. */
+  to: number;
+  /** Whether the clock completed (filled) as a result of this round. */
+  completed: boolean;
 }
 
 /**
@@ -153,10 +232,12 @@ export interface ResolveRoundInput {
  *
  * On success the caller receives the Korean narration, the server-resolved
  * checks to record in Turn_State (Requirement 11.5), whether the ending was
- * reached, and the exact context handed to the model. On failure the caller
- * receives the error and a `preservedState` equal to the input state with only
- * `resolutionRequested` cleared, so the round can be retried without losing the
- * recorded actions/passes (Requirements 17.2, 17.4).
+ * reached, and the exact context handed to the model. When `clocks` were
+ * supplied in the input, the success result also carries the updated clocks and
+ * the `onComplete` ids of any clocks that filled this round. On failure the
+ * caller receives the error and a `preservedState` equal to the input state
+ * with only `resolutionRequested` cleared, so the round can be retried without
+ * losing the recorded actions/passes (Requirements 17.2, 17.4).
  */
 export type ResolveRoundResult =
   | {
@@ -165,6 +246,12 @@ export type ResolveRoundResult =
       checks: CheckRecord[];
       endingReached: boolean;
       context: TurnStateContext;
+      /** Updated clocks (present only when `clocks` were supplied in the input). */
+      clocks?: ProgressClock[];
+      /** `onComplete` ids of clocks that filled this round (present with `clocks`). */
+      firedClocks?: string[];
+      /** Updated Scene State (present only when `scene` was supplied in the input). */
+      scene?: SceneState;
     }
   | { ok: false; error: AiGmError; preservedState: TurnState };
 
@@ -253,7 +340,7 @@ export class AiGmCoordinator {
     return this.runRequest(
       "attributes",
       prompt,
-      (raw) => parseAttributes(raw),
+      (raw) => parseAttributes(raw, this.config.attributeLadder),
       correlation ?? this.correlation,
     );
   }
@@ -289,7 +376,7 @@ export class AiGmCoordinator {
    * AI-proposed vs. engine-applied diff (Requirement 18.5).
    */
   async resolveRound(input: ResolveRoundInput): Promise<ResolveRoundResult> {
-    const { state, scenario, characters, budget } = input;
+    const { state, scenario, characters, budget, clocks, scene } = input;
     const context = toContext(state, scenario, characters, budget);
     const correlation: CorrelationKey = {
       sessionId: state.roomId,
@@ -297,11 +384,13 @@ export class AiGmCoordinator {
     };
     const preservedState = (): TurnState => ({ ...state, resolutionRequested: false });
 
-    // Step 1 — ask the model which checks apply and at what difficulty.
+    // Step 1 — ask the model for its structured hot-path decision: which checks
+    // apply (and at what difficulty), the GM Move, proposed clock deltas, and
+    // off-front / climactic flags. The model never produces dice or clock values.
     const selection = await this.runRequest(
       "resolution",
-      buildCheckSelectionPrompt(context),
-      (raw) => parseCheckSelection(raw),
+      buildCheckSelectionPrompt(context, clocks, scene),
+      (raw) => parseDecision(raw),
       correlation,
     );
     if (!selection.ok) {
@@ -313,8 +402,25 @@ export class AiGmCoordinator {
     const attributeByCharacter = new Map(
       context.characters.map((c) => [c.name, c.attributes] as const),
     );
+    // The AI works in character NAMES; map each back to its real id so recorded
+    // checks carry a true identity rather than a display name (S1).
+    const idByCharacterName = new Map(
+      characters.map((c) => [c.name, c.id] as const),
+    );
     const resolved: CheckRecord[] = [];
-    for (const check of selection.value.checks) {
+    // Order the proposed checks by speed (faster first) when the scenario has a
+    // speed-like stat, else keep the AI's proposed order (a proxy for the order
+    // players acted). This same order drives narration and the dice reveal.
+    const speedOf = (characterName: string): number | undefined => {
+      const attributes = attributeByCharacter.get(characterName);
+      if (!attributes) return undefined;
+      for (const [key, level] of Object.entries(attributes)) {
+        if (SPEED_ATTRIBUTE_KEYS.has(key.toLowerCase())) return level as number;
+      }
+      return undefined;
+    };
+    const orderedChecks = orderChecksBySpeed(selection.value.checks, speedOf);
+    for (const check of orderedChecks) {
       const attributes = attributeByCharacter.get(check.characterName);
       // Drop hallucinated checks (unknown character/attribute): they remain in
       // the proposed diff but never in the applied diff (Requirement 18.5).
@@ -322,49 +428,122 @@ export class AiGmCoordinator {
       const level = attributes[check.attribute];
       if (level === undefined) continue;
 
-      const roll = this.dice.tryRoll();
-      if (!roll.ok) {
-        // Dice failure: withhold the affected resolution (Requirement 17.3-style).
-        this.emitStateMutation(correlation, selection.value, resolved);
-        return {
-          ok: false,
-          error: { reason: "dice_failed", message: roll.error.message },
-          preservedState: preservedState(),
-        };
+      // The AI may propose a per-check advantage; the engine rolls server-side.
+      // none -> one roll; advantage/disadvantage -> two rolls, keep higher/lower.
+      const advantage = (check as { advantage?: RollAdvantage }).advantage ?? "none";
+      const rollCount = advantage === "none" ? 1 : 2;
+      const rolls: number[] = [];
+      for (let i = 0; i < rollCount; i++) {
+        const roll = this.dice.tryRoll();
+        if (!roll.ok) {
+          // Dice failure: withhold the affected resolution (Requirement 17.3-style).
+          // Nothing is committed, so the applied diff is empty (S5).
+          this.emitStateMutation(correlation, selection.value, [], [], []);
+          return {
+            ok: false,
+            error: { reason: "dice_failed", message: roll.error.message },
+            preservedState: preservedState(),
+          };
+        }
+        rolls.push(roll.value);
       }
+      const chosen = chooseAdvantageRoll(rolls, advantage);
       resolved.push({
-        characterId: check.characterName,
+        characterId: idByCharacterName.get(check.characterName) ?? check.characterName,
         attribute: check.attribute,
         difficulty: check.difficulty,
-        roll: roll.value,
-        outcome: resolveCheck(level, check.difficulty, roll.value),
+        roll: chosen,
+        rolls,
+        advantage,
+        // Tag the resolved record with the GM's proposed visibility (public
+        // player check vs. hidden GM roll). Defaults to "player" (fail-open).
+        visibility: (check as { visibility?: "player" | "gm" }).visibility ?? "player",
+        outcome: resolveCheck(level, check.difficulty, chosen),
       });
     }
 
-    // Step 3 — narrate using the already-resolved outcomes.
+    // If the AI proposed checks but every one referenced an unknown
+    // character/attribute, treat the selection as invalid and fail the round
+    // rather than silently resolving with zero checks (S9). A genuinely empty
+    // selection (no checks proposed) is allowed.
+    if (selection.value.checks.length > 0 && resolved.length === 0) {
+      this.emitStateMutation(correlation, selection.value, [], [], []);
+      return {
+        ok: false,
+        error: {
+          reason: "invalid_schema",
+          message: "all proposed checks referenced unknown characters or attributes",
+        },
+        preservedState: preservedState(),
+      };
+    }
+
+    // Step 2b — apply the AI's proposed clock deltas SERVER-SIDE, gated on the
+    // round's resolved outcomes. Only runs when the caller supplied clocks; the
+    // model never sets clock values, it only proposes deltas (and a condition).
+    const outcomes = resolved.map((r) => r.outcome);
+    const clockApplication =
+      clocks !== undefined
+        ? applyClockDeltas(clocks, selection.value.clockDeltas, outcomes)
+        : undefined;
+
+    // Step 3 — narrate using the already-resolved outcomes. Any clock that
+    // FILLED this round is handed to the GM so its consequence is narrated in
+    // the same beat (e.g. the alarm fills → the patrol rounds the corner).
+    const firedClocks = clockApplication?.fired ?? [];
     const narrationOutcome = await this.runRequest(
       "resolution",
-      buildNarrationPrompt(context, resolved),
+      buildNarrationPrompt(context, resolved, firedClocks, scene),
       (raw) => this.parseResolutionNarration(raw),
       correlation,
     );
 
-    // Record the proposed-vs-applied diff regardless of narration outcome.
-    this.emitStateMutation(correlation, selection.value, resolved, narrationOutcome.ok
-      ? narrationOutcome.value.stateChanges
-      : []);
+    // Record the proposed-vs-applied diff. On a narration failure nothing is
+    // committed, so the applied checks/clocks are empty — the rolled checks and
+    // computed clock changes are discarded rather than reported as applied (S5).
+    this.emitStateMutation(
+      correlation,
+      selection.value,
+      narrationOutcome.ok ? resolved : [],
+      narrationOutcome.ok ? narrationOutcome.value.stateChanges : [],
+      narrationOutcome.ok ? (clockApplication?.applied ?? []) : [],
+    );
 
     if (!narrationOutcome.ok) {
       return { ok: false, error: narrationOutcome.error, preservedState: preservedState() };
     }
 
-    return {
+    const result: ResolveRoundResult = {
       ok: true,
       narration: narrationOutcome.value.narration,
       checks: resolved,
       endingReached: narrationOutcome.value.endingReached,
       context,
     };
+    if (clockApplication !== undefined) {
+      result.clocks = clockApplication.clocks;
+      result.firedClocks = clockApplication.fired.map((c) => c.onComplete);
+    }
+    // Realize the FILLED clocks' Front effects SERVER-SIDE: spawn threats/NPCs,
+    // surface clues, and force the ending when the impending doom completes.
+    // Effects are server-authored (carried by the clock seed), not AI-chosen.
+    const fired = clockApplication?.fired ?? [];
+    // `force_ending` is scene-independent, so evaluate it even without a scene.
+    if (applyFiredEffects(undefined, fired).endingForced) {
+      result.endingReached = true;
+    }
+    // Apply the GM's revealed clues to the scene SERVER-SIDE (the model proposes
+    // which clues it surfaced in its decision; the engine moves them
+    // available -> revealed), then layer the fired-clock scene effects on top.
+    if (scene !== undefined) {
+      let updatedScene = scene;
+      for (const clueId of selection.value.revealedClues) {
+        updatedScene = revealClue(updatedScene, clueId);
+      }
+      updatedScene = applyFiredEffects(updatedScene, fired).scene ?? updatedScene;
+      result.scene = updatedScene;
+    }
+    return result;
   }
 
   /**
@@ -498,13 +677,16 @@ export class AiGmCoordinator {
 
   /**
    * Best-effort `state_mutation` emission capturing the AI-proposed diff vs. the
-   * diff the engine actually applied (Requirement 18.5).
+   * diff the engine actually applied (Requirement 18.5). The proposed diff now
+   * also carries the model's `clockDeltas`; the applied diff carries the engine's
+   * committed clock changes (empty when nothing was committed).
    */
   private emitStateMutation(
     correlation: CorrelationKey,
-    selection: CheckSelection,
+    decision: GmDecision,
     appliedChecks: CheckRecord[],
     proposedStateChanges: StateChange[] = [],
+    appliedClocks: AppliedClockChange[] = [],
   ): void {
     if (!this.sink) return;
     try {
@@ -513,10 +695,11 @@ export class AiGmCoordinator {
           correlation,
           {
             proposedDiff: {
-              checks: selection.checks,
-              stateChanges: [...selection.stateChanges, ...proposedStateChanges],
+              checks: decision.checks,
+              stateChanges: [...decision.stateChanges, ...proposedStateChanges],
+              clockDeltas: decision.clockDeltas,
             },
-            appliedDiff: { checks: appliedChecks },
+            appliedDiff: { checks: appliedChecks, clocks: appliedClocks },
           },
           this.generators,
         ),
@@ -532,10 +715,79 @@ export class AiGmCoordinator {
   }
 }
 
-/** Internal shape of a parsed check-selection response. */
-interface CheckSelection {
-  checks: CheckRequest[];
-  stateChanges: StateChange[];
+/**
+ * Adapter: parse the model's hot-path {@link GmDecision} and lift the result
+ * into the coordinator's {@link Validated} shape (mapping a parse failure to an
+ * `invalid_schema` validation failure). This is the structured-decision step of
+ * a round resolution and is a superset of the former check-selection parse.
+ */
+function parseDecision(raw: string): Validated<GmDecision> {
+  const parsed = parseGmDecision(raw);
+  return parsed.ok ? { ok: true, value: parsed.value } : invalidSchema(parsed.message);
+}
+
+/**
+ * Apply the model's proposed {@link ClockDelta}s to `clocks` SERVER-SIDE, gated
+ * on the round's resolved `outcomes`. A delta with no `condition` (or an
+ * unrecognised one) always applies; a recognised condition applies only when at
+ * least one outcome this round satisfies it. Deltas referencing an unknown
+ * `clockId` are dropped (they remain in the proposed diff but never applied).
+ *
+ * Returns the updated clocks, the per-clock applied changes (for the QA diff),
+ * and the `onComplete` ids of clocks that filled (->complete) this round.
+ */
+function applyClockDeltas(
+  clocks: readonly ProgressClock[],
+  deltas: readonly ClockDelta[],
+  outcomes: readonly OutcomeGrade[],
+): { clocks: ProgressClock[]; applied: AppliedClockChange[]; fired: ProgressClock[] } {
+  const byId = new Map(clocks.map((c) => [c.id, c] as const));
+  const before = new Map(clocks.map((c) => [c.id, c.value] as const));
+
+  for (const delta of deltas) {
+    const current = byId.get(delta.clockId);
+    if (current === undefined) continue; // unknown clock — dropped (S1-style)
+    if (!conditionMet(delta.condition, outcomes)) continue;
+    byId.set(delta.clockId, advanceClock(current, delta.delta));
+  }
+
+  const updated = [...byId.values()];
+  const applied: AppliedClockChange[] = [];
+  const fired: ProgressClock[] = [];
+  for (const clock of updated) {
+    const from = before.get(clock.id) ?? clock.value;
+    if (from === clock.value) continue; // unchanged clocks are not "applied"
+    const completed = isClockComplete(clock);
+    applied.push({ clockId: clock.id, from, to: clock.value, completed });
+    // Fire only on the transition into completion this round.
+    if (completed && from < clock.max) fired.push(clock);
+  }
+  return { clocks: updated, applied, fired };
+}
+
+/** Whether a clock-delta `condition` is satisfied by this round's outcomes. */
+function conditionMet(
+  condition: string | undefined,
+  outcomes: readonly OutcomeGrade[],
+): boolean {
+  switch (condition) {
+    case undefined:
+    case "":
+    case "always":
+      return true;
+    case "on_failure":
+      return outcomes.includes("Failure");
+    case "on_partial_or_failure":
+      return outcomes.some((o) => o === "Failure" || o === "Partial Success");
+    case "on_success":
+      return outcomes.some((o) => o === "Success" || o === "Critical Success");
+    case "on_critical":
+      return outcomes.includes("Critical Success");
+    default:
+      // Unrecognised condition: fail-open so the model's proposed advance is not
+      // silently lost. The condition string is still recorded in the proposed diff.
+      return true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +830,10 @@ function readStateChanges(value: unknown): StateChange[] {
 }
 
 /** Parse + validate a complete attribute set (Requirement 4.2). */
-function parseAttributes(raw: string): Validated<AttributeSet> {
+function parseAttributes(
+  raw: string,
+  ladder: { min: number; max: number },
+): Validated<AttributeSet> {
   const parsed = parseJson(raw);
   if (!parsed.ok) return parsed;
   const attrs = parsed.value["attributes"];
@@ -592,50 +847,16 @@ function parseAttributes(raw: string): Validated<AttributeSet> {
     if (typeof level !== "number" || !Number.isFinite(level)) {
       return invalidSchema(`attribute '${key}' is missing or not a finite number`);
     }
+    // Reject values off the configured EZFudge ladder so the AI cannot skew
+    // difficulty math with out-of-range attributes (S2).
+    if (!isValidAttributeLevel(level, ladder)) {
+      return invalidSchema(
+        `attribute '${key}' (${level}) is outside the EZFudge ladder [${ladder.min}, ${ladder.max}]`,
+      );
+    }
     result[key] = level;
   }
   return { ok: true, value: result };
-}
-
-/** Parse + validate the AI's proposed check selection for a round. */
-function parseCheckSelection(raw: string): Validated<CheckSelection> {
-  const parsed = parseJson(raw);
-  if (!parsed.ok) return parsed;
-  const rawChecks = parsed.value["checks"];
-  if (!Array.isArray(rawChecks)) {
-    return invalidSchema("check-selection response requires a 'checks' array");
-  }
-  const checks: CheckRequest[] = [];
-  for (const entry of rawChecks) {
-    if (typeof entry !== "object" || entry === null) {
-      return invalidSchema("each check must be an object");
-    }
-    const e = entry as Record<string, unknown>;
-    const characterName = e["characterName"];
-    const attribute = e["attribute"];
-    const difficulty = e["difficulty"];
-    if (typeof characterName !== "string") {
-      return invalidSchema("check 'characterName' must be a string");
-    }
-    if (typeof attribute !== "string" || !ATTRIBUTE_KEYS.includes(attribute as AttributeKey)) {
-      return invalidSchema(`check 'attribute' must be one of ${ATTRIBUTE_KEYS.join(", ")}`);
-    }
-    if (
-      typeof difficulty !== "string" ||
-      !DIFFICULTY_GRADES.includes(difficulty as DifficultyGrade)
-    ) {
-      return invalidSchema(`check 'difficulty' must be one of ${DIFFICULTY_GRADES.join(", ")}`);
-    }
-    checks.push({
-      characterName,
-      attribute: attribute as AttributeKey,
-      difficulty: difficulty as DifficultyGrade,
-    });
-  }
-  return {
-    ok: true,
-    value: { checks, stateChanges: readStateChanges(parsed.value["stateChanges"]) },
-  };
 }
 
 /** Build an `invalid_schema` validation failure. */
@@ -657,8 +878,15 @@ function notKorean(): Validated<never> {
 // ---------------------------------------------------------------------------
 
 const GM_SYSTEM =
-  "You are the Game Master for a Korean-language TRPG one-shot. " +
-  "Always narrate in natural Korean. Respond with a single JSON object only.";
+  "당신은 한국어 TRPG 원샷의 게임 마스터(GM)입니다. 항상 자연스럽고 생생한 한국어로 서술하세요.\n" +
+  "문체 지침:\n" +
+  "- 오감(시각·청각·후각·촉각)을 활용한 구체적이고 영화적인 묘사를 쓰세요.\n" +
+  "- 단순 결과 통보가 아니라, 긴장감과 분위기를 살린 장면으로 그려내세요.\n" +
+  "- 등장 NPC가 있으면 짧은 대사나 반응을 곁들여 생동감을 주세요.\n" +
+  "- 각 플레이어의 행동과 판정 결과(성공/실패의 정도)를 서사에 자연스럽게 녹이세요.\n" +
+  "- 분량은 2~4문단으로, 장황하지 않되 충분히 묘사적이게 쓰세요.\n" +
+  "- 진부한 상투구를 피하고, 장면마다 새로운 감각적 디테일을 더하세요.\n" +
+  "출력 형식: 설명이나 코드펜스 없이 요청된 단일 JSON 객체 하나만 반환하세요.";
 
 /** Opening narration prompt (Requirement 5.2). */
 function buildOpeningPrompt(ctx: TurnStateContext): Prompt {
@@ -666,10 +894,29 @@ function buildOpeningPrompt(ctx: TurnStateContext): Prompt {
     system: GM_SYSTEM,
     user:
       "PHASE: opening\n" +
-      "Write the opening narration in Korean for this scenario and party.\n" +
+      "이 시나리오와 파티를 위한 도입부 내레이션을 한국어로 작성하세요. " +
+      "장소의 분위기와 감각적 디테일, 긴장의 씨앗을 담아 플레이어가 몰입할 장면을 그리세요. " +
+      "각 캐릭터의 이름/컨셉을 자연스럽게 등장시키면 좋습니다.\n" +
       'Respond as {"narration": "<korean text>"}.\n' +
+      formatScenarioRules(ctx.scenario) +
       `CONTEXT: ${JSON.stringify({ scenario: ctx.scenario, characters: ctx.characters })}`,
   };
+}
+
+/**
+ * The per-scenario rules/tone overlay ("custom system over the universal base"),
+ * or "" when the scenario has none. Injected into every GM prompt so the model
+ * runs each scenario in its own key (tone, valid attributes, check style),
+ * while the engine keeps universal EZFudge resolution authoritative.
+ */
+function formatScenarioRules(scenario: ContextScenario): string {
+  const brief = scenario.rulesBrief;
+  if (brief === undefined || brief.trim().length === 0) return "";
+  return (
+    "SCENARIO_RULES (이 시나리오의 특수 규칙·톤 — 보편 판정 규칙 위에 우선 적용): " +
+    brief.trim() +
+    "\n"
+  );
 }
 
 /** Attribute proposal prompt (Requirement 4.2). */
@@ -679,33 +926,183 @@ function buildAttributesPrompt(concept: string, scenario: ContextScenario): Prom
     user:
       "PHASE: attributes\n" +
       "Propose a complete EZFudge attribute set (Might, Agility, Wits, Spirit) as integers.\n" +
+      "능력치 사다리는 -2 ~ +4 이며, 0이 '평범한 사람' 기준입니다 " +
+      "(-2 끔찍함, -1 빈약함, 0 평범함, +1 좋음, +2 뛰어남, +3 비범함, +4 탁월함).\n" +
+      "균형 규칙(반드시 지키세요):\n" +
+      "- 모든 능력치를 높게 주지 마세요. 입체적인 캐릭터는 강점과 약점을 함께 가집니다.\n" +
+      "- 네 값의 '합'은 +1 ~ +3 범위가 되도록 하세요(전부 강하게 만들지 말 것).\n" +
+      "- 최소 하나는 0 이하(약점)로, 최소 하나는 +2 이상(뚜렷한 강점)으로 두어 대비를 만드세요.\n" +
+      "- 네 값이 모두 같은 숫자가 되지 않게 하세요.\n" +
+      "- 컨셉에서 드러나는 자질은 높이고, 컨셉과 무관하거나 상충하는 자질은 낮추세요. " +
+      "예: 근육질 전사는 Might가 높고 Wits는 낮을 수 있습니다.\n" +
       'Respond as {"attributes": {"Might": <int>, "Agility": <int>, "Wits": <int>, "Spirit": <int>}}.\n' +
       `CONCEPT: ${concept}\nSCENARIO: ${JSON.stringify(scenario)}`,
   };
 }
 
 /** Round check-selection prompt: which checks apply, at what difficulty (R11.1). */
-function buildCheckSelectionPrompt(ctx: TurnStateContext): Prompt {
+/**
+ * Format the last few resolution narrations as a compact continuity block so a
+ * round's decision/narration stays consistent with what just happened (the
+ * round prompts are otherwise near-stateless across rounds). Each entry is
+ * truncated to bound tokens.
+ */
+function formatRecentNarrative(
+  entries: readonly { round: number; text: string }[],
+  maxEntries = 2,
+  maxChars = 600,
+): string {
+  if (entries.length === 0) return "";
+  const recent = entries.slice(-maxEntries).map((e) => {
+    const text = e.text.length > maxChars ? `${e.text.slice(0, maxChars)}…` : e.text;
+    return `[라운드 ${e.round}] ${text}`;
+  });
+  return (
+    "RECENT_NARRATIVE (직전 라운드들의 전개입니다. 이번 라운드가 이것과 모순되지 않고 " +
+    "자연스럽게 이어지도록 하세요. 이미 일어난 일을 되풀이하지 마세요): " +
+    JSON.stringify(recent) +
+    "\n"
+  );
+}
+
+/**
+ * Format the Scene State as a grounding block so the GM stays consistent with
+ * where the party is, who/what is present, which clues remain to find vs. are
+ * already revealed, and the exits. Omitted when no scene is supplied.
+ */
+function formatScene(scene?: SceneState): string {
+  if (scene === undefined) return "";
+  return (
+    "SCENE (현재 장면의 맥락입니다. 서술과 결정을 이 장면에 일관되게 맞추세요. " +
+    "availableClues 중에서만 클루를 드러낼 수 있습니다): " +
+    JSON.stringify({
+      location: scene.location,
+      sceneGoal: scene.sceneGoal,
+      currentTension: scene.currentTension,
+      presentNpcs: scene.presentNpcs,
+      visibleThreats: scene.visibleThreats,
+      availableClues: scene.availableClues,
+      revealedClues: scene.revealedClues,
+      exits: scene.exits,
+      lastGmQuestion: scene.lastGmQuestion,
+    }) +
+    "\n"
+  );
+}
+
+/** Round decision prompt: the structured hot-path decision for this round (R11.1). */
+function buildCheckSelectionPrompt(
+  ctx: TurnStateContext,
+  clocks?: readonly ProgressClock[],
+  scene?: SceneState,
+): Prompt {
+  const gmMoveList = GM_MOVES.join("|");
+  const clockBlock =
+    clocks !== undefined && clocks.length > 0
+      ? "ACTIVE_CLOCKS (propose 'clockDeltas' referencing these ids only; the engine applies them, " +
+        "you never set values): " +
+        JSON.stringify(clocks.map((c) => ({ id: c.id, name: c.name, value: c.value, max: c.max }))) +
+        "\n"
+      : "";
+  const sceneBlock = formatScene(scene);
+  // Attribute system is scenario-driven: the acting character's OWN attributes
+  // are the only valid keys (EZFudge Might/Agility/Wits/Spirit, or a custom-stat
+  // scenario's keys like Sneaky/Fast/Tenacious). Derive the allowed keys from the
+  // characters so the AI never proposes an attribute the character does not have
+  // (which the engine would drop, failing the round).
+  const attrKeys = [
+    ...new Set(ctx.characters.flatMap((c) => Object.keys(c.attributes))),
+  ];
+  const attrOptions = attrKeys.length > 0 ? attrKeys.join("|") : "Might|Agility|Wits|Spirit";
+  const characterAttrBlock =
+    "CHARACTER_ATTRIBUTES (각 캐릭터가 가진 능력치 — check의 attribute는 반드시 해당 행동을 한 캐릭터가 " +
+    "가진 능력치 키 중에서만 고르세요): " +
+    JSON.stringify(ctx.characters.map((c) => ({ name: c.name, attributes: c.attributes }))) +
+    "\n";
   return {
     system: GM_SYSTEM,
     user:
-      "PHASE: check-selection\n" +
-      "Decide which difficulty checks apply this round. Choose the acting character, " +
-      "the relevant attribute, and the difficulty. Do NOT produce any dice or random values.\n" +
-      'Respond as {"checks": [{"characterName": "<name>", "attribute": "<Might|Agility|Wits|Spirit>", ' +
-      '"difficulty": "<Trivial|Easy|Average|Hard|Formidable>"}], "stateChanges": []}.\n' +
+      "PHASE: decision\n" +
+      "Make the structured GM decision for this round. Choose which difficulty checks apply " +
+      "(acting character, relevant attribute, difficulty), the single best GM Move, any clock " +
+      "deltas, any clues you reveal this round (by id, from SCENE.availableClues), and the " +
+      "off-front / climactic flags. Do NOT produce any dice, random values, or clock values — " +
+      "only propose deltas.\n" +
+      "CHECK GUIDELINES (중요):\n" +
+      "- 행동 분해: 한 입력에 서로 다른 행동이 여러 개 있으면(예: \"'신체 강화' 마법을 쓰고 검을 휘두른다\") " +
+      "각 행동마다 별도의 check를 만들고, 행동마다 가장 알맞은 attribute를 고르세요. 한 행동만 있으면 check도 하나입니다.\n" +
+      "- attribute 선택: attribute는 반드시 그 행동을 한 캐릭터가 실제로 가진 능력치 키 중에서만 고르세요 " +
+      "(아래 CHARACTER_ATTRIBUTES 참고). 이 세션에서 쓸 수 있는 능력치 키: " +
+      attrOptions +
+      ". 행동의 성격에 가장 잘 맞는 능력치를 고르세요(예: 힘·완력 계열, 민첩·속도·은신 계열, 지식·관찰 계열, 의지·감각 계열).\n" +
+      "- 행동 경제(중요): 한 턴에 현실적으로 가능한 것보다 너무 많은 행동을 한꺼번에 시도하면, " +
+      "그것들을 제때 다 해낼 만큼 민첩한지 판정하는 check를 1개 추가하세요(민첩·속도에 해당하는 능력치가 있으면 그걸로, " +
+      "난이도는 행동 수에 비례). 이 판정이 실패하면 초과 행동은 실패로 처리되며, 서술에서 \"~하려 했지만 늦어서 ~\"로 표현됩니다.\n" +
+      "- visibility: 플레이어가 능동적으로 시도한 행동의 판정은 \"player\"(공개; 플레이어가 직접 굴림). " +
+      "함정 발동, 기습/은신 감지 같은 수동·비밀 판정이나 운명·사건 판정은 \"gm\"(비공개; 결과만 서술에 녹이고 굴림은 숨김). " +
+      "행동에 능동적 시도가 없으면 player 판정을 만들지 마세요.\n" +
+      "- advantage: 상황에 맞게 실제로 제안하세요. 기습/조준/협공/유리한 지형 → \"advantage\", " +
+      "어둠/속박/부상/불리한 지형 → \"disadvantage\", 특별한 사정이 없으면 \"none\".\n" +
+      'Respond as {"intent": "<intent>", "gmMove": "<' +
+      gmMoveList +
+      '>", "needsRoll": <bool>, ' +
+      '"checks": [{"characterName": "<name>", "attribute": "<' +
+      attrOptions +
+      '>", ' +
+      '"difficulty": "<Trivial|Easy|Average|Hard|Formidable>", ' +
+      '"advantage": "<none|advantage|disadvantage>", "visibility": "<player|gm>"}], ' +
+      '"clockDeltas": [{"clockId": "<id>", "delta": <int>, ' +
+      '"condition": "<always|on_failure|on_partial_or_failure|on_success|on_critical>", "reason": "<why>"}], ' +
+      '"revealedClues": ["<clue_id>"], ' +
+      '"stateChanges": [], "offFront": <bool>, "climactic": <bool>, "safetyFlags": []}.\n' +
+      characterAttrBlock +
+      formatScenarioRules(ctx.scenario) +
+      clockBlock +
+      sceneBlock +
+      formatRecentNarrative(ctx.recentNarrative) +
       `CONTEXT: ${JSON.stringify({ roundNumber: ctx.roundNumber, actions: ctx.thisRound.actions })}`,
   };
 }
 
 /** Round narration prompt: narrate using the already-resolved outcomes (R10.6, 11.4). */
-function buildNarrationPrompt(ctx: TurnStateContext, resolved: readonly CheckRecord[]): Prompt {
+function buildNarrationPrompt(
+  ctx: TurnStateContext,
+  resolved: readonly CheckRecord[],
+  firedClocks: readonly ProgressClock[] = [],
+  scene?: SceneState,
+): Prompt {
+  // Any Progress Clock that FILLED this round becomes a consequence the GM must
+  // narrate as an escalation in this same beat (ai-architecture.md "clock이
+  // 가득 차면 서버는 흉조, 장면 변화, NPC 행동, 재앙을 발생시킨다").
+  const firedBlock =
+    firedClocks.length > 0
+      ? "FIRED_CLOCKS (이 시계들이 이번 라운드에 가득 찼습니다. 각 consequence를 이번 서술에 " +
+        "긴장감 있는 사건으로 반드시 반영하세요): " +
+        JSON.stringify(
+          firedClocks.map((c) => ({
+            name: c.name,
+            consequence: c.consequence ?? c.onComplete,
+          })),
+        ) +
+        "\n"
+      : "";
   return {
     system: GM_SYSTEM,
     user:
       "PHASE: narration\n" +
-      "Narrate the round's combined outcome in Korean using ONLY the resolved outcomes below.\n" +
+      "이번 라운드의 결과를 한국어로 서술하세요. 아래 RESOLVED_CHECKS의 판정 결과만 사용하되, " +
+      "각 플레이어의 행동(ACTIONS)이 어떻게 전개되고 성공/실패가 장면에 어떤 결과로 나타나는지 " +
+      "오감 묘사와 NPC 반응을 곁들여 생생하게 그리세요. 모든 플레이어의 행동을 빠짐없이 반영하세요. " +
+      "행동이 여러 개이고 판정도 여러 개면, 각 행동의 성패를 그에 대응하는 판정 결과대로 따로따로 묘사하세요. " +
+      "속도·민첩 계열 판정이 있고 그것이 실패(Failure)했다면, 다 해내지 못한 행동을 " +
+      "\"~하려 했지만 속도가 느려서 ~\"처럼 미완·실패로 서술하세요. " +
+      "단, visibility가 \"gm\"인 판정은 비공개 굴림이므로 주사위나 판정이 있었다는 사실을 드러내지 말고, " +
+      "그 결과를 사건·분위기로만 자연스럽게 녹여내세요.\n" +
       'Respond as {"narration": "<korean text>", "endingReached": <bool>, "stateChanges": []}.\n' +
+      formatScenarioRules(ctx.scenario) +
+      firedBlock +
+      formatScene(scene) +
+      formatRecentNarrative(ctx.recentNarrative) +
       `ACTIONS: ${JSON.stringify(ctx.thisRound.actions)}\n` +
       `RESOLVED_CHECKS: ${JSON.stringify(resolved)}`,
   };
@@ -717,8 +1114,10 @@ function buildEndingPrompt(ctx: TurnStateContext): Prompt {
     system: GM_SYSTEM,
     user:
       "PHASE: ending\n" +
-      "Write the closing narration and a concise session summary, both in Korean.\n" +
+      "마무리 내레이션과 세션 요약을 모두 한국어로 작성하세요. 마무리는 감정의 여운과 장면을 살려 " +
+      "서사적으로, 요약은 핵심 사건을 간결하게 정리하세요.\n" +
       'Respond as {"closing": "<korean text>", "summary": "<korean text>"}.\n' +
+      formatScenarioRules(ctx.scenario) +
       `CONTEXT: ${JSON.stringify({ scenario: ctx.scenario, recentNarrative: ctx.recentNarrative })}`,
   };
 }

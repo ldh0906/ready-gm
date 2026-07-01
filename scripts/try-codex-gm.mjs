@@ -1,14 +1,19 @@
-// Live GM playtest: drive the AI GM coordinator with the local Codex CLI.
+// Live GM playtest: drive the AI GM coordinator with a local CLI model.
 //
 // Runs opening -> one round resolution -> ending through the REAL engine
-// (AiGmRouter + AiGmCoordinator + Dice + EZFudge), with the GM backed by
-// `codex exec` (gpt-5.5, low reasoning effort). Prints the Korean narration.
+// (AiGmRouter + AiGmCoordinator + Dice + EZFudge). The GM brain is chosen by
+// AI_GM_CLI: `codex` (default, gpt-5.5 / low effort) or `claude` (sonnet).
+// Backend-only: no HTTP server, no port, no static serving — it never touches
+// the frontend (public/). Prints the Korean narration + writes out/gm-session.md.
 //
-// Usage:  npm run build  &&  node scripts/try-codex-gm.mjs
-import { CodexCliAiGmClient, AiGmRouter, AiGmCoordinator } from "../dist/ai/index.js";
+// Usage:
+//   npm run gm:demo                       (codex, default)
+//   set AI_GM_CLI=claude && npm run gm:demo   (claude, Windows cmd)
+import { createCliAiGmClient, AiGmRouter, AiGmCoordinator } from "../dist/ai/index.js";
 import { makeEngineConfig } from "../dist/core/config.js";
 import { createDiceService } from "../dist/core/dice.js";
 import { MVP_SCENARIO } from "../dist/services/scenario-service.js";
+import { seedClocksForScenario } from "../dist/services/scenario-clocks.js";
 import { toContext } from "../dist/services/turn-state-context.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 
@@ -28,7 +33,9 @@ function log(t = "") {
 // Cap retries to keep the (slow, billed) Codex calls bounded for the demo.
 const config = makeEngineConfig({ aiMaxRetries: 1 });
 
-const client = new CodexCliAiGmClient(); // gpt-5.5 + reasoning effort "low"
+const client = createCliAiGmClient(process.env); // AI_GM_CLI: codex (default) | claude
+const provider = (process.env.AI_GM_CLI ?? "codex").toLowerCase();
+log(`[GM brain] ${provider}`);
 const router = new AiGmRouter({ client, config });
 const dice = createDiceService(config.diceRange); // server-side CSPRNG
 const coordinator = new AiGmCoordinator({ router, dice, config });
@@ -77,12 +84,23 @@ async function main() {
   log(opening.ok ? opening.value : `FAILED: ${opening.error.reason} — ${opening.error.message}`);
 
   line("2) ROUND RESOLUTION (resolveRound: AI picks checks -> server dice -> EZFudge -> narration)");
-  const resolved = await coordinator.resolveRound({ state: resolvingState, scenario: MVP_SCENARIO, characters });
+  // Supply the scenario's Progress Clocks. For the demo, pre-fill the scene
+  // alarm to 5/6 so a single round's clockDelta can FILL it and the GM narrates
+  // the consequence in the same beat.
+  const clocks = seedClocksForScenario(MVP_SCENARIO.id).map((c) =>
+    c.id === "crypt_alert" ? { ...c, value: 5 } : c,
+  );
+  log("[clocks before]");
+  for (const c of clocks) log(`  - ${c.name}: ${c.value}/${c.max}`);
+  const resolved = await coordinator.resolveRound({ state: resolvingState, scenario: MVP_SCENARIO, characters, clocks });
   if (resolved.ok) {
     log("[server-resolved checks]");
     for (const c of resolved.checks) {
       log(`  - ${c.characterId} / ${c.attribute} vs ${c.difficulty}: roll=${c.roll} => ${c.outcome}`);
     }
+    log("\n[clocks after]");
+    for (const c of resolved.clocks ?? []) log(`  - ${c.name}: ${c.value}/${c.max}`);
+    if ((resolved.firedClocks ?? []).length > 0) log(`[fired] ${resolved.firedClocks.join(", ")}`);
     log("\n[GM narration]\n" + resolved.narration);
     log("\nendingReached: " + resolved.endingReached);
   } else {

@@ -47,6 +47,13 @@ export interface RealtimeGatewayDeps {
    */
   getTurnState: (roomId: string) => TurnState | undefined;
   /**
+   * Optional fan-out decorator applied to the Turn_State just before it is sent
+   * to clients (both broadcast and on-(re)connect resync). Used to enrich the
+   * readiness roster with display-only player/character names without polluting
+   * the canonical persisted state. Identity by default.
+   */
+  decorateState?: (roomId: string, state: TurnState) => TurnState;
+  /**
    * Additional delivery retries after the first failed attempt. Default `2`
    * (3 total attempts), mirroring the engine's retry convention (R6.5).
    */
@@ -63,10 +70,12 @@ export class RealtimeGateway {
   /** roomId → narration buffered while the room had no connections (R10.7). */
   private readonly narrationBuffer = new Map<string, NarrationPayload[]>();
   private readonly getTurnState: (roomId: string) => TurnState | undefined;
+  private readonly decorateState: (roomId: string, state: TurnState) => TurnState;
   private readonly maxSendRetries: number;
 
   constructor(deps: RealtimeGatewayDeps) {
     this.getTurnState = deps.getTurnState;
+    this.decorateState = deps.decorateState ?? ((_roomId, state) => state);
     this.maxSendRetries = Math.max(0, deps.maxSendRetries ?? 2);
   }
 
@@ -81,7 +90,23 @@ export class RealtimeGateway {
   connect(connection: Connection): void {
     const room = this.roomFor(connection.roomId);
     const record: ConnectionRecord = { connection, alive: true };
+    // Register the fresh connection FIRST so closing any stale one below cannot
+    // prune the (briefly empty) room map out from under us.
     room.set(connection.id, record);
+
+    // Drop any prior connection for the SAME player in this room: a reconnect
+    // opens a fresh socket, and leaving the stale record would keep fanning out
+    // to a dead transport until the heartbeat reaps it (S8).
+    for (const [existingId, existing] of [...room.entries()]) {
+      if (existingId !== connection.id && existing.connection.playerId === connection.playerId) {
+        room.delete(existingId);
+        try {
+          existing.connection.close();
+        } catch {
+          // Closing a broken transport is best-effort.
+        }
+      }
+    }
 
     // Any inbound traffic (data or pong) marks the connection alive (R13.4).
     connection.onMessage(() => {
@@ -95,7 +120,11 @@ export class RealtimeGateway {
     // R13.2 / R13.5: deliver the current Turn_State on (re)connect.
     const state = this.getTurnState(connection.roomId);
     if (state !== undefined) {
-      this.deliver(record, { type: "turn_state", roomId: connection.roomId, state });
+      this.deliver(record, {
+        type: "turn_state",
+        roomId: connection.roomId,
+        state: this.decorateState(connection.roomId, state),
+      });
     }
 
     // R10.7 / R13.5: flush narration produced while the room had no players.
@@ -127,7 +156,7 @@ export class RealtimeGateway {
   broadcastTurnState(roomId: string): void {
     const state = this.getTurnState(roomId);
     if (state === undefined) return;
-    this.broadcast(roomId, { type: "turn_state", roomId, state });
+    this.broadcast(roomId, { type: "turn_state", roomId, state: this.decorateState(roomId, state) });
   }
 
   /**
@@ -182,6 +211,31 @@ export class RealtimeGateway {
   /** Number of connections currently registered for a room. */
   connectionCount(roomId: string): number {
     return this.rooms.get(roomId)?.size ?? 0;
+  }
+
+  /**
+   * Schedule the periodic {@link heartbeat} sweep on an interval and return a
+   * disposer that stops it (S4). The composition root / server entrypoint owns
+   * the lifecycle, but exposing this here means the sweep cannot be forgotten:
+   * call once after wiring the gateway and call the returned function on
+   * shutdown. The timer is `unref`'d so it never keeps the process alive on its
+   * own (Requirements 13.3, 13.4).
+   *
+   * @param intervalMs sweep period in milliseconds (must be > 0).
+   */
+  startHeartbeat(intervalMs: number): () => void {
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      throw new RangeError(`heartbeat intervalMs must be a positive number, got ${intervalMs}`);
+    }
+    const timer = globalThis.setInterval(() => this.heartbeat(), intervalMs);
+    // Don't let the heartbeat alone keep the Node process alive.
+    (timer as { unref?: () => void }).unref?.();
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      globalThis.clearInterval(timer);
+    };
   }
 
   /** Whether a room has any connected players (drives narration buffering). */

@@ -13,6 +13,10 @@ const SECOND_SCENARIO: Scenario = {
   summary: "A frozen vale hides a sleeping terror.",
   openingSeed: "Snow falls on a silent pass.",
   endingCondition: "The terror is laid to rest or wakes fully.",
+  genre: "판타지 던전 탐험",
+  category: "판타지 액션·탐험",
+  hasSpecialRules: false,
+  system: "EZFudge",
 };
 
 describe("ScenarioService — listing", () => {

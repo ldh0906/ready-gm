@@ -22,8 +22,8 @@ function sampleTurnState(): TurnState {
       { playerId: "p2", characterName: "Aria", text: "Wait!", ts: "2024-01-01T00:00:02.000Z" },
     ],
     checks: [
-      { characterId: "c1", attribute: "Might", difficulty: "Hard", roll: 2, outcome: "Success" },
-      { characterId: "c2", attribute: "Wits", difficulty: "Average", roll: -1, outcome: "Failure" },
+      { characterId: "c1", attribute: "Might", difficulty: "Hard", roll: 2, outcome: "Success", advantage: "none", rolls: [2], visibility: "player" },
+      { characterId: "c2", attribute: "Wits", difficulty: "Average", roll: -1, outcome: "Failure", advantage: "none", rolls: [-1], visibility: "gm" },
     ],
     narrativeContext: [
       { round: 1, text: "The party enters the crypt." },
@@ -97,5 +97,57 @@ describe("serializeTurnState / deserializeTurnState", () => {
   it("throws on JSON that does not decode to an object", () => {
     expect(() => deserializeTurnState("42")).toThrow(TypeError);
     expect(() => deserializeTurnState("null")).toThrow(TypeError);
+  });
+
+  it("defaults advantage/rolls when a legacy check record omits them (lossless-with-defaults)", () => {    // A check persisted before per-check advantage existed: no advantage/rolls.
+    const legacy = JSON.stringify({
+      roomId: "room-legacy",
+      roundNumber: 2,
+      phase: "ready_check",
+      readiness: [],
+      chatLog: [],
+      checks: [{ characterId: "c1", attribute: "Might", difficulty: "Hard", roll: 2, outcome: "Success" }],
+      narrativeContext: [],
+      readyCheckDeadline: null,
+      readyCheckTimeoutMs: 90000,
+      resolutionRequested: false,
+    });
+    const restored = deserializeTurnState(legacy);
+    expect(restored.checks[0].advantage).toBe("none");
+    expect(restored.checks[0].rolls).toEqual([2]);
+    // The chosen roll is unchanged.
+    expect(restored.checks[0].roll).toBe(2);
+    // Legacy records predate hidden GM rolls: default to a public player check.
+    expect(restored.checks[0].visibility).toBe("player");
+  });
+
+  it("round-trips a chat entry WITH displayName, preserving it", () => {
+    const state = sampleTurnState();
+    state.chatLog = [
+      {
+        playerId: "p1",
+        characterName: "알렉스",
+        text: "정찰한다",
+        ts: "2024-01-01T00:00:01.000Z",
+        displayName: "라면",
+      },
+    ];
+    const restored = deserializeTurnState(serializeTurnState(state));
+    expect(restored.chatLog[0]?.displayName).toBe("라면");
+    expect(restored.chatLog[0]?.characterName).toBe("알렉스");
+    expect(restored).toStrictEqual(state);
+  });
+
+  it("round-trips a chat entry WITHOUT displayName unchanged (no key introduced)", () => {
+    const state = sampleTurnState();
+    state.chatLog = [
+      { playerId: "p1", characterName: "Borin", text: "I draw my axe.", ts: "2024-01-01T00:00:01.000Z" },
+    ];
+    const json = serializeTurnState(state);
+    // The serialized output must not introduce a displayName key for legacy entries.
+    expect(json).not.toContain("displayName");
+    const restored = deserializeTurnState(json);
+    expect(restored.chatLog[0]).not.toHaveProperty("displayName");
+    expect(restored).toStrictEqual(state);
   });
 });

@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm — 방 만들기</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 15px/1.65 system-ui, "Malgun Gothic", sans-serif;
+    background: #0f1115;
+    color: #e7e9ee;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 10px 16px;
+    background: #171a21;
+    border-bottom: 1px solid #262b36;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex: 0 0 auto;
+  }
+  header .badge {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #222836;
+    color: #9fb0c8;
+  }
+
+  /* Single column layout; never exceeds the viewport so there is no
+     horizontal scroll on narrow (320–767px) screens. */
+  main {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px 16px 48px;
+  }
+
+  .intro { margin: 0 0 24px; }
+  .intro h1 { font-size: 22px; margin: 0 0 10px; }
+  .intro p { margin: 6px 0; color: #c4ccda; }
+  .intro ol { margin: 10px 0 0; padding-left: 20px; color: #9fb0c8; }
+  .intro li { margin: 4px 0; }
+
+  .card {
+    background: #161922;
+    border: 1px solid #262b36;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 18px;
+  }
+  .card h2 { font-size: 16px; margin: 0 0 12px; }
+
+  label { display: block; font-size: 13px; color: #9fb0c8; margin-bottom: 6px; }
+  input, button { font: inherit; }
+  input[type=text] {
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 10px 12px;
+    width: 100%;
+  }
+  input[readonly] { color: #c4ccda; }
+
+  .actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    background: #2f6df0;
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+  }
+  button.secondary { background: #2b3242; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Visible focus indicator distinct from the dark background. */
+  a:focus-visible,
+  input:focus-visible,
+  button:focus-visible {
+    outline: 3px solid #f0c040;
+    outline-offset: 2px;
+  }
+
+  .field-error { color: #ef8b8b; font-size: 13px; margin-top: 8px; min-height: 1em; }
+  .form-error {
+    color: #ef8b8b;
+    font-size: 14px;
+    background: #2a1b1f;
+    border: 1px solid #5a2b33;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+
+  .progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #f0c040;
+    font-size: 14px;
+    margin-top: 14px;
+  }
+
+  .invite-panel p { margin: 6px 0; }
+  .invite-panel .link-text { color: #7fd1b9; word-break: break-all; }
+  .copy-confirm { color: #7fd1b9; font-size: 13px; }
+  .copy-fallback { color: #f0c040; font-size: 13px; margin-top: 8px; }
+  .manual-copy { margin-top: 14px; }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 767px) {
+    main { padding: 16px 12px 40px; }
+    .actions button { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <strong>ready-gm</strong>
+  <span class="badge">방 만들기 · 호스트</span>
+</header>
+
+<main>
+  <!-- Landing_View: 서비스 소개 + 방 생성 방법 (요구사항 1.1) -->
+  <section class="intro" aria-labelledby="intro-title">
+    <h1 id="intro-title">친구들과 즐기는 AI GM TRPG</h1>
+    <p>ready-gm은 AI 게임 마스터가 진행하는 멀티플레이 TRPG 세션을 만들어 줍니다. 방을 만들고 초대 링크를 공유하면 친구들이 함께할 수 있어요.</p>
+    <p class="intro-how">방을 만드는 방법</p>
+    <ol>
+      <li>방에서 사용할 표시 이름을 입력합니다.</li>
+      <li>방 만들기 버튼을 누릅니다.</li>
+      <li>생성된 초대 링크를 친구들에게 공유하고 방으로 입장합니다.</li>
+    </ol>
+  </section>
+
+  <!-- Room_Creation_Form: 표시 이름 입력 + 방 만들기 (요구사항 2.1) -->
+  <section class="card" aria-labelledby="form-title">
+    <h2 id="form-title">방 만들기</h2>
+    <label for="displayName">표시 이름</label>
+    <input
+      id="displayName"
+      type="text"
+      placeholder="방에서 사용할 이름"
+      autocomplete="off"
+      aria-describedby="nameError"
+    />
+    <!-- 입력과 aria-describedby로 연관된 검증 안내 영역 (요구사항 10.5) -->
+    <p id="nameError" class="field-error" role="alert" aria-live="assertive"></p>
+
+    <div class="actions">
+      <button id="submitBtn" type="button" aria-label="방 만들기">방 만들기</button>
+    </div>
+
+    <!-- 진행 인디케이터 (요구사항 3.1) -->
+    <div id="progress" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>방을 만드는 중이에요…</span>
+    </div>
+
+    <!-- 서버·네트워크·타임아웃 오류 영역 (요구사항 8.x) -->
+    <p id="formError" class="form-error" role="alert" aria-live="polite" hidden></p>
+  </section>
+
+  <!-- Invite_Panel: 성공 전까지 숨김 (요구사항 1.2) -->
+  <section
+    id="invitePanel"
+    class="card"
+    aria-labelledby="invite-title"
+    hidden
+  >
+    <h2 id="invite-title">방이 만들어졌어요</h2>
+
+    <!-- renderInvitePanel(success) 마크업이 주입되는 영역 (요구사항 4.1, 4.2) -->
+    <div id="invitePanelContent"></div>
+
+    <p id="maxPlayersDisplay" class="max-players"></p>
+
+    <div class="actions">
+      <button id="copyBtn" type="button" aria-label="초대 링크 복사">초대 링크 복사</button>
+      <span id="copyConfirm" class="copy-confirm" role="status" aria-live="polite" hidden>초대 링크를 복사했어요.</span>
+    </div>
+
+    <!-- 수동 복사 폴백: 초대 링크 전체를 직접 선택·복사 (요구사항 5.4) -->
+    <div class="manual-copy">
+      <label for="manualCopy">초대 링크 (직접 복사용)</label>
+      <input id="manualCopy" type="text" readonly aria-label="초대 링크 직접 복사용 입력" />
+      <p id="copyFallback" class="copy-fallback" hidden>자동 복사에 실패했어요. 위 링크를 직접 선택해 복사해 주세요.</p>
+    </div>
+
+    <div class="actions">
+      <button id="enterRoomBtn" type="button" aria-label="방으로 입장">방으로 입장</button>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+  import {
+    Phase,
+    REQUEST_TIMEOUT_MS,
+    COPY_CONFIRM_MS,
+    createInitialState,
+    validateDisplayName,
+    buildCreateRoomRequest,
+    classifyOutcome,
+    buildHandoff,
+    reduce,
+    computeVisibility,
+    renderInvitePanel,
+    copyInviteLink,
+  } from "./logic.js";
+
+  const $ = (id) => document.getElementById(id);
+
+  // ---- DOM 참조 -----------------------------------------------------------
+  const nameInput = $("displayName");
+  const nameError = $("nameError");
+  const submitBtn = $("submitBtn");
+  const progress = $("progress");
+  const formError = $("formError");
+  const invitePanel = $("invitePanel");
+  const invitePanelContent = $("invitePanelContent");
+  const maxPlayersDisplay = $("maxPlayersDisplay");
+  const copyBtn = $("copyBtn");
+  const copyConfirm = $("copyConfirm");
+  const manualCopy = $("manualCopy");
+  const copyFallback = $("copyFallback");
+  const enterRoomBtn = $("enterRoomBtn");
+
+  // ---- 상태: 단일 진실 원천 ----------------------------------------------
+  // ?token= 공유 비밀을 읽어 초기 상태에 주입한다. 이 토큰은 x-playtest-token
+  // 헤더(buildCreateRoomRequest)와 로비 인계에만 사용되며, 그 외 인증은 없다.
+  const TOKEN = new URLSearchParams(location.search).get("token") || "";
+  let state = createInitialState(TOKEN);
+
+  // 단방향 흐름: dispatch → reduce → render. render는 상태의 순수 함수다.
+  function dispatch(action) {
+    state = reduce(state, action);
+    render();
+  }
+
+  // ---- 렌더 (상태의 함수) -------------------------------------------------
+  function render() {
+    const { indicator, panel, submitDisabled } = computeVisibility(state);
+
+    // 입력값 동기화 (타이핑 중 커서가 튀지 않도록 다를 때만 갱신)
+    if (nameInput.value !== state.displayNameInput) {
+      nameInput.value = state.displayNameInput;
+    }
+
+    // 진행 인디케이터 / Submit 비활성
+    progress.hidden = !indicator;
+    submitBtn.disabled = submitDisabled;
+
+    // 입력 인접 검증·400 안내. validation 종류 오류는 입력 옆에 표시(요구사항 7.1).
+    if (state.validationMessage) {
+      nameError.textContent = state.validationMessage;
+    } else if (state.errorKind === "validation") {
+      nameError.textContent = state.errorMessage || "";
+    } else {
+      nameError.textContent = "";
+    }
+
+    // 서버·네트워크·타임아웃 오류는 별도 오류 영역에 표시(요구사항 8.x).
+    const showFormError =
+      state.errorMessage != null && state.errorKind && state.errorKind !== "validation";
+    formError.hidden = !showFormError;
+    formError.textContent = showFormError ? state.errorMessage : "";
+
+    // Invite_Panel
+    invitePanel.hidden = !panel;
+    if (panel && state.success) {
+      invitePanelContent.innerHTML = renderInvitePanel(state.success);
+      manualCopy.value = state.success.inviteLink;
+      maxPlayersDisplay.textContent = `최대 인원: ${state.success.maxPlayers}명`;
+      enterRoomBtn.disabled = false;
+    }
+
+    // 복사 확인 메시지: 만료 시각 전까지만 노출(요구사항 5.3).
+    const now = Date.now();
+    copyConfirm.hidden = !(state.copyConfirmedUntil != null && now < state.copyConfirmedUntil);
+
+    // 복사 실패 폴백 노출(요구사항 5.4).
+    copyFallback.hidden = !state.copyFailed;
+  }
+
+  // ---- 부수효과: POST /rooms (AbortController 10초 타임아웃) ---------------
+  async function sendCreateRoomRequest() {
+    const { trimmed } = validateDisplayName(state.displayNameInput);
+    const req = buildCreateRoomRequest(trimmed, state.token);
+
+    // 표준 AbortController + setTimeout으로 타임아웃을 구현한다(테스트에서
+    // 가짜 타이머로 제어 가능). REQUEST_TIMEOUT_MS(10초)를 그대로 사용한다.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      const outcome = classifyOutcome({
+        kind: "response",
+        response: { ok: res.ok, status: res.status },
+      });
+
+      if (outcome === "success") {
+        const payload = await res.json();
+        dispatch({ type: "REQUEST_SUCCEEDED", payload });
+      } else {
+        dispatch({ type: "REQUEST_FAILED", kind: outcome });
+      }
+    } catch (err) {
+      clearTimeout(timer);
+      // abort()로 취소되면 타임아웃, 그 외 fetch reject는 네트워크 오류.
+      const aborted = err && err.name === "AbortError";
+      const kind = classifyOutcome({ kind: aborted ? "timeout" : "network" });
+      dispatch({ type: "REQUEST_FAILED", kind });
+    }
+  }
+
+  // ---- 사용자 동작 배선 ---------------------------------------------------
+  nameInput.addEventListener("input", () => {
+    dispatch({ type: "INPUT_CHANGED", value: nameInput.value });
+  });
+
+  submitBtn.addEventListener("click", () => {
+    const wasSubmitting = state.phase === Phase.SUBMITTING;
+    dispatch({ type: "SUBMIT" });
+    // SUBMIT으로 submitting에 진입했을 때만 실제 요청을 전송한다(멱등 보장).
+    if (!wasSubmitting && state.phase === Phase.SUBMITTING) {
+      sendCreateRoomRequest();
+    }
+  });
+
+  copyBtn.addEventListener("click", async () => {
+    const inviteLink = state.success ? state.success.inviteLink : "";
+    const ok = await copyInviteLink(inviteLink, navigator.clipboard);
+    if (ok) {
+      dispatch({ type: "COPY_SUCCEEDED", now: Date.now() });
+      // 최소 COPY_CONFIRM_MS 후 재렌더해 확인 메시지를 자동으로 감춘다.
+      setTimeout(render, COPY_CONFIRM_MS);
+    } else {
+      dispatch({ type: "COPY_FAILED" });
+    }
+  });
+
+  enterRoomBtn.addEventListener("click", () => {
+    const before = state.handoffDone;
+    dispatch({ type: "ENTER_ROOM" });
+    // handoffDone이 false→true로 바뀐 그 순간에만 정확히 1회 인계한다.
+    if (!before && state.handoffDone) {
+      const handoff = buildHandoff(state.success, state.token);
+      const params = new URLSearchParams();
+      params.set("roomId", handoff.roomId);
+      params.set("hostPlayerId", handoff.hostPlayerId);
+      if (handoff.token) params.set("token", handoff.token);
+      // 서버 발급 연결 티켓이 있으면 ticket으로 로비에 인계한다(auth-hardening).
+      if (handoff.ticket) params.set("ticket", handoff.ticket);
+      // 로비 화면으로 식별자·토큰·티켓을 쿼리로 전달하는 URL로 이동한다.
+      location.assign(`/lobby/?${params.toString()}`);
+    }
+  });
+
+  // 최초 렌더(idle 상태).
+  render();
+</script>
+</body>
+</html>

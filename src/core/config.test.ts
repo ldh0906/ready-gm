@@ -44,6 +44,19 @@ describe("makeEngineConfig", () => {
     expect(cfg.diceRange.max).toBe(DEFAULT_ENGINE_CONFIG.diceRange.max);
   });
 
+  it("defaults the attribute ladder to [-2, +4] and merges overrides (R4.2)", () => {
+    expect(DEFAULT_ENGINE_CONFIG.attributeLadder).toEqual({ min: -2, max: 4 });
+    const cfg = makeEngineConfig({ attributeLadder: { min: 0 } as { min: number; max: number } });
+    expect(cfg.attributeLadder.min).toBe(0);
+    expect(cfg.attributeLadder.max).toBe(DEFAULT_ENGINE_CONFIG.attributeLadder.max);
+  });
+
+  it("does not mutate the shared attribute-ladder default", () => {
+    const cfg = makeEngineConfig();
+    cfg.attributeLadder.min = 99;
+    expect(DEFAULT_ENGINE_CONFIG.attributeLadder.min).toBe(-2);
+  });
+
   it("overrides apply and defaults fill the rest (property)", () => {
     fc.assert(
       fc.property(

@@ -60,7 +60,10 @@ describe("runMigrations", () => {
   });
 
   it("skips migrations already recorded as applied", async () => {
-    const pool = new FakeMigrationPool(["0001_init.sql"]);
+    // Mark ALL current migration files as already applied so nothing is pending,
+    // keeping this test robust as new migrations are added.
+    const allFiles = await listMigrationFiles(defaultMigrationsDir());
+    const pool = new FakeMigrationPool(allFiles);
     const result = await runMigrations(pool as unknown as Pool);
 
     expect(result.applied).toEqual([]);

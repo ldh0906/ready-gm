@@ -26,9 +26,11 @@ import { AiGmCoordinator } from "../ai/ai-gm-coordinator.js";
 import { AiGmRouter } from "../ai/ai-gm-router.js";
 import type { AiGmClient } from "../ai/ai-gm-client.js";
 import type { EnvelopeGenerators } from "../observability/events.js";
+import type { EventSink } from "../observability/event-sink.js";
+import { NoopSessionLogger, type SessionLogger } from "../observability/session-log.js";
 import { createPersistence, type Persistence } from "../persistence/factory.js";
 import type { EnvLike } from "../persistence/pg-client.js";
-import { ScenarioService } from "../services/scenario-service.js";
+import { ScenarioService, type Scenario } from "../services/scenario-service.js";
 import { RealtimeGateway } from "./gateway.js";
 import { RoomOrchestrator } from "./room-orchestrator.js";
 
@@ -49,6 +51,18 @@ export interface CreateEngineDeps {
    * so the CSPRNG-seeded default is used; injectable for deterministic tests.
    */
   diceSource?: UniformIntSource;
+  /**
+   * Optional scenario catalog seeded into the in-memory scenario store. Defaults
+   * to the single MVP scenario; the local playtest server passes a multi-scenario
+   * catalog so the lobby can offer a scenario picker.
+   */
+  scenarioCatalog?: readonly Scenario[];
+  /**
+   * Optional best-effort session trace logger. When provided (and enabled), QA
+   * events (incl. the AI raw output) and round-flow transitions are appended to
+   * a local JSONL file for debugging. Defaults to a no-op (tests never log).
+   */
+  sessionLogger?: SessionLogger;
 }
 
 /** The fully wired engine object graph. */
@@ -65,6 +79,8 @@ export interface Engine {
   dice: DiceService;
   /** The resolved engine configuration. */
   config: EngineConfig;
+  /** The best-effort session trace logger (no-op unless enabled by the caller). */
+  sessionLogger: SessionLogger;
 }
 
 /**
@@ -74,20 +90,63 @@ export interface Engine {
  */
 export function createEngine(deps: CreateEngineDeps): Engine {
   const config = deps.config ?? DEFAULT_ENGINE_CONFIG;
-  const persistence = createPersistence(deps.env ?? process.env);
+  const persistence = createPersistence(
+    deps.env ?? process.env,
+    deps.scenarioCatalog ? { scenarioCatalog: deps.scenarioCatalog } : {},
+  );
+
+  const sessionLogger = deps.sessionLogger ?? new NoopSessionLogger();
+  // When session logging is on, tee every QA event (incl. the AI `ai_output`
+  // event carrying the raw model text + validation result) into the trace file
+  // alongside the normal sink. Off → use the persistence sink unchanged.
+  const eventSink: EventSink = sessionLogger.enabled
+    ? {
+        emit: (event) => {
+          persistence.eventSink.emit(event);
+          sessionLogger.emitQa(event);
+        },
+      }
+    : persistence.eventSink;
 
   const gateway = new RealtimeGateway({
     getTurnState: (roomId) => persistence.turnStateStore.get(roomId),
+    // Enrich the readiness roster with display-only character/join names so the
+    // game header shows "CharacterName(JoinName)" instead of raw player ids. This
+    // is applied only at fan-out; the persisted Turn_State stays name-free.
+    decorateState: (roomId, state) => {
+      const readiness = Array.isArray(state.readiness) ? state.readiness : [];
+      if (readiness.length === 0) return state;
+      const displayById = new Map(
+        persistence.roomStore.listPlayers(roomId).map((p) => [p.id, p.displayName]),
+      );
+      const charById = new Map(
+        persistence.roomStore.listCharactersByRoom(roomId).map((c) => [c.playerId, c.name]),
+      );
+      return {
+        ...state,
+        readiness: readiness.map((entry) => {
+          const characterName = charById.get(entry.playerId);
+          const displayName = displayById.get(entry.playerId);
+          return {
+            ...entry,
+            ...(characterName !== undefined && characterName.length > 0
+              ? { characterName }
+              : {}),
+            ...(displayName !== undefined && displayName.length > 0 ? { displayName } : {}),
+          };
+        }),
+      };
+    },
   });
 
   const dice = createDiceServiceFromSpec(config.dice, deps.diceSource, {
-    sink: persistence.eventSink,
+    sink: eventSink,
   });
 
   const router = new AiGmRouter({
     client: deps.aiClient,
     config,
-    sink: persistence.eventSink,
+    sink: eventSink,
     ...(deps.generators ? { generators: deps.generators } : {}),
   });
 
@@ -95,7 +154,7 @@ export function createEngine(deps: CreateEngineDeps): Engine {
     router,
     dice,
     config,
-    sink: persistence.eventSink,
+    sink: eventSink,
     ...(deps.generators ? { generators: deps.generators } : {}),
   });
 
@@ -108,11 +167,16 @@ export function createEngine(deps: CreateEngineDeps): Engine {
     roomReader: persistence.roomStore,
     scenarioResolver: scenarioService,
     sessionSummaryRepository: persistence.sessionSummaryRepository,
-    eventSink: persistence.eventSink,
+    clockStore: persistence.clockStore,
+    sceneStore: persistence.sceneStore,
+    eventSink,
     config,
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.generators ? { generators: deps.generators } : {}),
+    ...(sessionLogger.enabled
+      ? { log: (category: string, data?: Record<string, unknown>) => sessionLogger.log(category, data) }
+      : {}),
   });
 
-  return { persistence, gateway, coordinator, orchestrator, dice, config };
+  return { persistence, gateway, coordinator, orchestrator, dice, config, sessionLogger };
 }

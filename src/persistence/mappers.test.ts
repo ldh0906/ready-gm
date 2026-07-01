@@ -59,6 +59,10 @@ const scenario: Scenario = {
   summary: "A delve.",
   openingSeed: "Dusk over a fearful village.",
   endingCondition: "Escape or perish.",
+  genre: "판타지 던전 탐험",
+  category: "판타지 액션·탐험",
+  hasSpecialRules: false,
+  system: "EZFudge",
 };
 
 describe("toIso", () => {
@@ -184,6 +188,13 @@ describe("scenario mapping", () => {
       "A delve.",
       "Dusk over a fearful village.",
       "Escape or perish.",
+      "판타지 던전 탐험",
+      "판타지 액션·탐험",
+      false,
+      "EZFudge",
+      null,
+      false,
+      "원샷",
     ]);
     const restored = rowToScenario({
       id: "the-sunless-crypt",
@@ -191,8 +202,43 @@ describe("scenario mapping", () => {
       summary: "A delve.",
       opening_seed: "Dusk over a fearful village.",
       ending_condition: "Escape or perish.",
+      genre: "판타지 던전 탐험",
+      category: "판타지 액션·탐험",
+      has_special_rules: false,
+      system: "EZFudge",
     });
-    expect(restored).toEqual(scenario);
+    // `form` is absent from the fixture/row, so it defaults to "원샷".
+    expect(restored).toEqual({ ...scenario, form: "원샷" });
+  });
+
+  it("preserves an explicit form value through scenarioToRow", () => {
+    const campaign: Scenario = { ...scenario, form: "캠페인" };
+    const row = scenarioToRow(campaign);
+    // index 11 is the trailing `form` value, aligned with SCENARIO_INSERT_COLUMNS.
+    expect(row).toHaveLength(12);
+    expect(row[11]).toBe("캠페인");
+  });
+
+  it("defaults form to 원샷 when absent on the scenario", () => {
+    const row = scenarioToRow(scenario);
+    expect(row).toHaveLength(12);
+    expect(row[11]).toBe("원샷");
+  });
+
+  it("reads form from the row, defaulting to 원샷 when the column is absent", () => {
+    const withForm = rowToScenario({
+      id: "the-sunless-crypt",
+      title: "The Sunless Crypt",
+      summary: "A delve.",
+      opening_seed: "Dusk over a fearful village.",
+      ending_condition: "Escape or perish.",
+      genre: "판타지 던전 탐험",
+      category: "판타지 액션·탐험",
+      has_special_rules: false,
+      system: "EZFudge",
+      form: "캠페인",
+    });
+    expect(withForm.form).toBe("캠페인");
   });
 });
 

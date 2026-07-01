@@ -10,3 +10,7 @@ export * from "./ai-gm-router.js";
 export * from "./ai-gm-coordinator.js";
 export * from "./ai-gm-record-replay.js";
 export * from "./codex-cli-client.js";
+export * from "./claude-cli-client.js";
+export * from "./cli-client-factory.js";
+export * from "./gm-decision.js";
+export * from "./blackboard-scope.js";

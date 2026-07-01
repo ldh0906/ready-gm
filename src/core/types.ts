@@ -77,4 +77,11 @@ export interface EngineConfig {
    * makes criticals/fumbles rarer than a flat band (Requirement 11.6).
    */
   dice: { count: number; face: { min: number; max: number } };
+  /**
+   * Inclusive EZFudge attribute ladder bounds. AI-proposed attribute sets and
+   * player edits are validated against this band so out-of-ladder values cannot
+   * skew difficulty math. Configurable so scenarios / alternate rule systems
+   * can use a different ladder (Requirement 4.2).
+   */
+  attributeLadder: { min: number; max: number };
 }

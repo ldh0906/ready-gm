@@ -8,4 +8,8 @@ export * from "./room-service.js";
 export * from "./scenario-service.js";
 export * from "./character-service.js";
 export * from "./turn-state-store.js";
+export * from "./clock-store.js";
+export * from "./scenario-clocks.js";
+export * from "./scene-store.js";
+export * from "./scenario-scenes.js";
 export * from "./turn-state-context.js";

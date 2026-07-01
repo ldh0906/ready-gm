@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm — 판정 테스트 시나리오</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; font: 15px/1.65 system-ui, "Malgun Gothic", sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #1a2030, #0f1115 60%);
+    color: #e7e9ee; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: #171a21; border-bottom: 1px solid #262b36;
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap; flex: 0 0 auto;
+  }
+  header strong { font-size: 15px; }
+  header .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #222836; color: #9fb0c8; }
+  .meta { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 13px; color: #9fb0c8; }
+  .pill { padding: 2px 8px; border-radius: 999px; background: #222836; }
+  #perilPill.high { background: #5a2b33; color: #ffd0d0; }
+  #progressPill.full { background: #1f4a3a; color: #7fd1b9; }
+  button { font: inherit; background: #2f6df0; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button.secondary { background: #2b3242; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #f0c040; outline-offset: 2px; }
+
+  /* 2분할 본문 */
+  #app { flex: 1 1 auto; display: flex; min-height: 0; }
+  .story { flex: 2 1 0; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid #262b36; }
+  .sidebar { flex: 1 1 0; min-width: 280px; max-width: 440px; display: flex; flex-direction: column; background: #12151d; }
+  .paneHead { padding: 8px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #8b98ac; border-bottom: 1px solid #262b36; flex: 0 0 auto; }
+  .scroll { flex: 1 1 auto; overflow: auto; padding: 14px; min-height: 0; }
+
+  .gm { background: #1b2330; border-left: 3px solid #5b8def; padding: 12px 14px; border-radius: 8px; margin-bottom: 10px; white-space: pre-wrap; }
+  .gm.opening { border-left-color: #9b6bef; }
+  .gm.check { border-left-color: #f0a93f; background: #221b14; }
+  .gm.result { border-left-color: #3fcaa8; }
+  .gm.crit { border-left-color: #f0c040; box-shadow: 0 0 0 1px rgba(240,192,64,.3) inset; }
+  .gm.fumble { border-left-color: #ef6b8b; }
+  .gm .who { display: block; font-size: 12px; color: #9fb0c8; margin-bottom: 4px; }
+
+  .li { padding: 7px 10px; border-radius: 8px; margin-bottom: 6px; white-space: pre-wrap; font-size: 14px; }
+  .li.me { background: #1d2233; border-left: 3px solid #2f6df0; }
+  .li.sys { color: #8b98ac; font-size: 13px; }
+
+  /* 주사위 트레이 */
+  .dice-zone { flex: 0 0 auto; border-top: 1px solid #262b36; background: #12151d; padding: 12px 14px; }
+  #diceTray { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; min-height: 0; padding: 4px 2px 18px; }
+  #diceTray:empty { display: none; padding: 0; }
+
+  .dice-die {
+    --size: 72px; --c1: #2f6df0; --c2: #1b3a8f; position: relative; width: var(--size); height: var(--size);
+    display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 800;
+    background: linear-gradient(155deg, var(--c1), var(--c2));
+    box-shadow: 0 6px 14px rgba(0,0,0,.45), inset 0 2px 5px rgba(255,255,255,.18);
+  }
+  .dice-die .dice-face { font-size: calc(var(--size) * .42); line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,.5); }
+  .dice-die .dice-type { position: absolute; top: 4px; left: 0; right: 0; text-align: center; font-size: 11px; font-weight: 700; color: rgba(255,255,255,.78); }
+  .dice-die .dice-label { position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 11px; color: #9fb0c8; }
+  .dice-die[data-sides="20"] { --c1:#f0c040; --c2:#9a7410; clip-path: polygon(50% 2%, 93% 25%, 93% 75%, 50% 98%, 7% 75%, 7% 25%); color:#241a00; }
+  .dice-die[data-sides="20"] .dice-type { color: rgba(0,0,0,.55); }
+  .dice-die[data-sides="6"] { --c1:#5b8def; --c2:#1b3a8f; border-radius: 12px; }
+  @keyframes diceShake {
+    0% { transform: translateY(0) rotate(0deg) scale(1); } 25% { transform: translateY(-9px) rotate(-18deg) scale(1.06); }
+    50% { transform: translateY(2px) rotate(14deg) scale(.97); } 75% { transform: translateY(-5px) rotate(-10deg) scale(1.03); }
+    100% { transform: translateY(0) rotate(0deg) scale(1); }
+  }
+  .dice-die.rolling { animation: diceShake .28s linear infinite; }
+  .dice-die.emphasis.rolling { animation-duration: .2s; }
+  .dice-die.emphasis { --size: 92px; }
+  @keyframes diceSettle { 0% { transform: scale(1.18); } 60% { transform: scale(.94); } 100% { transform: scale(1); } }
+  .dice-die.settled { animation: diceSettle .35s ease-out; }
+  .dice-die.crit { box-shadow: 0 0 0 3px #fff6cf, 0 0 22px 6px rgba(240,192,64,.85), 0 6px 14px rgba(0,0,0,.45); }
+  .dice-die.fumble { box-shadow: 0 0 0 3px #ffd0d0, 0 0 22px 6px rgba(239,107,107,.8), 0 6px 14px rgba(0,0,0,.45); filter: grayscale(.2); }
+  .dice-die.kept { outline: 3px solid #7fd1b9; outline-offset: 3px; }
+  .dice-die.dropped { opacity: .42; filter: grayscale(.6); }
+  @media (prefers-reduced-motion: reduce) { .dice-die.rolling, .dice-die.settled { animation: none; } }
+
+  /* 입력 푸터 */
+  footer { flex: 0 0 auto; padding: 10px 14px; border-top: 1px solid #262b36; background: #12151d; }
+  #controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #msg { background: #0f1320; color: #e7e9ee; border: 1px solid #2b3242; border-radius: 8px; padding: 8px 10px; flex: 1; min-width: 200px; }
+  #rollBtn { background: #f0a93f; color: #241a00; font-weight: 700; }
+  @keyframes rollPulse {
+    0% { box-shadow: 0 0 0 0 rgba(240,169,63,.6); }
+    70% { box-shadow: 0 0 0 10px rgba(240,169,63,0); }
+    100% { box-shadow: 0 0 0 0 rgba(240,169,63,0); }
+  }
+  #rollBtn:not([hidden]) { animation: rollPulse 1.3s ease-out infinite; }
+  @media (prefers-reduced-motion: reduce) { #rollBtn:not([hidden]) { animation: none; } }
+  .hint { color: #8b98ac; font-size: 13px; margin: 6px 0 0; }
+
+  @media (max-width: 767px) {
+    #app { flex-direction: column; }
+    .story { border-right: 0; border-bottom: 1px solid #262b36; }
+    .sidebar { min-width: 0; max-width: none; }
+    #controls button { flex: 1 1 auto; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <strong>ready-gm</strong>
+  <span class="badge">판정 테스트 (로컬 시뮬레이션)</span>
+  <span class="meta">
+    <span class="pill" id="goalPill" title="장면 목표">목표 <b id="goal">-</b></span>
+    <span class="pill" id="progressPill">진행 <b id="progress">0/0</b></span>
+    <span class="pill" id="perilPill">위기 <b id="peril">0/0</b></span>
+    <span class="pill" id="phasePill">단계 <b id="phase">대기</b></span>
+    <button id="copyLogBtn" class="secondary" type="button" aria-label="로그 복사">로그 복사</button>
+    <button id="saveLogBtn" class="secondary" type="button" aria-label="로그 저장">로그 저장</button>
+    <button id="newBtn" class="secondary" type="button" aria-label="새 상황">새 상황</button>
+  </span>
+</header>
+
+<div id="app">
+  <section class="story" aria-label="GM 서사">
+    <div class="paneHead">GM 서사</div>
+    <div id="story" class="scroll" role="log" aria-live="polite" aria-label="GM 서사 로그"></div>
+  </section>
+  <aside class="sidebar" aria-label="행동 로그 및 주사위">
+    <div class="paneHead">행동 로그</div>
+    <div id="side" class="scroll" role="log" aria-live="polite" aria-label="행동 로그"></div>
+    <div class="dice-zone">
+      <div id="diceTray" aria-live="polite" aria-label="주사위 트레이"></div>
+    </div>
+  </aside>
+</div>
+
+<footer>
+  <div id="controls">
+    <input id="msg" type="text" placeholder="하려는 행동을 입력하세요… (예: 무너진 다리를 뛰어넘는다)" aria-label="행동 입력" />
+    <button id="actBtn" type="button" aria-label="행동 시도">행동 시도</button>
+    <button id="rollBtn" type="button" aria-label="주사위 굴리기" hidden>주사위 굴리기 (d20)</button>
+  </div>
+  <p class="hint" id="hint">행동을 입력하고 "행동 시도"를 누르면 판정관이 능력치와 난이도를 정합니다.</p>
+</footer>
+
+<script type="module">
+  import { createDiceTray } from "./dice-tray.js";
+  import { pickCheck, resolveOutcome, chooseRoll, describeBands, rollCountFor, ATTRIBUTES, DIFFICULTY_LABELS } from "./judge.js";
+  import { SCENARIOS, createScene, applyOutcome } from "./scenario-engine.js";
+
+  const $ = (id) => document.getElementById(id);
+  const storyEl = $("story");
+  const sideEl = $("side");
+  const msgEl = $("msg");
+  const actBtn = $("actBtn");
+  const rollBtn = $("rollBtn");
+  const newBtn = $("newBtn");
+  const phaseEl = $("phase");
+  const goalEl = $("goal");
+  const progressEl = $("progress");
+  const perilEl = $("peril");
+  const progressPill = $("progressPill");
+  const perilPill = $("perilPill");
+  const hintEl = $("hint");
+
+  const tray = createDiceTray($("diceTray"));
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+  // 플레이 로그 기록(브라우저에 자동 보관 → 새로고침해도 직전 세션 확인 가능).
+  const transcript = [];
+  const LOG_KEY = "readygm-scenario-log";
+  function record(line) {
+    transcript.push(line);
+    try { localStorage.setItem(LOG_KEY, transcript.join("\n")); } catch {}
+  }
+
+  function gm(cls, who, text) {
+    const d = document.createElement("div");
+    d.className = "gm " + cls;
+    d.innerHTML = `<span class="who">[GM · ${esc(who)}]</span>` + esc(text);
+    storyEl.appendChild(d);
+    storyEl.scrollTop = storyEl.scrollHeight;
+    record(`[GM · ${who}]\n${text}\n`);
+  }
+  function log(cls, text) {
+    const d = document.createElement("div");
+    d.className = "li " + cls;
+    d.innerHTML = text;
+    sideEl.appendChild(d);
+    sideEl.scrollTop = sideEl.scrollHeight;
+    record(`· ${d.textContent}`);
+  }
+
+  // 테스트용 시나리오는 장면 엔진(scenario-engine.js)에서 가져온다.
+  let scenarioIdx = 0;
+  let scene = null; // 현재 장면 상태(진행도/위기 누적)
+
+  // 상태 머신: "idle"(행동 대기) → "await_roll"(판정 announce, 굴리기 대기) → resolving → idle
+  let phase = "idle";
+  let pendingCheck = null; // { attribute, difficulty }
+
+  function setPhase(p, label) {
+    phase = p;
+    phaseEl.textContent = label;
+  }
+
+  function updateMeters() {
+    const sc = scene ? scene.scenario : null;
+    goalEl.textContent = sc ? sc.goal : "-";
+    const pNeed = sc ? sc.progressNeeded : 0;
+    const perilMax = sc ? sc.perilMax : 0;
+    progressEl.textContent = `${scene ? scene.progress : 0}/${pNeed}`;
+    perilEl.textContent = `${scene ? scene.peril : 0}/${perilMax}`;
+    progressPill.classList.toggle("full", !!scene && scene.progress >= pNeed && pNeed > 0);
+    perilPill.classList.toggle("high", !!scene && perilMax > 0 && scene.peril >= perilMax - 1);
+  }
+
+  function startScenario() {
+    tray.clear();
+    storyEl.replaceChildren();
+    sideEl.replaceChildren();
+    pendingCheck = null;
+    rollBtn.hidden = true;
+    actBtn.disabled = false;
+    msgEl.disabled = false;
+    msgEl.value = "";
+
+    const scenario = SCENARIOS[scenarioIdx % SCENARIOS.length];
+    scene = createScene(scenario);
+    updateMeters();
+
+    gm("opening", scenario.title, scenario.intro + `\n\n목표: ${scenario.goal}`);
+    log("sys", "행동을 입력해 판정을 시작하세요.");
+    setPhase("idle", "행동 대기");
+    hintEl.textContent = '행동을 입력하고 "행동 시도"를 누르면 판정관이 능력치와 난이도를 정합니다.';
+    msgEl.focus();
+  }
+
+  function attemptAction() {
+    if (phase !== "idle") return;
+    const text = msgEl.value.trim();
+    if (!text) {
+      hintEl.textContent = "먼저 하려는 행동을 입력해 주세요.";
+      return;
+    }
+    log("me", `🧭 <b>나</b>: ${esc(text)}`);
+    msgEl.value = "";
+
+    // 로컬 "AI 판정관"이 능력치·난이도를 정한다.
+    const check = pickCheck(text);
+    pendingCheck = { ...check, actionText: text };
+
+    // 판정표(option 3): 능력치·난이도·유불리 + 결과 구간을 굴리기 전에 보여준다.
+    const advLabel =
+      check.advantage === "advantage"
+        ? "유리 — d20 2개 중 높은 값"
+        : check.advantage === "disadvantage"
+          ? "불리 — d20 2개 중 낮은 값"
+          : "보통 — d20 1개";
+    const b = describeBands(check.difficulty);
+    const table = [
+      `판정: ${ATTRIBUTES[check.attribute]} · ${DIFFICULTY_LABELS[check.difficulty]} · ${advLabel}`,
+      `목표값 ${b.target}`,
+      `· 대성공: ${b.critFrom} 이상 (또는 자연 20)`,
+      `· 성공: ${b.successFrom} ~ ${b.critFrom - 1}`,
+      `· 부분 성공: ${b.partialFrom} ~ ${b.successFrom - 1}`,
+      `· 실패: ${b.partialFrom - 1} 이하 (또는 자연 1)`,
+    ].join("\n");
+    gm("check", "판정", `${check.reason}\n\n${table}`);
+
+    setPhase("await_roll", "주사위 대기");
+    actBtn.disabled = true;
+    msgEl.disabled = true;
+    rollBtn.hidden = false;
+    rollBtn.disabled = false;
+    rollBtn.textContent =
+      check.advantage === "advantage"
+        ? "주사위 굴리기 (유리·d20×2)"
+        : check.advantage === "disadvantage"
+          ? "주사위 굴리기 (불리·d20×2)"
+          : "주사위 굴리기 (d20)";
+    rollBtn.focus();
+    hintEl.textContent = `${ATTRIBUTES[check.attribute]} 판정 — 주사위를 굴려 결과를 확인하세요.`;
+  }
+
+  async function rollForCheck() {
+    if (phase !== "await_roll" || !pendingCheck) return;
+    const check = pendingCheck; // 로컬 캡처(이후 상태 변경과 무관하게 사용)
+    setPhase("resolving", "판정 중");
+    rollBtn.disabled = true;
+    msgEl.disabled = true;
+    actBtn.disabled = true;
+    hintEl.textContent = "주사위를 굴리는 중…";
+    // 굴리는 동안 즉시 피드백을 준다(빈 화면처럼 보이지 않도록).
+    log("sys", "🎲 주사위를 굴립니다…");
+
+    let ended = false;
+    try {
+      // 유불리에 따라 d20을 1개(보통) 또는 2개(유리/불리) 순서대로 굴린다.
+      const n = rollCountFor(check.advantage);
+      const specs =
+        n === 2
+          ? [
+              { sides: 20, speed: "normal", emphasis: true, label: "운명 ①" },
+              { sides: 20, speed: "normal", emphasis: true, label: "운명 ②" },
+            ]
+          : [{ sides: 20, speed: "normal", emphasis: true, label: "운명의 판정" }];
+      const plans = await tray.rollSequence(specs);
+      const rolls = plans.map((p) => p.result);
+      const { chosen, chosenIndex } = chooseRoll(rolls, check.advantage);
+
+      // 채택/탈락 주사위를 시각적으로 표시한다(유불리일 때만).
+      if (n === 2) {
+        const dieEls = document.getElementById("diceTray").querySelectorAll(".dice-die");
+        dieEls.forEach((el, i) => {
+          el.classList.add(i === chosenIndex ? "kept" : "dropped");
+        });
+      }
+
+      const result = resolveOutcome(chosen, check.difficulty);
+
+      // 우측 로그: 굴림 수치 + 채택 + 결과.
+      const rollsText =
+        n === 2
+          ? `d20 [${rolls.join(", ")}] → ${check.advantage === "advantage" ? "높은" : "낮은"} 값 <b>${chosen}</b> 채택`
+          : `d20 <b>${chosen}</b>`;
+      log(
+        result.outcome === "Failure" ? "sys" : "me",
+        `🎯 ${rollsText} vs 목표 ${result.target} → <b>${esc(result.outcome)}</b>`,
+      );
+
+      // 장면 엔진에 결과를 적용 — 진행도/위기가 변하고 맥락 있는 후속 상황이 서술된다.
+      const applied = applyOutcome(scene, {
+        actionText: check.actionText,
+        attribute: check.attribute,
+        difficulty: check.difficulty,
+        outcome: result.outcome,
+        roll: result.roll,
+      });
+      scene = applied.scene;
+      ended = applied.ended;
+      updateMeters();
+
+      const cls =
+        scene.sceneOutcome === "success"
+          ? "result crit"
+          : scene.sceneOutcome === "failure"
+            ? "result fumble"
+            : result.outcome === "Critical Success"
+              ? "result crit"
+              : result.outcome === "Failure"
+                ? "result fumble"
+                : "result";
+      gm(cls, "결과", applied.narration);
+    } catch (err) {
+      gm("result fumble", "결과", "판정 처리 중 오류가 발생했어요. 다시 시도해 주세요.");
+      log("sys", "⚠ 판정 오류: " + esc(String(err && err.message ? err.message : err)));
+    } finally {
+      pendingCheck = null;
+      rollBtn.hidden = true;
+      if (ended) {
+        // 장면 종료: 행동 입력을 막고 새 상황을 유도한다.
+        actBtn.disabled = true;
+        msgEl.disabled = true;
+        setPhase("ended", scene && scene.sceneOutcome === "success" ? "장면 성공" : "장면 실패");
+        hintEl.textContent = '장면이 끝났습니다. 우측 상단 "새 상황"으로 다음 장면을 시작하세요.';
+        log("sys", scene && scene.sceneOutcome === "success" ? "✦ 장면 성공" : "✦ 장면 실패");
+      } else {
+        actBtn.disabled = false;
+        msgEl.disabled = false;
+        setPhase("idle", "행동 대기");
+        hintEl.textContent = "다음 행동을 입력하세요. (새 상황은 우측 상단 버튼)";
+        msgEl.focus();
+      }
+    }
+  }
+
+  actBtn.addEventListener("click", attemptAction);
+  rollBtn.addEventListener("click", rollForCheck);
+  msgEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && phase === "idle") attemptAction();
+  });
+  newBtn.addEventListener("click", () => {
+    scenarioIdx += 1;
+    startScenario();
+  });
+
+  // 로그 복사 / 저장
+  $("copyLogBtn").addEventListener("click", async () => {
+    const text = transcript.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      hintEl.textContent = "플레이 로그를 클립보드에 복사했어요.";
+    } catch {
+      // 클립보드 거부 시 폴백: 임시 textarea로 선택.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch {}
+      document.body.removeChild(ta);
+      hintEl.textContent = "로그를 복사했어요(폴백).";
+    }
+  });
+  $("saveLogBtn").addEventListener("click", () => {
+    const blob = new Blob([transcript.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `readygm-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    hintEl.textContent = "플레이 로그를 .txt로 저장했어요.";
+  });
+
+  // 부팅: 첫 상황 제시.
+  startScenario();
+</script>
+</body>
+</html>

@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm — 주사위 데모</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 15px/1.65 system-ui, "Malgun Gothic", sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #1a2030, #0f1115 60%);
+    color: #e7e9ee;
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+  header {
+    padding: 12px 16px;
+    background: #171a21;
+    border-bottom: 1px solid #262b36;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  header strong { font-size: 16px; }
+  header .badge {
+    font-size: 12px; padding: 2px 8px; border-radius: 999px;
+    background: #222836; color: #9fb0c8;
+  }
+  main { flex: 1 1 auto; width: 100%; max-width: 860px; margin: 0 auto; padding: 20px 16px 56px; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  p.sys { color: #9fb0c8; margin: 4px 0 18px; font-size: 14px; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .controls .group {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    background: #161922; border: 1px solid #262b36; border-radius: 10px; padding: 10px 12px;
+  }
+  .controls .group h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #8b98ac; margin: 0 8px 0 0; }
+  button {
+    font: inherit; background: #2f6df0; color: #fff; border: 0; border-radius: 8px;
+    padding: 8px 12px; cursor: pointer;
+  }
+  button.secondary { background: #2b3242; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  label.speed { display: inline-flex; align-items: center; gap: 6px; color: #9fb0c8; font-size: 13px; }
+  select { font: inherit; background: #0f1320; color: #e7e9ee; border: 1px solid #2b3242; border-radius: 8px; padding: 6px 8px; }
+  button:focus-visible, select:focus-visible { outline: 3px solid #f0c040; outline-offset: 2px; }
+
+  /* ---- 주사위 트레이 ---- */
+  .tray-wrap { margin-top: 16px; }
+  .tray-head { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #8b98ac; margin-bottom: 10px; }
+  #tray {
+    display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-end;
+    min-height: 130px; padding: 18px;
+    background: #12151d; border: 1px solid #262b36; border-radius: 12px;
+  }
+
+  /* 한 주사위: 종류 라벨 + 면(숫자) + 라벨 */
+  .dice-die {
+    --size: 84px;
+    --c1: #2f6df0; --c2: #1b3a8f;
+    position: relative;
+    width: var(--size); height: var(--size);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 800;
+    background: linear-gradient(155deg, var(--c1), var(--c2));
+    box-shadow: 0 8px 18px rgba(0,0,0,.45), inset 0 2px 6px rgba(255,255,255,.18);
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,.4));
+    transition: transform .15s ease;
+  }
+  .dice-die .dice-face { font-size: calc(var(--size) * .42); line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,.5); }
+  .dice-die .dice-type {
+    position: absolute; top: 5px; left: 0; right: 0; text-align: center;
+    font-size: 11px; font-weight: 700; color: rgba(255,255,255,.78); letter-spacing: .04em;
+  }
+  .dice-die .dice-label {
+    position: absolute; bottom: -22px; left: 50%; transform: translateX(-50%);
+    white-space: nowrap; font-size: 12px; font-weight: 600; color: #9fb0c8;
+  }
+
+  /* 면 수별 모양(clip-path)과 색 */
+  .dice-die[data-sides="4"]  { --c1:#ef6b8b; --c2:#9b2b46; clip-path: polygon(50% 4%, 96% 96%, 4% 96%); }
+  .dice-die[data-sides="4"] .dice-face { transform: translateY(18%); font-size: calc(var(--size) * .34); }
+  .dice-die[data-sides="6"]  { --c1:#5b8def; --c2:#1b3a8f; border-radius: 16px; }
+  .dice-die[data-sides="8"]  { --c1:#3fcaa8; --c2:#176b57; clip-path: polygon(50% 2%, 98% 50%, 50% 98%, 2% 50%); }
+  .dice-die[data-sides="10"] { --c1:#f0a93f; --c2:#9a6410; clip-path: polygon(50% 2%, 90% 32%, 78% 96%, 22% 96%, 10% 32%); }
+  .dice-die[data-sides="12"] { --c1:#9b6bef; --c2:#532b9b; clip-path: polygon(50% 2%, 90% 22%, 98% 64%, 68% 98%, 32% 98%, 2% 64%, 10% 22%); }
+  .dice-die[data-sides="20"] { --c1:#f0c040; --c2:#9a7410; clip-path: polygon(50% 2%, 93% 25%, 93% 75%, 50% 98%, 7% 75%, 7% 25%); color:#241a00; }
+  .dice-die[data-sides="20"] .dice-type { color: rgba(0,0,0,.55); }
+
+  /* 구르는 중: 빠른 흔들림 + 회전 */
+  @keyframes diceShake {
+    0%   { transform: translateY(0) rotate(0deg) scale(1); }
+    25%  { transform: translateY(-10px) rotate(-18deg) scale(1.06); }
+    50%  { transform: translateY(2px) rotate(14deg) scale(.97); }
+    75%  { transform: translateY(-6px) rotate(-10deg) scale(1.03); }
+    100% { transform: translateY(0) rotate(0deg) scale(1); }
+  }
+  .dice-die.rolling { animation: diceShake .28s linear infinite; }
+  .dice-die.emphasis.rolling { animation-duration: .2s; }
+  .dice-die.emphasis { --size: 104px; }
+
+  /* 멈춤: 살짝 튕김 */
+  @keyframes diceSettle {
+    0% { transform: scale(1.18); }
+    60% { transform: scale(.94); }
+    100% { transform: scale(1); }
+  }
+  .dice-die.settled { animation: diceSettle .35s ease-out; }
+
+  /* d20 극단값 강조 */
+  .dice-die.crit {
+    box-shadow: 0 0 0 3px #fff6cf, 0 0 24px 6px rgba(240,192,64,.85), 0 8px 18px rgba(0,0,0,.45);
+  }
+  .dice-die.fumble {
+    box-shadow: 0 0 0 3px #ffd0d0, 0 0 24px 6px rgba(239,107,107,.8), 0 8px 18px rgba(0,0,0,.45);
+    filter: grayscale(.2);
+  }
+
+  .result-line { margin-top: 16px; color: #c4ccda; font-size: 14px; min-height: 1.4em; }
+  .result-line b { color: #7fd1b9; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dice-die.rolling, .dice-die.settled { animation: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <strong>ready-gm</strong>
+  <span class="badge">주사위 데모</span>
+</header>
+<main>
+  <h1>주사위 굴리기</h1>
+  <p class="sys">버튼을 누르면 실제로 구르는 듯한 애니메이션과 함께 숫자가 정해집니다. 여러 개를 굴리면 순서대로 하나씩 굴러요.</p>
+
+  <div class="controls">
+    <div class="group" role="group" aria-label="단일 주사위 굴리기">
+      <h2>단일</h2>
+      <button class="die-btn" data-sides="4" type="button">d4</button>
+      <button class="die-btn" data-sides="6" type="button">d6</button>
+      <button class="die-btn" data-sides="8" type="button">d8</button>
+      <button class="die-btn" data-sides="10" type="button">d10</button>
+      <button class="die-btn" data-sides="12" type="button">d12</button>
+      <button class="die-btn" data-sides="20" type="button">d20</button>
+      <label class="speed">속도
+        <select id="speed" aria-label="굴림 속도">
+          <option value="fast">빠름</option>
+          <option value="normal" selected>보통</option>
+          <option value="slow">느림</option>
+        </select>
+      </label>
+    </div>
+    <div class="group" role="group" aria-label="시퀀스 굴리기">
+      <h2>시퀀스</h2>
+      <button id="seqBtn" class="secondary" type="button">전체 세트 순서대로</button>
+      <button id="critBtn" class="secondary" type="button">중요 판정 (d20 강조)</button>
+      <button id="clearBtn" class="secondary" type="button">지우기</button>
+    </div>
+  </div>
+
+  <div class="tray-wrap">
+    <div class="tray-head">주사위 트레이</div>
+    <div id="tray" aria-live="polite"></div>
+    <p id="result" class="result-line" role="status" aria-live="polite"></p>
+  </div>
+</main>
+
+<script type="module">
+  import { createDiceTray } from "./dice-tray.js";
+  import { DIE_TYPES } from "./dice.js";
+
+  const tray = createDiceTray(document.getElementById("tray"));
+  const resultEl = document.getElementById("result");
+  const speedEl = document.getElementById("speed");
+  const buttons = Array.from(document.querySelectorAll("button"));
+
+  function setBusy(busy) {
+    for (const b of buttons) b.disabled = busy;
+  }
+
+  function summarize(plans) {
+    const parts = plans.map((p) => {
+      const tag = p.criticality === "crit" ? " (대성공!)" : p.criticality === "fumble" ? " (대실패!)" : "";
+      return `${p.label ? p.label + " " : ""}d${p.sides} → ${p.result}${tag}`;
+    });
+    const total = plans.reduce((s, p) => s + p.result, 0);
+    resultEl.innerHTML = `결과: ${parts.map((t) => `<b>${t}</b>`).join(" · ")}` +
+      (plans.length > 1 ? ` &nbsp; (합계 ${total})` : "");
+  }
+
+  async function run(specs) {
+    setBusy(true);
+    resultEl.textContent = "굴리는 중…";
+    try {
+      const plans = await tray.rollSequence(specs);
+      summarize(plans);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  for (const b of document.querySelectorAll(".die-btn")) {
+    b.addEventListener("click", () => {
+      const sides = Number(b.getAttribute("data-sides"));
+      run([{ sides, speed: speedEl.value }]);
+    });
+  }
+
+  document.getElementById("seqBtn").addEventListener("click", () => {
+    // 모든 종류를 순서대로: 작은 주사위는 빠르게, 큰 주사위는 보통 속도로.
+    run(DIE_TYPES.map((sides) => ({
+      sides,
+      speed: sides <= 6 ? "fast" : "normal",
+      label: `d${sides}`,
+    })));
+  });
+
+  document.getElementById("critBtn").addEventListener("click", () => {
+    // 중요 판정 연출: 작은 보조 주사위 두 개를 빠르게 굴린 뒤, d20을 천천히 강조해서 굴린다.
+    run([
+      { sides: 6, speed: "fast", label: "보너스" },
+      { sides: 8, speed: "fast", label: "피해" },
+      { sides: 20, speed: "slow", emphasis: true, label: "운명의 판정" },
+    ]);
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    tray.clear();
+    resultEl.textContent = "";
+  });
+</script>
+</body>
+</html>

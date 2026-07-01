@@ -22,6 +22,39 @@ import type { ChatEntry, ReadinessEntry, TurnState } from "../core/turn-state.js
 /** Which narration a {@link NarrationPayload} carries. */
 export type NarrationKind = "opening" | "resolution" | "closing";
 
+/** A player-visible Progress Clock snapshot (only sent for clock-visible scenarios). */
+export interface VisibleClock {
+  name: string;
+  value: number;
+  max: number;
+}
+
+/** A player-visible resolved check snapshot (sent with resolution narration). */
+export interface VisibleCheck {
+  /** The rule-system attribute key (e.g. "Might", "Sneaky"). */
+  attribute: string;
+  /**
+   * The scenario-localized (Korean) label for {@link attribute}, derived from
+   * the sheet schema's trait labels. Falls back to the raw key when no label is
+   * defined (e.g. universal EZFudge stats). Lets the client show 은밀함 rather
+   * than the raw "Sneaky".
+   */
+  attributeLabel: string;
+  /**
+   * The acting character's name (as seen in the sheet). Empty string when the
+   * roll cannot be attributed to a known character. Lets the client show who
+   * rolls which die and gate a player's own roll behind a "굴리기" button.
+   */
+  characterName: string;
+  difficulty: string;
+  advantage: "none" | "advantage" | "disadvantage";
+  /** The individual EZFudge totals (length 1 for none, 2 for adv/disadv). */
+  rolls: number[];
+  /** The chosen total. */
+  roll: number;
+  outcome: string;
+}
+
 /**
  * A piece of GM narration delivered over the channel. Narration generated while
  * no players are connected is buffered and delivered on (re)connect
@@ -33,6 +66,19 @@ export interface NarrationPayload {
   roundNumber: number;
   /** The Korean narration text (already validated upstream). */
   text: string;
+  /**
+   * Current Progress Clock snapshot for the room, present ONLY when the
+   * scenario opts into visible clocks. Optional + additive so existing clients
+   * that ignore it are unaffected.
+   */
+  clocks?: VisibleClock[];
+  /**
+   * The round's player-visible resolved checks, present ONLY on `resolution`
+   * narration when at least one public (visibility="player") check was rolled.
+   * Lets the client animate the EZFudge dice for the results. Hidden GM rolls
+   * are never included. Optional + additive.
+   */
+  checks?: VisibleCheck[];
 }
 
 /** A minimal player summary broadcast on roster changes (Requirement 2.5). */

@@ -1,0 +1,1020 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ready-gm — 로비 / 대기실</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 15px/1.65 system-ui, "Malgun Gothic", sans-serif;
+    background: #0f1115;
+    color: #e7e9ee;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 10px 16px;
+    background: #171a21;
+    border-bottom: 1px solid #262b36;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex: 0 0 auto;
+  }
+  header .badge {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #222836;
+    color: #9fb0c8;
+  }
+  header .conn {
+    margin-left: auto;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #222836;
+    color: #9fb0c8;
+  }
+  header .conn.active { color: #7fd1b9; }
+
+  /* Single column layout; never exceeds the viewport so there is no
+     horizontal scroll on narrow (320–767px) screens. */
+  main {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px 16px 48px;
+  }
+
+  .intro { margin: 0 0 24px; }
+  .intro h1 { font-size: 22px; margin: 0 0 10px; }
+  .intro p { margin: 6px 0; color: #c4ccda; }
+
+  .card {
+    background: #161922;
+    border: 1px solid #262b36;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 18px;
+  }
+  .card h2 { font-size: 16px; margin: 0 0 12px; }
+
+  label { display: block; font-size: 13px; color: #9fb0c8; margin-bottom: 6px; }
+  input, button { font: inherit; }
+  input[type=text] {
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 10px 12px;
+    width: 100%;
+  }
+  select {
+    font: inherit;
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 10px 12px;
+    width: 100%;
+    margin-bottom: 10px;
+    cursor: pointer;
+  }
+  select:disabled { opacity: .5; cursor: not-allowed; }
+  input[readonly] { color: #c4ccda; }
+
+  .actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    background: #2f6df0;
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 16px;
+    cursor: pointer;
+  }
+  button.secondary { background: #2b3242; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Visible focus indicator distinct from the dark background. */
+  a:focus-visible,
+  input:focus-visible,
+  button:focus-visible {
+    outline: 3px solid #f0c040;
+    outline-offset: 2px;
+  }
+
+  .link-text { color: #7fd1b9; word-break: break-all; }
+  .manual-copy { margin-top: 14px; }
+  .copy-confirm { color: #7fd1b9; font-size: 13px; }
+  .copy-fallback { color: #f0c040; font-size: 13px; margin-top: 8px; }
+
+  .notice {
+    color: #ef8b8b;
+    font-size: 14px;
+    background: #2a1b1f;
+    border: 1px solid #5a2b33;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+  }
+  .field-error { color: #ef8b8b; font-size: 13px; margin-top: 8px; }
+  .scenario-notice { color: #f0c040; font-size: 13px; margin-top: 8px; }
+
+  .progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #f0c040;
+    font-size: 14px;
+    margin-top: 14px;
+  }
+
+  .roster-count { color: #c4ccda; margin: 0 0 8px; }
+  .roster-empty { color: #9fb0c8; }
+  .roster-list { margin: 0; padding-left: 20px; }
+  .roster-player { margin: 4px 0; }
+  .host-mark { color: #f0c040; font-size: 13px; }
+
+  .scenario-title { font-size: 15px; margin: 0 0 6px; color: #e7e9ee; }
+  .scenario-summary { margin: 0; color: #c4ccda; white-space: pre-wrap; }
+  .scenario-meta { margin: 6px 0 0; font-size: 13px; color: #9fb0c8; }
+
+  /* ---- 커스텀 시나리오 콤보박스 ---------------------------------------- */
+  .combo-label { display: block; font-size: 13px; color: #9fb0c8; margin-bottom: 6px; }
+
+  .combobox { position: relative; width: 100%; margin-bottom: 10px; }
+
+  .combobox-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    background: #0f1320;
+    color: #e7e9ee;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .combobox-trigger:disabled { opacity: .5; cursor: not-allowed; }
+  .combobox-trigger-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .combobox-arrow { color: #9fb0c8; font-size: 12px; flex: 0 0 auto; }
+
+  .combobox-listbox {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 50;
+    max-height: 320px;
+    overflow-y: auto;
+    background: #11151f;
+    border: 1px solid #2b3242;
+    border-radius: 8px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, .55);
+    padding: 4px;
+  }
+
+  .combobox-group {
+    padding: 8px 10px 4px;
+    border-top: 1px solid #20283a;
+  }
+  .combobox-listbox > .combobox-group:first-child { border-top: 0; }
+  .combobox-group-label { font-size: 12px; font-weight: 600; color: #c4ccda; }
+  .combobox-group-desc { font-size: 11px; color: #7d8aa0; margin-top: 2px; }
+
+  .combobox-option {
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .combobox-option:hover,
+  .combobox-option.active {
+    background: #1c2740;
+  }
+  .combobox-option[aria-selected="true"] {
+    background: #243456;
+    outline: 1px solid #2f6df0;
+  }
+  .combobox-option-title { font-size: 14px; color: #e7e9ee; }
+  .combobox-option-meta {
+    margin-top: 4px;
+    padding: 4px 6px;
+    background: #0c1018;
+    border: 1px solid #1d2536;
+    border-radius: 5px;
+    font-size: 11px;
+    color: #9fb0c8;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+  }
+  .combobox-option-meta-seg { white-space: nowrap; }
+
+  .combobox-trigger:focus-visible,
+  .combobox-listbox:focus-visible {
+    outline: 3px solid #f0c040;
+    outline-offset: 2px;
+  }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 767px) {
+    main { padding: 16px 12px 40px; }
+    .actions button { width: 100%; }
+    .combobox-listbox { max-height: 260px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <strong>ready-gm</strong>
+  <span id="roleBadge" class="badge">로비 · 호스트</span>
+  <span id="connectionStatus" class="conn" role="status" aria-live="polite">실시간 연결 대기 중…</span>
+</header>
+
+<main>
+  <section class="intro" aria-labelledby="lobby-title">
+    <h1 id="lobby-title">대기실</h1>
+    <p>친구들을 초대하고, 모두 모이면 세션을 시작하세요.</p>
+  </section>
+
+  <!-- 인계 무효 안내 (요구사항 1.3/1.4) -->
+  <p id="handoffInvalid" class="notice" role="alert" aria-live="assertive" hidden></p>
+
+  <!-- Invite_Panel: 초대 링크 재조회·복사 (요구사항 2.x, 3.x) -->
+  <section class="card" aria-labelledby="invite-title">
+    <h2 id="invite-title">초대 링크</h2>
+
+    <p id="inviteLink" class="link-text" aria-live="polite"></p>
+
+    <!-- 영역별 로딩 인디케이터 (요구사항 8.1) -->
+    <div id="inviteLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>초대 링크를 불러오는 중이에요…</span>
+    </div>
+
+    <!-- 영역 오류 메시지 (요구사항 2.4/2.5/9.x) -->
+    <p id="inviteError" class="field-error" role="alert" aria-live="polite" hidden></p>
+
+    <div class="actions">
+      <button id="copyBtn" type="button" aria-label="초대 링크 복사" disabled>초대 링크 복사</button>
+      <button id="inviteRefetchBtn" class="secondary" type="button" aria-label="초대 링크 재조회">재조회</button>
+      <span id="copyConfirm" class="copy-confirm" role="status" aria-live="polite" hidden>초대 링크를 복사했어요.</span>
+    </div>
+
+    <!-- 수동 복사 폴백: 초대 링크 전체를 직접 선택·복사 (요구사항 3.4) -->
+    <div class="manual-copy">
+      <label for="manualCopy">초대 링크 (직접 복사용)</label>
+      <input id="manualCopy" type="text" readonly aria-label="초대 링크 직접 복사용 입력" />
+      <p id="copyFallback" class="copy-fallback" aria-live="polite" hidden>자동 복사에 실패했어요. 위 링크를 직접 선택해 복사해 주세요.</p>
+    </div>
+  </section>
+
+  <!-- 정원 + 플레이어 로스터 + 연결 상태 (요구사항 4.x, 6.x) -->
+  <section class="card" aria-labelledby="roster-title">
+    <h2 id="roster-title">플레이어</h2>
+
+    <!-- renderRoster() 마크업이 주입되는 영역 (요구사항 6.2/6.5/6.6) -->
+    <div id="roster" aria-live="polite"></div>
+
+    <div id="roomLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>방 정보를 불러오는 중이에요…</span>
+    </div>
+
+    <p id="roomError" class="field-error" role="alert" aria-live="polite" hidden></p>
+  </section>
+
+  <!-- 시나리오 (요구사항 5.x) -->
+  <section class="card" aria-labelledby="scenario-title">
+    <h2 id="scenario-title">시나리오</h2>
+
+    <span id="scenarioComboLabel" class="combo-label">시나리오 선택</span>
+    <div class="combobox">
+      <button
+        id="scenarioTrigger"
+        type="button"
+        class="combobox-trigger"
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+        aria-controls="scenarioListbox"
+        aria-labelledby="scenarioComboLabel scenarioTriggerLabel"
+        aria-label="시나리오 선택"
+        disabled
+      >
+        <span id="scenarioTriggerLabel" class="combobox-trigger-label">시나리오를 선택하세요</span>
+        <span class="combobox-arrow" aria-hidden="true">▾</span>
+      </button>
+      <div
+        id="scenarioListbox"
+        class="combobox-listbox"
+        role="listbox"
+        aria-label="시나리오 목록"
+        tabindex="-1"
+        hidden
+      ></div>
+    </div>
+
+    <p id="scenarioTitleText" class="scenario-title"></p>
+    <p id="scenarioSummaryText" class="scenario-summary"></p>
+    <p id="scenarioMeta" class="scenario-meta"></p>
+
+    <!-- 빈 목록·불일치 안내 (요구사항 5.6/5.7) -->
+    <p id="scenarioNotice" class="scenario-notice" role="status" aria-live="polite" hidden></p>
+
+    <div id="scenariosLoading" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>시나리오 정보를 불러오는 중이에요…</span>
+    </div>
+
+    <p id="scenariosError" class="field-error" role="alert" aria-live="polite" hidden></p>
+
+    <div class="actions">
+      <button id="scenariosRefetchBtn" class="secondary" type="button" aria-label="시나리오 재조회">시나리오 재조회</button>
+    </div>
+  </section>
+
+  <!-- 캐릭터 만들기 시작 (호스트가 누르면 전원이 캐릭터 생성 화면으로 이동) -->
+  <section class="card" aria-labelledby="start-title">
+    <h2 id="start-title">캐릭터 만들기</h2>
+
+    <!-- 호스트만 보이는 시작 버튼 -->
+    <div id="startActions" class="actions">
+      <button id="startBtn" type="button" aria-label="캐릭터 만들기 시작" disabled>캐릭터 만들기 시작</button>
+    </div>
+
+    <!-- 비호스트는 시작 버튼 대신 호스트 대기 안내를 본다 -->
+    <p id="startWaiting" class="scenario-notice" role="status" aria-live="polite" hidden>호스트가 캐릭터 만들기를 시작하기를 기다리고 있어요…</p>
+
+    <div id="sessionStarting" class="progress" role="status" aria-live="polite" hidden>
+      <span aria-hidden="true">⏳</span>
+      <span>캐릭터 만들기 화면으로 이동하는 중이에요…</span>
+    </div>
+
+    <p id="startError" class="field-error" role="alert" aria-live="polite" hidden></p>
+  </section>
+</main>
+
+<script type="module">
+  import {
+    REQUEST_TIMEOUT_MS,
+    SESSION_START_TIMEOUT_MS,
+    COPY_CONFIRM_MS,
+    ERROR_MESSAGES,
+    HANDOFF_INVALID_MESSAGE,
+    CONNECTION_LOST_MESSAGE,
+    SESSION_START_CAPACITY_MESSAGE,
+    SESSION_START_NOT_CONFIRMED_MESSAGE,
+    SESSION_START_FAILED_MESSAGE,
+    ConnectionStatus,
+    AreaPhase,
+    createInitialState,
+    parseHandoff,
+    buildInviteRequest,
+    buildRoomResolveRequest,
+    buildScenariosRequest,
+    extractInviteToken,
+    validateRoomInfo,
+    classifyOutcome,
+    eventToAction,
+    renderRoster,
+    buildGameHandoff,
+    buildCharacterSearch,
+    effectiveViewerId,
+    reduce,
+    computeVisibility,
+    copyInviteLink,
+    scenarioMetaSegments,
+    groupScenariosByGenre,
+  } from "./logic.js";
+
+  const $ = (id) => document.getElementById(id);
+
+  // ---- 시나리오 메타데이터 표시 헬퍼 ------------------------------------
+  // 백엔드 /scenarios는 각 시나리오에 genre(장르)·category(구성요소)·system(시스템)·
+  // form(형식: 원샷/캠페인)을 함께 싣는다. 아래 헬퍼는 빈 값을 건너뛰고 안전한 텍스트로
+  // 콤보박스 옵션 라벨과 선택 시나리오 메타 줄을 만든다.
+  const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
+
+  // 선택 시나리오 메타 줄: `장르: … · 구성요소: … · 시스템: … · 형식: …`. 빈 값 세그먼트는 생략.
+  // 콤보박스 옵션 서브박스와 동일한 순수 세그먼트(scenarioMetaSegments)를 재사용한다.
+  function scenarioMetaLine(s) {
+    return scenarioMetaSegments(s).join(" · ");
+  }
+
+  // ---- 고정 간격 재연결 (요구사항 6.4) -----------------------------------
+  const RECONNECT_INTERVAL_MS = 3000;
+
+  // ---- DOM 참조 -----------------------------------------------------------
+  const handoffInvalid = $("handoffInvalid");
+  const connectionStatus = $("connectionStatus");
+  const inviteLinkEl = $("inviteLink");
+  const inviteLoading = $("inviteLoading");
+  const inviteError = $("inviteError");
+  const copyBtn = $("copyBtn");
+  const inviteRefetchBtn = $("inviteRefetchBtn");
+  const copyConfirm = $("copyConfirm");
+  const manualCopy = $("manualCopy");
+  const copyFallback = $("copyFallback");
+  const rosterEl = $("roster");
+  const roomLoading = $("roomLoading");
+  const roomError = $("roomError");
+  const scenarioTitleText = $("scenarioTitleText");
+  const scenarioSummaryText = $("scenarioSummaryText");
+  const scenarioMeta = $("scenarioMeta");
+  const scenarioTrigger = $("scenarioTrigger");
+  const scenarioTriggerLabel = $("scenarioTriggerLabel");
+  const scenarioListbox = $("scenarioListbox");
+  const scenarioNotice = $("scenarioNotice");
+  const scenariosLoading = $("scenariosLoading");
+  const scenariosError = $("scenariosError");
+  const scenariosRefetchBtn = $("scenariosRefetchBtn");
+  const startBtn = $("startBtn");
+  const startActions = $("startActions");
+  const startWaiting = $("startWaiting");
+  const roleBadge = $("roleBadge");
+  const sessionStarting = $("sessionStarting");
+  const startError = $("startError");
+
+  // ---- 주입 가능한 부수효과 어댑터 (테스트가 load 이전에 교체 가능) -------
+  // window.__lobbyFetch        : fetch 구현 (기본 window.fetch)
+  // window.__lobbyNewAbortController : AbortController 팩토리 (기본 new AbortController)
+  // window.__lobbyConnect      : connect(roomId, token, handlers) WebSocket 어댑터
+  // window.__lobbyClipboard    : 클립보드 어댑터 (기본 navigator.clipboard)
+  const fetchImpl = (url, opts) => (window.__lobbyFetch || window.fetch).call(window, url, opts);
+  const newAbortController = () =>
+    window.__lobbyNewAbortController ? window.__lobbyNewAbortController() : new AbortController();
+  const getClipboard = () => window.__lobbyClipboard || (typeof navigator !== "undefined" ? navigator.clipboard : null);
+
+  // ---- 상태: 단일 진실 원천 ----------------------------------------------
+  // 인계는 URL 쿼리에서 1회 읽는다. 토큰은 build*Request·buildGameHandoff가
+  // x-playtest-token 헤더/쿼리로 전달하며, 그 외 인증은 없다(MVP).
+  let state = createInitialState(parseHandoff(location.search));
+  let channel = null;
+  let sessionTimer = null;
+  let navigated = false;
+  let characterNavigated = false;
+
+  // 단방향 흐름: dispatch → reduce → render. render는 상태의 순수 함수다.
+  function dispatch(action) {
+    state = reduce(state, action);
+    render();
+  }
+
+  // ---- 커스텀 시나리오 콤보박스 컨트롤러 ---------------------------------
+  // 네이티브 <select>를 대체하는 접근성 콤보박스. 트리거 버튼(role=combobox)이
+  // 팝업 리스트박스(role=listbox)를 토글한다. 리스트박스는 장르 그룹 머리글과
+  // 각 시나리오 옵션(제목 + 메타 서브박스)으로 구성되며, 활성 옵션은
+  // aria-activedescendant로 가리킨다. 모든 시나리오 텍스트는 textContent로만 주입한다.
+  let comboOpen = false;
+  let comboActiveIndex = -1;
+  /** @type {Array<{ el: HTMLElement, scenario: any }>} */
+  let comboOptionItems = [];
+  // 리스트박스 재구성 여부 판단용 시그니처(시나리오 id 목록).
+  let comboScenarioKey = null;
+
+  function comboScenarioList() {
+    return Array.isArray(state.scenarios.data) ? state.scenarios.data : [];
+  }
+
+  // 장르 그룹별 머리글 + 옵션(제목 + 메타 서브박스)을 안전한 DOM으로 재구성한다.
+  function rebuildScenarioListbox(scns) {
+    comboOptionItems = [];
+    const frag = document.createDocumentFragment();
+    let optIndex = 0;
+    for (const group of groupScenariosByGenre(scns)) {
+      const header = document.createElement("div");
+      header.className = "combobox-group";
+      header.setAttribute("role", "presentation");
+      const groupLabel = document.createElement("div");
+      groupLabel.className = "combobox-group-label";
+      groupLabel.textContent = group.label;
+      header.appendChild(groupLabel);
+      if (nonEmpty(group.description)) {
+        const groupDesc = document.createElement("div");
+        groupDesc.className = "combobox-group-desc";
+        groupDesc.textContent = group.description;
+        header.appendChild(groupDesc);
+      }
+      frag.appendChild(header);
+
+      for (const scn of group.scenarios) {
+        const opt = document.createElement("div");
+        opt.className = "combobox-option";
+        opt.setAttribute("role", "option");
+        opt.id = `scenario-option-${optIndex}`;
+        opt.setAttribute("aria-selected", "false");
+        opt.dataset.scenarioId = scn && scn.id != null ? String(scn.id) : "";
+
+        const title = document.createElement("div");
+        title.className = "combobox-option-title";
+        title.textContent = scn && nonEmpty(scn.title) ? scn.title : "(제목 없음)";
+        opt.appendChild(title);
+
+        const segs = scenarioMetaSegments(scn);
+        if (segs.length > 0) {
+          const sub = document.createElement("div");
+          sub.className = "combobox-option-meta";
+          for (const seg of segs) {
+            const segEl = document.createElement("span");
+            segEl.className = "combobox-option-meta-seg";
+            segEl.textContent = seg;
+            sub.appendChild(segEl);
+          }
+          opt.appendChild(sub);
+        }
+
+        const itemIndex = comboOptionItems.length;
+        // mousedown 기본동작(포커스 이동)을 막아 리스트박스 포커스를 유지한다.
+        opt.addEventListener("mousedown", (e) => e.preventDefault());
+        opt.addEventListener("mouseenter", () => setComboActive(itemIndex));
+        opt.addEventListener("click", () => selectScenarioOption(scn));
+
+        frag.appendChild(opt);
+        comboOptionItems.push({ el: opt, scenario: scn });
+        optIndex++;
+      }
+    }
+    scenarioListbox.replaceChildren(frag);
+    comboActiveIndex = -1;
+  }
+
+  function setComboActive(index) {
+    comboActiveIndex = index;
+    for (let i = 0; i < comboOptionItems.length; i++) {
+      comboOptionItems[i].el.classList.toggle("active", i === index);
+    }
+    if (index >= 0 && comboOptionItems[index]) {
+      const el = comboOptionItems[index].el;
+      scenarioListbox.setAttribute("aria-activedescendant", el.id);
+      if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "nearest" });
+    } else {
+      scenarioListbox.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function moveComboActive(delta) {
+    if (comboOptionItems.length === 0) return;
+    let index = comboActiveIndex;
+    if (index < 0) {
+      index = delta > 0 ? 0 : comboOptionItems.length - 1;
+    } else {
+      index = Math.min(comboOptionItems.length - 1, Math.max(0, index + delta));
+    }
+    setComboActive(index);
+  }
+
+  function openCombo() {
+    if (scenarioTrigger.disabled || comboOpen) return;
+    comboOpen = true;
+    scenarioListbox.hidden = false;
+    scenarioTrigger.setAttribute("aria-expanded", "true");
+    // 현재 선택된 옵션을 활성으로, 없으면 첫 옵션을 활성으로 둔다.
+    const selId = state.selectedScenario ? state.selectedScenario.scenarioId : null;
+    let index = comboOptionItems.findIndex((it) => it.scenario && it.scenario.id === selId);
+    if (index < 0) index = comboOptionItems.length > 0 ? 0 : -1;
+    setComboActive(index);
+    scenarioListbox.focus();
+  }
+
+  function closeCombo() {
+    if (!comboOpen) return;
+    comboOpen = false;
+    scenarioListbox.hidden = true;
+    scenarioTrigger.setAttribute("aria-expanded", "false");
+    scenarioListbox.removeAttribute("aria-activedescendant");
+    comboActiveIndex = -1;
+  }
+
+  // 옵션 선택: 옛 change 핸들러와 동일하게 SCENARIO_SET 디스패치 + SET_SCENARIO 전송.
+  function selectScenarioOption(scn) {
+    if (!scn) return;
+    dispatch({ type: "SCENARIO_SET", scenarioId: scn.id, title: scn.title, summary: scn.summary });
+    try {
+      if (channel) channel.send({ type: "SET_SCENARIO", scenarioId: scn.id });
+    } catch {
+      // 채널이 없으면 무시(연결되면 트리거가 활성화된다).
+    }
+    closeCombo();
+    scenarioTrigger.focus();
+  }
+
+  scenarioTrigger.addEventListener("click", () => {
+    if (scenarioTrigger.disabled) return;
+    if (comboOpen) closeCombo();
+    else openCombo();
+  });
+
+  scenarioTrigger.addEventListener("keydown", (e) => {
+    if (scenarioTrigger.disabled) return;
+    if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      e.preventDefault();
+      openCombo();
+    }
+  });
+
+  scenarioListbox.addEventListener("keydown", (e) => {
+    if (!comboOpen) return;
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        moveComboActive(1);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        moveComboActive(-1);
+        break;
+      case "Home":
+        e.preventDefault();
+        setComboActive(0);
+        break;
+      case "End":
+        e.preventDefault();
+        setComboActive(comboOptionItems.length - 1);
+        break;
+      case "Enter":
+      case " ":
+      case "Spacebar":
+        e.preventDefault();
+        if (comboActiveIndex >= 0 && comboOptionItems[comboActiveIndex]) {
+          selectScenarioOption(comboOptionItems[comboActiveIndex].scenario);
+        }
+        break;
+      case "Escape":
+        e.preventDefault();
+        closeCombo();
+        scenarioTrigger.focus();
+        break;
+      default:
+        break;
+    }
+  });
+
+  // 바깥 클릭 시 팝업을 닫는다.
+  document.addEventListener("click", (e) => {
+    if (!comboOpen) return;
+    const target = e.target;
+    if (scenarioTrigger.contains(target) || scenarioListbox.contains(target)) return;
+    closeCombo();
+  });
+
+  // ---- 렌더 (상태의 함수) -------------------------------------------------
+  function render() {
+    const v = computeVisibility(state);
+
+    // 인계 무효 안내 (요구사항 1.3/1.4)
+    handoffInvalid.hidden = v.handoffValid;
+    if (!v.handoffValid) handoffInvalid.textContent = HANDOFF_INVALID_MESSAGE;
+
+    // 연결 상태 표시 (요구사항 6.3/6.4)
+    if (v.connectionActive) {
+      connectionStatus.textContent = "실시간 연결됨";
+      connectionStatus.classList.add("active");
+    } else {
+      connectionStatus.textContent =
+        state.connection === ConnectionStatus.DISCONNECTED && v.handoffValid
+          ? CONNECTION_LOST_MESSAGE
+          : "실시간 연결 대기 중…";
+      connectionStatus.classList.remove("active");
+    }
+
+    // 초대 링크 영역 (요구사항 2.3/8.x)
+    const inviteLink = state.invite.data || "";
+    inviteLinkEl.textContent = inviteLink;
+    if (manualCopy.value !== inviteLink) manualCopy.value = inviteLink;
+    inviteLoading.hidden = !v.inviteLoading;
+    copyBtn.disabled = v.copyDisabled;
+    inviteRefetchBtn.disabled = v.inviteRetriggerDisabled;
+    const inviteErr =
+      state.invite.phase === AreaPhase.ERROR && state.invite.errorKind
+        ? ERROR_MESSAGES.invite[state.invite.errorKind]
+        : "";
+    inviteError.hidden = !inviteErr;
+    inviteError.textContent = inviteErr;
+
+    // 복사 확인 메시지: 만료 시각 전까지만 노출 (요구사항 3.3)
+    const now = Date.now();
+    copyConfirm.hidden = !(state.copyConfirmedUntil != null && now < state.copyConfirmedUntil);
+    // 복사 실패 폴백 노출 (요구사항 3.4)
+    copyFallback.hidden = !state.copyFailed;
+
+    // 정원 + 로스터 (요구사항 6.2/6.5/6.6)
+    rosterEl.innerHTML = renderRoster(state.roster, state.room.data ? state.room.data.maxPlayers : null);
+    roomLoading.hidden = !v.roomLoading;
+    const roomErr =
+      state.room.phase === AreaPhase.ERROR && state.room.errorKind
+        ? ERROR_MESSAGES.room[state.room.errorKind]
+        : "";
+    roomError.hidden = !roomErr;
+    roomError.textContent = roomErr;
+
+    // 시나리오 (요구사항 5.2/5.4/5.6/5.7)
+    const sel = state.selectedScenario || { title: null, summary: null };
+    scenarioTitleText.textContent = sel.title || "";
+    scenarioSummaryText.textContent = sel.summary || "";
+    // 시나리오 콤보박스: 목록이 바뀌면 옵션을 재구성하고, 현재 선택을 반영한다.
+    const scns = comboScenarioList();
+    const scnKey = scns.map((s) => (s && s.id != null ? String(s.id) : "")).join("\u0001");
+    if (scnKey !== comboScenarioKey) {
+      comboScenarioKey = scnKey;
+      rebuildScenarioListbox(scns);
+    }
+    const selId = state.selectedScenario ? state.selectedScenario.scenarioId : null;
+    // 트리거 라벨: 선택된 시나리오 제목(목록 우선, 없으면 선택 상태의 title), 없으면 안내문.
+    const selScn = selId ? scns.find((s) => s && s.id === selId) : null;
+    const triggerTitle =
+      selScn && nonEmpty(selScn.title)
+        ? selScn.title
+        : sel && nonEmpty(sel.title)
+        ? sel.title
+        : "";
+    scenarioTriggerLabel.textContent = triggerTitle || "시나리오를 선택하세요";
+    // 외부 선택(scenario_set 브로드캐스트 등)을 옵션 aria-selected에 반영한다.
+    for (const item of comboOptionItems) {
+      const isSel = !!(item.scenario && item.scenario.id === selId);
+      item.el.setAttribute("aria-selected", isSel ? "true" : "false");
+    }
+    // 선택된 시나리오의 메타데이터 줄(장르/구성요소/시스템/형식)을 표시한다.
+    // state.scenarios.data의 원본 객체에서 scenarioId로 조회한다(렌더 전용 변경).
+    const metaLine = scenarioMetaLine(selScn);
+    scenarioMeta.textContent = metaLine;
+    scenarioMeta.hidden = metaLine.length === 0;
+    // 연결되어 선택을 서버로 보낼 수 있을 때만, 그리고 호스트만 시나리오를 바꿀 수 있다.
+    // 비호스트는 콤보박스를 비활성화해 시나리오 선택을 호스트로 제한한다(서버도 동일하게 게이트).
+    const comboDisabled =
+      scns.length === 0 || state.connection !== ConnectionStatus.OPEN || !v.isHost;
+    scenarioTrigger.disabled = comboDisabled;
+    if (comboDisabled && comboOpen) closeCombo();
+    scenarioNotice.hidden = !state.scenarioNotice;
+    scenarioNotice.textContent = state.scenarioNotice || "";
+    scenariosLoading.hidden = !v.scenariosLoading;
+    scenariosRefetchBtn.disabled = v.scenariosRetriggerDisabled;
+    const scnErr =
+      state.scenarios.phase === AreaPhase.ERROR && state.scenarios.errorKind
+        ? ERROR_MESSAGES.scenarios[state.scenarios.errorKind]
+        : "";
+    scenariosError.hidden = !scnErr;
+    scenariosError.textContent = scnErr;
+
+    // 역할 배지: viewer가 호스트면 "호스트", 아니면 "플레이어" (멀티플레이어 흐름)
+    roleBadge.textContent = v.isHost ? "로비 · 호스트" : "로비 · 플레이어";
+
+    // 세션 시작 (요구사항 7.1/7.2/7.3/7.7/8.5/8.6)
+    // 호스트만 시작 버튼을 보고, 비호스트는 시작 버튼을 숨기고 대기 안내를 본다.
+    startActions.hidden = !v.isHost;
+    startWaiting.hidden = v.isHost;
+    startBtn.disabled = !v.startEnabled;
+    sessionStarting.hidden = !v.sessionStarting;
+    startError.hidden = !state.startError;
+    startError.textContent = state.startError || "";
+
+    // 게임 화면 인계 1회 (요구사항 7.5/7.6/10.3/10.4)
+    if (state.handoffDone && !navigated) {
+      navigated = true;
+      if (sessionTimer != null) {
+        clearTimeout(sessionTimer);
+        sessionTimer = null;
+      }
+      const h = buildGameHandoff(state.handoff);
+      const params = new URLSearchParams();
+      params.set("roomId", h.roomId);
+      params.set("hostPlayerId", h.hostPlayerId);
+      if (h.playerId) params.set("playerId", h.playerId);
+      if (h.token) params.set("token", h.token);
+      // 서버 발급 연결 티켓이 있으면 게임 화면으로 함께 인계한다(auth-hardening).
+      if (h.ticket) params.set("ticket", h.ticket);
+      location.assign(`/game/?${params.toString()}`);
+    }
+
+    // 캐릭터 시트 화면 이동 1회 (멀티플레이어 흐름: character_setup 수신 → 각자 자기 시트로)
+    if (state.characterSetupDone && !characterNavigated) {
+      characterNavigated = true;
+      location.assign(`/character/${buildCharacterSearch(state.handoff)}`);
+    }
+  }
+
+  // ---- 부수효과: REST (AbortController 10초 타임아웃) ----------------------
+  // area: "INVITE" | "ROOM" | "SCENARIOS" — *_STARTED 액션 접두사로 쓰인다.
+  async function sendRequest(area, req) {
+    dispatch({ type: `${area}_STARTED` });
+
+    const controller = newAbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const res = await fetchImpl(req.url, {
+        method: req.method,
+        headers: req.headers,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const outcome = classifyOutcome({
+        kind: "response",
+        response: { ok: res.ok, status: res.status },
+      });
+      return { outcome, res };
+    } catch (err) {
+      clearTimeout(timer);
+      // abort()로 취소되면 타임아웃, 그 외 fetch reject는 네트워크 오류.
+      const aborted = err && err.name === "AbortError";
+      const outcome = classifyOutcome({ kind: aborted ? "timeout" : "network" });
+      return { outcome, res: null };
+    }
+  }
+
+  async function readJson(res) {
+    try {
+      return await res.json();
+    } catch {
+      return {};
+    }
+  }
+
+  // 초대 링크 조회 → 성공 시 방 정보 체인 (요구사항 2.x, 4.x)
+  async function runInvite() {
+    const { outcome, res } = await sendRequest("INVITE", buildInviteRequest(state.handoff.roomId, state.handoff.token));
+    if (outcome === "success") {
+      const body = await readJson(res);
+      const inviteLink = body && typeof body.inviteLink === "string" ? body.inviteLink : "";
+      dispatch({ type: "INVITE_SUCCEEDED", inviteLink });
+      // 초대 토큰을 추출할 수 있을 때만 방 정보 조회를 잇는다 (요구사항 4.4).
+      const tok = extractInviteToken(inviteLink);
+      if (tok) {
+        runRoom(tok);
+      }
+    } else {
+      dispatch({ type: "INVITE_FAILED", kind: outcome });
+    }
+  }
+
+  // 방 정보 조회 (요구사항 4.x)
+  async function runRoom(inviteToken) {
+    const { outcome, res } = await sendRequest("ROOM", buildRoomResolveRequest(inviteToken, state.handoff.token));
+    if (outcome === "success") {
+      const body = await readJson(res);
+      const v = validateRoomInfo(body);
+      if (v.ok) {
+        dispatch({ type: "ROOM_SUCCEEDED", maxPlayers: v.maxPlayers, scenarioId: v.scenarioId });
+      } else {
+        dispatch({ type: "ROOM_INVALID" });
+      }
+    } else {
+      dispatch({ type: "ROOM_FAILED", kind: outcome });
+    }
+  }
+
+  // 시나리오 조회 (요구사항 5.x)
+  async function runScenarios() {
+    const { outcome, res } = await sendRequest("SCENARIOS", buildScenariosRequest(state.handoff.token));
+    if (outcome === "success") {
+      const body = await readJson(res);
+      const scenarios = body && Array.isArray(body.scenarios) ? body.scenarios : [];
+      dispatch({ type: "SCENARIOS_SUCCEEDED", scenarios });
+    } else {
+      dispatch({ type: "SCENARIOS_FAILED", kind: outcome });
+    }
+  }
+
+  // ---- 부수효과: 실시간 채널 (주입 가능한 connect 어댑터 + 재연결) --------
+  // 기본 어댑터: 로비 경로로 WebSocket을 열고 onmessage JSON을 eventToAction으로
+  // 환원한다. 테스트는 window.__lobbyConnect로 가짜 어댑터를 주입한다.
+  // 계약: connect(roomId, token, { onOpen, onMessage, onClose }) -> { send, close }
+  //  - onOpen()            : 연결 활성
+  //  - onMessage(parsed)   : 서버 이벤트(JSON 파싱된 객체)
+  //  - onClose()           : 연결 종료
+  function defaultConnect(roomId, token, handlers) {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const auth = token ? `&token=${encodeURIComponent(token)}` : "";
+    // viewer 신원(playerId || hostPlayerId)을 함께 보내 서버가 접속자를 식별하고
+    // 호스트 전용 시작을 게이트할 수 있게 한다(멀티플레이어 흐름).
+    const viewerId = effectiveViewerId(state.handoff);
+    const who = viewerId ? `&playerId=${encodeURIComponent(viewerId)}` : "";
+    const ws = new WebSocket(
+      `${proto}://${location.host}/lobby/ws?roomId=${encodeURIComponent(roomId)}${who}${auth}`,
+    );
+    ws.onopen = () => handlers.onOpen();
+    ws.onmessage = (ev) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      handlers.onMessage(parsed);
+    };
+    ws.onclose = () => handlers.onClose();
+    return {
+      send: (obj) => ws.send(JSON.stringify(obj)),
+      close: () => ws.close(),
+    };
+  }
+
+  const connect = window.__lobbyConnect || defaultConnect;
+
+  function openChannel() {
+    channel = connect(state.handoff.roomId, state.handoff.token, {
+      onOpen: () => dispatch(eventToAction({ type: "connection-open" })),
+      onMessage: (parsed) => {
+        const action = eventToAction(parsed);
+        if (action) dispatch(action);
+      },
+      onClose: () => {
+        dispatch(eventToAction({ type: "connection-lost" }));
+        scheduleReconnect();
+      },
+    });
+  }
+
+  function scheduleReconnect() {
+    if (state.handoffDone) return;
+    setTimeout(() => {
+      if (!state.handoffDone) openChannel();
+    }, RECONNECT_INTERVAL_MS);
+  }
+
+  // ---- 사용자 동작 배선 ---------------------------------------------------
+  copyBtn.addEventListener("click", async () => {
+    const inviteLink = state.invite.data || "";
+    const ok = await copyInviteLink(inviteLink, getClipboard());
+    if (ok) {
+      dispatch({ type: "COPY_SUCCEEDED", now: Date.now() });
+      // 최소 COPY_CONFIRM_MS 후 재렌더해 확인 메시지를 자동으로 감춘다.
+      setTimeout(render, COPY_CONFIRM_MS);
+    } else {
+      dispatch({ type: "COPY_FAILED" });
+    }
+  });
+
+  inviteRefetchBtn.addEventListener("click", () => {
+    // 재조회는 초대(그리고 체인된 방 정보) 요청을 동일 입력으로 다시 실행한다(요구사항 2.5/2.6).
+    if (!computeVisibility(state).inviteRetriggerDisabled) {
+      runInvite();
+    }
+  });
+
+  scenariosRefetchBtn.addEventListener("click", () => {
+    if (!computeVisibility(state).scenariosRetriggerDisabled) {
+      runScenarios();
+    }
+  });
+
+  // 시나리오 선택은 커스텀 콤보박스 컨트롤러(selectScenarioOption)가 처리한다.
+
+  startBtn.addEventListener("click", () => {
+    if (!computeVisibility(state).startEnabled) return;
+    const before = state.startCommandSent;
+    dispatch({ type: "START_SESSION" });
+    // startCommandSent가 false→true로 바뀐 그 순간에만 정확히 1회 전송한다(요구사항 7.4).
+    if (!before && state.startCommandSent) {
+      try {
+        if (channel) channel.send({ type: "START_SESSION", from: state.handoff.hostPlayerId });
+        else throw new Error("no channel");
+      } catch {
+        dispatch({ type: "START_SESSION_FAILED" });
+        return;
+      }
+      // 30초 내 Session_Active 미전이 시 타임아웃(요구사항 8.6).
+      sessionTimer = setTimeout(() => {
+        if (!state.handoffDone) dispatch({ type: "START_SESSION_TIMEOUT" });
+      }, SESSION_START_TIMEOUT_MS);
+    }
+  });
+
+  // ---- 부팅 ---------------------------------------------------------------
+  render();
+  // 인계가 유효할 때만 REST·실시간 연결을 시작한다(무효면 안내만 표시, 요구사항 1.3/1.4).
+  if (state.handoffValid) {
+    runInvite();
+    runScenarios();
+    openChannel();
+  }
+  // 캐릭터 화면에서 세션 시작이 실패해 로비로 되돌아온 경우(?startError=<사유>), 호스트에게
+  // 실패 안내를 표시한다(재시도 가능 상태로 복귀). 사유별로 구체적 메시지를 보여준다.
+  const startErrParam = new URLSearchParams(location.search).get("startError");
+  if (startErrParam) {
+    const message =
+      startErrParam === "AT_CAPACITY"
+        ? SESSION_START_CAPACITY_MESSAGE
+        : startErrParam === "NOT_ALL_CONFIRMED"
+          ? SESSION_START_NOT_CONFIRMED_MESSAGE
+          : SESSION_START_FAILED_MESSAGE;
+    dispatch({ type: "START_SESSION_FAILED", message });
+  }
+</script>
+</body>
+</html>

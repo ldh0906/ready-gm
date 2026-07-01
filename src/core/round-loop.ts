@@ -77,6 +77,9 @@ export interface SendChatCommand {
   text: string;
   /** ISO timestamp supplied by the caller — the reducer reads no clock. */
   ts: string;
+  /** The sender's room join display name, for `characterName(displayName)`
+   * attribution; optional and carried through to the {@link ChatEntry}. */
+  displayName?: string;
 }
 
 /**
@@ -289,14 +292,18 @@ export function reduce(state: TurnState, command: Command): TurnState {
     }
 
     case "SEND_CHAT": {
-      // Chat is accepted only during free-chat (R6.1) and only from members.
-      if (state.phase !== "free_chat") return state;
+      // Chat is accepted during free-chat AND ready-check (players keep talking
+      // while actions are being confirmed), but not once resolution begins or the
+      // session has ended (R6.1). Only active room members may chat.
+      if (state.phase !== "free_chat" && state.phase !== "ready_check") return state;
       if (!isMember(state, command.from)) return state;
       const entry: ChatEntry = {
         playerId: command.from,
         characterName: command.characterName,
         text: command.text,
         ts: command.ts,
+        // Carry the sender's room display name when supplied (R6.3, R6.4).
+        ...(command.displayName !== undefined ? { displayName: command.displayName } : {}),
       };
       // Append in send order, attributed to the sender's character (R6.3, R6.4).
       return { ...state, chatLog: [...state.chatLog, entry] };
