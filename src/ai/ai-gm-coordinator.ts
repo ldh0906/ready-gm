@@ -371,6 +371,16 @@ export interface NarrateDeclaredRoundInput {
   resolvedChecks: CheckRecord[];
 }
 
+/** Confirmed, server-owned facts used to ground final closing narration. */
+export interface GenerateEndingOptions {
+  /** ScenarioBlackboard state; only discovered clues and revealed secrets are exposed. */
+  blackboard?: ScenarioBlackboard;
+  /** Current Progress Clock snapshots, including whether each clock has fired. */
+  clocks?: readonly ProgressClock[];
+  /** Optional Memory Clerk records; only player-visible summaries are exposed. */
+  memories?: readonly MemoryRecord[];
+}
+
 /** Construction dependencies for {@link AiGmCoordinator}. */
 export interface AiGmCoordinatorDeps {
   /** Tier router that dispatches completions and emits `ai_call` events. */
@@ -469,8 +479,9 @@ export class AiGmCoordinator {
   async generateEnding(
     ctx: TurnStateContext,
     correlation?: CorrelationKey,
+    options: GenerateEndingOptions = {},
   ): Promise<GenerationResult<{ closing: Narration; summary: SessionSummary }>> {
-    const prompt = buildEndingPrompt(ctx);
+    const prompt = buildEndingPrompt(ctx, options);
     return this.runRequest(
       "ending",
       prompt,
@@ -554,6 +565,7 @@ export class AiGmCoordinator {
         blackboard,
         memoryContext,
         safetyProfile,
+        profile,
       ),
       (raw) => parseDecision(raw),
       correlation,
@@ -686,6 +698,7 @@ export class AiGmCoordinator {
   async narrateDeclaredRound(input: NarrateDeclaredRoundInput): Promise<ResolveRoundResult> {
     const { declaration, resolvedChecks } = input;
     const { state, context, decision, procedurePlan, correlation } = declaration;
+    const profile = declaration.profile ?? resolveGameProfile();
     const safetyProfile = declaration.safetyProfile ?? resolveSafetyProfile();
     const clocks = declaration.clocks;
     const scene = declaration.scene;
@@ -788,11 +801,12 @@ export class AiGmCoordinator {
     });
     this.emitGmProcedureCritique(correlation, narrationCritique);
 
+    const endingForced = applyFiredEffects(undefined, clockApplication?.fired ?? []).endingForced;
     const result: ResolveRoundResult = {
       ok: true,
       narration: narrationOutcome.value.narration,
       checks: resolvedChecks,
-      endingReached: false,
+      endingReached: narrationOutcome.value.endingReached || endingForced,
       context,
     };
     if (clockApplication !== undefined) {
@@ -855,9 +869,9 @@ export class AiGmCoordinator {
     // surface clues, and force the ending when the impending doom completes.
     // Effects are server-authored (carried by the clock seed), not AI-chosen.
     const fired = clockApplication?.fired ?? [];
-    // `force_ending` is scene-independent, so evaluate it even without a scene.
-    if (applyFiredEffects(undefined, fired).endingForced) {
-      result.endingReached = true;
+    if (result.endingReached && state.roundNumber < profile.minRounds && !endingForced) {
+      result.endingReached = false;
+      this.emitMinRoundsGate(correlation, state.roundNumber, profile.minRounds);
     }
     // Apply the GM's revealed clues to the scene SERVER-SIDE (the model proposes
     // which clues it surfaced in its decision; the engine moves them
@@ -1104,6 +1118,20 @@ export class AiGmCoordinator {
     } catch {
       // Logging failures must not affect game flow.
     }
+  }
+
+  /** Best-effort QA emission when the server overrides an early AI ending. */
+  private emitMinRoundsGate(correlation: CorrelationKey, roundNumber: number, minRounds: number): void {
+    this.emitGmProcedureCritique(correlation, {
+      passed: false,
+      warnings: [
+        {
+          code: "min_rounds_gate",
+          message: "AI-proposed ending was ignored before the profile minimum round.",
+          detail: `round ${roundNumber} < minRounds ${minRounds}`,
+        },
+      ],
+    });
   }
 }
 
@@ -1443,6 +1471,24 @@ function formatScene(scene?: SceneState): string {
   );
 }
 
+/** Round pacing guidance so model narration cooperates with the server ending gate. */
+function formatRoundPacing(ctx: TurnStateContext, profile?: GameProfile): string {
+  if (profile === undefined) return "";
+  const beforeMinimum = ctx.roundNumber < profile.minRounds;
+  return (
+    "ROUND_PACING (세션 페이싱 정책): " +
+    JSON.stringify({
+      currentRound: ctx.roundNumber,
+      minRounds: profile.minRounds,
+      beforeMinimum,
+      instruction: beforeMinimum
+        ? "minRounds 이전입니다. 이야기를 결말로 수렴시키지 말고 새로운 전개, 단서, 압력을 유지하세요."
+        : "minRounds에 도달했습니다. 실제 전개가 충분히 결말 조건을 만족할 때만 endingReached를 true로 두세요.",
+    }) +
+    "\n"
+  );
+}
+
 /** Round decision prompt: the structured hot-path decision for this round (R11.1). */
 function buildCheckSelectionPrompt(
   ctx: TurnStateContext,
@@ -1452,6 +1498,7 @@ function buildCheckSelectionPrompt(
   blackboard?: ScenarioBlackboard,
   memoryContext?: readonly MemoryRecord[],
   safetyProfile?: SafetyProfile,
+  profile?: GameProfile,
 ): Prompt {
   const gmMoveList = GM_MOVES.join("|");
   // Memory Clerk context: budget-selected summaries only, never transcripts.
@@ -1559,6 +1606,7 @@ function buildCheckSelectionPrompt(
       '"stateChanges": [], "offFront": <bool>, "climactic": <bool>, "safetyFlags": []}.\n' +
       characterAttrBlock +
       (procedurePlan !== undefined ? formatGmProcedurePlan(procedurePlan) : "") +
+      formatRoundPacing(ctx, profile) +
       formatScenarioRules(ctx.scenario) +
       clockBlock +
       sceneBlock +
@@ -1642,16 +1690,55 @@ function buildNarrationPrompt(
   };
 }
 
+/** Facts the ending prompt may treat as confirmed. */
+function formatConfirmedEndingFacts(options: GenerateEndingOptions): string {
+  const discoveredClues =
+    options.blackboard?.clues
+      .filter((clue) => clue.visibility === "discovered")
+      .map((clue) => ({ id: clue.id, conclusion: clue.conclusion })) ?? [];
+  const revealedSecrets =
+    options.blackboard?.secrets
+      .filter((secret) => secret.revealState === "revealed")
+      .map((secret) => ({ id: secret.id, truth: secret.truth })) ?? [];
+  const clocks =
+    options.clocks?.map((clock) => ({
+      name: clock.name,
+      value: clock.value,
+      max: clock.max,
+      fired: isClockComplete(clock),
+    })) ?? [];
+  const memories =
+    options.memories
+      ?.filter((record) => record.visibility === "player_visible")
+      .map((record) => ({ kind: record.kind, summary: record.summary })) ?? [];
+  if (
+    discoveredClues.length === 0 &&
+    revealedSecrets.length === 0 &&
+    clocks.length === 0 &&
+    memories.length === 0
+  ) {
+    return "";
+  }
+  return (
+    "CONFIRMED_ENDING_FACTS (서버가 확정한 사실만 포함합니다. 여기에 없는 단서/비밀/결말은 해결된 것처럼 쓰지 마세요): " +
+    JSON.stringify({ discoveredClues, revealedSecrets, clocks, memories }) +
+    "\n"
+  );
+}
+
 /** Ending prompt: closing narration + Session_Summary (Requirements 15.1, 15.2). */
-function buildEndingPrompt(ctx: TurnStateContext): Prompt {
+function buildEndingPrompt(ctx: TurnStateContext, options: GenerateEndingOptions = {}): Prompt {
   return {
     system: GM_SYSTEM,
     user:
       "PHASE: ending\n" +
       "마무리 내레이션과 세션 요약을 모두 한국어로 작성하세요. 마무리는 감정의 여운과 장면을 살려 " +
-      "서사적으로, 요약은 핵심 사건을 간결하게 정리하세요.\n" +
+      "서사적으로, 요약은 핵심 사건을 간결하게 정리하세요. 요약과 클로징은 아래 확정 사실과 내레이션 기록에 있는 " +
+      "사건만 서술합니다. 발견되지 않은 단서, 공개되지 않은 비밀, 도달하지 않은 결말을 해결된 것처럼 서술하지 마세요. " +
+      "미해결 스레드는 미해결로 남기고 다음 이야기의 훅으로 처리하세요.\n" +
       'Respond as {"closing": "<korean text>", "summary": "<korean text>"}.\n' +
       formatScenarioRules(ctx.scenario) +
+      formatConfirmedEndingFacts(options) +
       formatUntrustedJsonBlock("UNTRUSTED_ENDING_CONTEXT", {
         scenario: ctx.scenario,
         recentNarrative: ctx.recentNarrative,

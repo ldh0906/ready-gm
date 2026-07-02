@@ -275,6 +275,121 @@ describe("AiGmCoordinator.resolveRound", () => {
     expect(result.endingReached).toBe(false);
   });
 
+  it("forces model endingReached=false before the profile minimum round", async () => {
+    const sink = new InMemoryEventSink();
+    const { coordinator } = makeHarness({
+      sink,
+      responder: phaseResponder({
+        narration: {
+          text: JSON.stringify({
+            narration: "한국어 결과 서사.",
+            endingReached: true,
+            stateChanges: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await coordinator.resolveRound({
+      state: makeState(["p1"], { roundNumber: 3 }),
+      scenario: SCENARIO,
+      characters: [makeCharacter("p1", "보린")],
+    });
+    await sink.flush();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.endingReached).toBe(false);
+    const event = sink
+      .queryByRound("room-1", 3)
+      .find((e) => e.eventType === "gm_procedure" && "critique" in e && e.critique?.warnings.some((w) => w.code === "min_rounds_gate"));
+    expect(event).toBeDefined();
+  });
+
+  it("allows model endingReached=true once the profile minimum round is reached", async () => {
+    const { coordinator } = makeHarness({
+      responder: phaseResponder({
+        narration: {
+          text: JSON.stringify({
+            narration: "한국어 결과 서사.",
+            endingReached: true,
+            stateChanges: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await coordinator.resolveRound({
+      state: makeState(["p1"], { roundNumber: 8 }),
+      scenario: SCENARIO,
+      characters: [makeCharacter("p1", "보린")],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.endingReached).toBe(true);
+  });
+
+  it("allows force_ending fired clocks to bypass the profile minimum round", async () => {
+    const { coordinator } = makeHarness({
+      responder: phaseResponder({
+        checkSelection: {
+          text: JSON.stringify({
+            checks: [],
+            noRollRationales: [{ characterName: "보린", rationale: "의식의 마지막 징조를 목격합니다." }],
+            clockDeltas: [{ clockId: "doom", delta: 1, reason: "의식이 완성됨" }],
+            stateChanges: [],
+          }),
+        },
+        narration: {
+          text: JSON.stringify({
+            narration: "한국어 결과 서사.",
+            endingReached: true,
+            stateChanges: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await coordinator.resolveRound({
+      state: makeState(["p1"], { roundNumber: 1 }),
+      scenario: SCENARIO,
+      characters: [makeCharacter("p1", "보린")],
+      clocks: [
+        makeClock({
+          id: "doom",
+          name: "파국의 종",
+          scope: "front",
+          max: 4,
+          value: 3,
+          onComplete: "doom",
+          onCompleteEffects: [{ type: "force_ending" }],
+        }),
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.endingReached).toBe(true);
+    expect(result.firedClocks).toEqual(["doom"]);
+  });
+
+  it("adds round pacing instructions to the decision prompt before minRounds", async () => {
+    const { coordinator, client } = makeHarness();
+
+    const result = await coordinator.resolveRound({
+      state: makeState(["p1"], { roundNumber: 2 }),
+      scenario: SCENARIO,
+      characters: [makeCharacter("p1", "보린")],
+    });
+
+    expect(result.ok).toBe(true);
+    const decisionCall = client.calls.find((c) => c.prompt.user.includes("PHASE: decision"));
+    expect(decisionCall?.prompt.user).toContain("ROUND_PACING");
+    expect(decisionCall?.prompt.user).toContain('"currentRound":2');
+    expect(decisionCall?.prompt.user).toContain('"minRounds":8');
+  });
+
   it("rejects a confirmed action that has neither a check nor an explicit no-roll rationale", async () => {
     const checkSelection = {
       text: JSON.stringify({
@@ -937,6 +1052,70 @@ describe("AiGmCoordinator generation methods", () => {
     if (!result.ok) return;
     expect(containsHangul(result.value.closing)).toBe(true);
     expect(containsHangul(result.value.summary.text)).toBe(true);
+  });
+
+  it("includes only discovered clues and clock snapshots in the ending prompt facts", async () => {
+    const prompts: string[] = [];
+    const base = phaseResponder();
+    const { coordinator } = makeHarness({
+      responder: (req) => {
+        prompts.push(req.prompt.user);
+        return base(req);
+      },
+    });
+
+    const blackboard = {
+      ...createEmptyBlackboard("room-1", "scenario-1"),
+      clues: [
+        {
+          id: "seen-clue",
+          conclusion: "발견된 결론",
+          discoveryCondition: { kind: "action_intent" as const, intent: "inspect" },
+          visibility: "discovered" as const,
+        },
+        {
+          id: "hidden-clue",
+          conclusion: "숨은 결론",
+          discoveryCondition: { kind: "action_intent" as const, intent: "listen" },
+          visibility: "undiscovered" as const,
+        },
+      ],
+    };
+
+    const result = await coordinator.generateEnding(
+      {
+        roomId: "room-1",
+        roundNumber: 5,
+        scenario: SCENARIO,
+        characters: [],
+        thisRound: { actions: [], checks: [] },
+        recentNarrative: [{ round: 4, text: "이전 라운드 서사." }],
+      },
+      undefined,
+      {
+        blackboard,
+        clocks: [
+          makeClock({
+            id: "bell",
+            name: "종소리",
+            scope: "front",
+            max: 6,
+            value: 2,
+            onComplete: "bell_tolls",
+          }),
+        ],
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const endingPrompt = prompts.find((p) => p.includes("PHASE: ending"));
+    expect(endingPrompt).toContain("CONFIRMED_ENDING_FACTS");
+    expect(endingPrompt).toContain("seen-clue");
+    expect(endingPrompt).toContain("발견된 결론");
+    expect(endingPrompt).toContain("종소리");
+    expect(endingPrompt).toContain('"fired":false');
+    expect(endingPrompt).not.toContain("hidden-clue");
+    expect(endingPrompt).not.toContain("숨은 결론");
   });
 });
 

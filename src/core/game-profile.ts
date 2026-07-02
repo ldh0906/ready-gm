@@ -17,6 +17,8 @@ export interface GameProfile {
   rulesFamily: string;
   /** Session pacing style (e.g. "one-shot"). */
   sessionStyle: string;
+  /** Minimum round count before AI-proposed endings are accepted. */
+  minRounds: number;
   characterSheetSchemaId: string;
   characterStateSchemaId: string;
   scenarioBlackboardSchemaId: string;
@@ -33,6 +35,7 @@ export const EZFUDGE_DUNGEON_PROFILE: GameProfile = {
   gameId: "ezfudge-dungeon",
   rulesFamily: "ezfudge",
   sessionStyle: "one-shot",
+  minRounds: 8,
   characterSheetSchemaId: "ezfudge-sheet-v1",
   characterStateSchemaId: "character-state-v1",
   scenarioBlackboardSchemaId: "scenario-blackboard-v1",
@@ -45,6 +48,7 @@ export const INVESTIGATION_HORROR_PROFILE: GameProfile = {
   gameId: "investigation-horror-oneshot",
   rulesFamily: "ezfudge",
   sessionStyle: "one-shot",
+  minRounds: 8,
   characterSheetSchemaId: "ezfudge-sheet-v1",
   characterStateSchemaId: "character-state-v1",
   scenarioBlackboardSchemaId: "scenario-blackboard-v1",

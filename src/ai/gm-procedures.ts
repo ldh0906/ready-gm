@@ -50,7 +50,11 @@ export interface GmProcedureHandler {
 }
 
 export interface NarrationCritiqueWarning {
-  code: "unrevealed_clue_id_leaked" | "hidden_gm_roll_exposed" | "banned_topic_in_narration";
+  code:
+    | "unrevealed_clue_id_leaked"
+    | "hidden_gm_roll_exposed"
+    | "banned_topic_in_narration"
+    | "min_rounds_gate";
   message: string;
   detail?: string;
 }

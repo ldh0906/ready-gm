@@ -19,12 +19,16 @@ import { describe, expect, it } from "vitest";
 import { createInitialTurnState } from "../core/round-loop.js";
 import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
 import { makeCharacterState } from "../core/character-state.js";
+import { createEmptyBlackboard } from "../core/scenario-blackboard.js";
+import { makeClock as makeProgressClock } from "../core/progress-clock.js";
 import type { TurnState } from "../core/turn-state.js";
 import { InMemoryRoomStore } from "../services/room-store.js";
 import { InMemoryTurnStateStore } from "../services/turn-state-store.js";
 import { InMemoryClockStore } from "../services/clock-store.js";
 import { InMemorySceneStore } from "../services/scene-store.js";
 import { InMemoryCharacterStateStore } from "../services/character-state-store.js";
+import { InMemoryBlackboardStore } from "../services/blackboard-store.js";
+import { InMemoryMemoryStore } from "../services/memory-store.js";
 import { MVP_SCENARIO, ScenarioService } from "../services/scenario-service.js";
 import type { Character, Player, Room } from "../services/types.js";
 import { InMemorySessionSummaryRepository } from "../persistence/pg-session-summary-repository.js";
@@ -40,6 +44,7 @@ import type {
   DeclaredCheck,
   DeclareRoundResult,
   GenerationResult,
+  GenerateEndingOptions,
   Narration,
   NarrateDeclaredRoundInput,
   RoundDeclaration,
@@ -161,6 +166,7 @@ class FakeCoordinator implements OrchestratorCoordinator {
   openingCalls = 0;
   endingCalls = 0;
   lastResolveInput: ResolveRoundInput | undefined;
+  lastEndingOptions: GenerateEndingOptions | undefined;
   readonly resolveInputs: ResolveRoundInput[] = [];
   private lastDeclaredLegacyResult: ResolveRoundResult | undefined;
 
@@ -264,8 +270,13 @@ class FakeCoordinator implements OrchestratorCoordinator {
     return Promise.resolve({ ok: true, value: this.opts.opening ?? "오프닝 내레이션" });
   }
 
-  generateEnding(): Promise<GenerationResult<{ closing: Narration; summary: SessionSummary }>> {
+  generateEnding(
+    _ctx?: TurnStateContext,
+    _correlation?: unknown,
+    options?: GenerateEndingOptions,
+  ): Promise<GenerationResult<{ closing: Narration; summary: SessionSummary }>> {
     this.endingCalls += 1;
+    this.lastEndingOptions = options;
     if (this.opts.endingFailure !== undefined) {
       return Promise.resolve({
         ok: false,
@@ -292,6 +303,8 @@ interface Harness {
   clockStore: InMemoryClockStore | undefined;
   sceneStore: InMemorySceneStore | undefined;
   characterStateStore: InMemoryCharacterStateStore | undefined;
+  blackboardStore: InMemoryBlackboardStore | undefined;
+  memoryStore: InMemoryMemoryStore | undefined;
 }
 
 /** Build a room with a host + one other player, both with confirmed characters. */
@@ -325,6 +338,10 @@ function makeHarness(
   sceneStore?: InMemorySceneStore,
   characterStateStore?: InMemoryCharacterStateStore,
   timers?: ReturnType<typeof makeManualTimers>,
+  endingStores: {
+    blackboardStore?: InMemoryBlackboardStore;
+    memoryStore?: InMemoryMemoryStore;
+  } = {},
 ): Harness {
   const roomStore = new InMemoryRoomStore();
   const turnStateStore = new InMemoryTurnStateStore();
@@ -349,6 +366,8 @@ function makeHarness(
     ...(clockStore ? { clockStore } : {}),
     ...(sceneStore ? { sceneStore } : {}),
     ...(characterStateStore ? { characterStateStore } : {}),
+    ...(endingStores.blackboardStore ? { blackboardStore: endingStores.blackboardStore } : {}),
+    ...(endingStores.memoryStore ? { memoryStore: endingStores.memoryStore } : {}),
     ...(timers ? { scheduleTimer: timers.scheduleTimer, cancelTimer: timers.cancelTimer } : {}),
   });
 
@@ -365,6 +384,8 @@ function makeHarness(
     clockStore,
     sceneStore,
     characterStateStore,
+    blackboardStore: endingStores.blackboardStore,
+    memoryStore: endingStores.memoryStore,
   };
 }
 
@@ -852,6 +873,67 @@ describe("RoomOrchestrator", () => {
     // Room marked ended (R15.6) and closing narration delivered (R15.5).
     expect(h.roomStore.getRoom(ROOM_ID)?.state).toBe("ended");
     expect(h.connection.narrations().some((n) => n.kind === "closing")).toBe(true);
+  });
+
+  it("passes confirmed blackboard, clock, and visible memory facts to ending generation", async () => {
+    const clockStore = new InMemoryClockStore();
+    const blackboardStore = new InMemoryBlackboardStore();
+    const memoryStore = new InMemoryMemoryStore();
+    const coordinator = new FakeCoordinator({
+      resolve: () => ({ ok: true, narration: "마지막 내레이션", checks: [], endingReached: true, context: {} as TurnStateContext }),
+      ending: { closing: "막을 내린다", summary: { text: "키 이벤트 요약" } },
+    });
+    const h = makeHarness(
+      coordinator,
+      makeClock(),
+      clockStore,
+      undefined,
+      undefined,
+      undefined,
+      { blackboardStore, memoryStore },
+    );
+    await start(h);
+
+    blackboardStore.save(ROOM_ID, {
+      ...createEmptyBlackboard(ROOM_ID, "scenario-1"),
+      clues: [
+        {
+          id: "seen-clue",
+          conclusion: "발견된 결론",
+          discoveryCondition: { kind: "action_intent", intent: "inspect" },
+          visibility: "discovered",
+        },
+      ],
+    });
+    clockStore.save(ROOM_ID, [
+      makeProgressClock({
+        id: "bell",
+        name: "종소리",
+        scope: "front",
+        max: 6,
+        value: 2,
+        onComplete: "bell_tolls",
+      }),
+    ]);
+    memoryStore.save(ROOM_ID, [
+      {
+        id: "mem-1",
+        roomId: ROOM_ID,
+        kind: "player_choice",
+        summary: "플레이어가 낙서를 조사했다.",
+        salience: 0.5,
+        visibility: "player_visible",
+        sourceEventIds: ["round-1"],
+      },
+    ]);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.lastEndingOptions?.blackboard?.clues[0]?.id).toBe("seen-clue");
+    expect(coordinator.lastEndingOptions?.clocks?.[0]?.name).toBe("종소리");
+    expect(coordinator.lastEndingOptions?.memories?.[0]?.summary).toBe("플레이어가 낙서를 조사했다.");
   });
 
   it("emits a room-visible failure event when ending narration fails", async () => {

@@ -68,6 +68,7 @@ import type {
   GenerationResult,
   DeclaredCheck,
   DeclareRoundResult,
+  GenerateEndingOptions,
   Narration,
   NarrateDeclaredRoundInput,
   RoundDeclaration,
@@ -141,6 +142,7 @@ export interface OrchestratorCoordinator {
   generateEnding(
     ctx: TurnStateContext,
     correlation?: CorrelationKey,
+    options?: GenerateEndingOptions,
   ): Promise<GenerationResult<{ closing: Narration; summary: SessionSummary }>>;
 }
 
@@ -1012,7 +1014,14 @@ export class RoomOrchestrator {
         const scenario = this.scenarioResolver.getSelectedScenario(roomId);
         if (scenario === null) return;
         const ctx = toContext(endedState, scenario, this.charactersFor(roomId));
-        const result = await this.coordinator.generateEnding(ctx, correlationFor(endedState));
+        const endingFacts: GenerateEndingOptions = {};
+        if (this.blackboardStore !== undefined) {
+          const blackboard = this.blackboardStore.get(roomId);
+          if (blackboard !== undefined) endingFacts.blackboard = blackboard;
+        }
+        if (this.clockStore !== undefined) endingFacts.clocks = this.clockStore.get(roomId);
+        if (this.memoryStore !== undefined) endingFacts.memories = this.memoryStore.list(roomId);
+        const result = await this.coordinator.generateEnding(ctx, correlationFor(endedState), endingFacts);
         if (!result.ok) {
           this.emitNarrationFailure(roomId, "ending", result.error.message);
           return;
