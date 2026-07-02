@@ -72,8 +72,8 @@ describe("game-play property tests — handoff", () => {
     );
   });
 
-  it("Property 2: 접근 토큰은 연결 파라미터로 그대로 전달된다", () => {
-    // Feature: game-play, Property 2: 접근 토큰은 연결 파라미터로 그대로 전달된다
+  it("Property 2: 접근 토큰은 반환 필드에는 보존되지만 연결 query에는 싣지 않는다", () => {
+    // Feature: game-play, Property 2: 접근 토큰은 URL query에서 제외된다
     fc.assert(
       fc.property(roomIdGen, tokenGen, (roomId, token) => {
         const result = buildConnectParams(roomId, token);
@@ -85,20 +85,24 @@ describe("game-play property tests — handoff", () => {
         const decoded = new URLSearchParams(result.query);
         expect(decoded.get("roomId")).toBe(roomId);
 
-        if (String(token).length > 0) {
-          // 토큰이 비어 있지 않으면 query에 포함되며 디코드 시 원래 값과 정확히 일치.
-          expect(decoded.get("token")).toBe(token);
-        } else {
-          // 토큰이 비어 있으면 query에 token을 포함하지 않는다.
-          expect(decoded.get("token")).toBeNull();
-        }
+        expect(decoded.get("token")).toBeNull();
       }),
       { numRuns: 100 },
     );
   });
 
+  it("보안: WebSocket connect query에는 PLAYTEST_TOKEN을 싣지 않는다", () => {
+    const result = buildConnectParams("room-1", "playtest-secret", "p1", "ticket-1");
+    const decoded = new URLSearchParams(result.query);
+
+    expect(decoded.get("roomId")).toBe("room-1");
+    expect(decoded.get("playerId")).toBe("p1");
+    expect(decoded.has("token")).toBe(false);
+    expect(result.query).not.toContain("playtest-secret");
+  });
+
   it("parseHandoff는 playerId·ticket를 트림해 추출한다(관전자 식별자·연결 티켓)", () => {
-    // 캐릭터 화면 인계는 ?roomId&playerId&token&ticket 형태로 playerId·ticket를 싣는다.
+    // Legacy URL도 파싱은 유지하지만, 새 navigation URL은 token/ticket을 싣지 않는다.
     fc.assert(
       fc.property(rawValueGen, rawValueGen, rawValueGen, rawValueGen, (roomIdRaw, hostRaw, playerRaw, tokenRaw) => {
         const params = new URLSearchParams();
@@ -165,11 +169,7 @@ describe("game-play property tests — handoff", () => {
         const decoded = new URLSearchParams(result.query);
         // 기존 roomId/token/playerId 계약은 유지된다.
         expect(decoded.get("roomId")).toBe(roomId);
-        if (String(token).length > 0) {
-          expect(decoded.get("token")).toBe(token);
-        } else {
-          expect(decoded.get("token")).toBeNull();
-        }
+        expect(decoded.get("token")).toBeNull();
         expect(decoded.get("playerId")).toBeNull(); // playerId 비어있음 → 생략.
         if (String(ticket).length > 0) {
           expect(decoded.get("ticket")).toBe(ticket);

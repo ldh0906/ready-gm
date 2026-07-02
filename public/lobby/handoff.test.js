@@ -153,15 +153,11 @@ describe("room-lobby property tests — handoff", () => {
         const anyActive = seq.some((ts) => detectSessionActive(ts));
         expect(state.handoffDone).toBe(anyActive);
 
-        // --- buildGameHandoff: roomId·hostPlayerId(+비어있지 않은 token) 포함 ---
+        // --- buildGameHandoff: roomId·hostPlayerId(+viewer playerId)만 포함 ---
         const payload = buildGameHandoff(handoff);
         expect(payload.roomId).toBe(handoff.roomId);
         expect(payload.hostPlayerId).toBe(handoff.hostPlayerId);
-        if (handoff.token.length > 0) {
-          expect(payload.token).toBe(handoff.token);
-        } else {
-          expect("token" in payload).toBe(false);
-        }
+        expect("token" in payload).toBe(false);
         // playerId = effectiveViewerId(playerId 우선, 없으면 hostPlayerId, 트림). 비어있지 않을 때만 포함.
         const expectedViewer = effectiveViewerId(handoff);
         if (expectedViewer.length > 0) {
@@ -169,12 +165,7 @@ describe("room-lobby property tests — handoff", () => {
         } else {
           expect("playerId" in payload).toBe(false);
         }
-        // ticket(auth-hardening): 비어있지 않을 때만 변형 없이 포함, 비면 키 생략.
-        if (handoff.ticket.length > 0) {
-          expect(payload.ticket).toBe(handoff.ticket);
-        } else {
-          expect("ticket" in payload).toBe(false);
-        }
+        expect("ticket" in payload).toBe(false);
       }),
       { numRuns: 100 },
     );

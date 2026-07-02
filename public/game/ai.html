@@ -151,8 +151,6 @@
   const hintEl = $("hint");
   const trayEl = $("diceTray");
 
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-
   // ?token= 을 읽어 모든 fetch 에 x-playtest-token 헤더로 전달한다(host-entry 방식).
   const params = new URLSearchParams(location.search);
   const token = params.get("token") || "";
@@ -177,17 +175,34 @@
   };
   const sign = (n) => (n > 0 ? "+" + n : String(n));
 
+  function textSpan(className, text) {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    return span;
+  }
+  function textBold(text) {
+    const b = document.createElement("b");
+    b.textContent = text;
+    return b;
+  }
+  function appendParts(parent, parts) {
+    for (const part of Array.isArray(parts) ? parts : [parts]) {
+      parent.appendChild(typeof part === "string" ? document.createTextNode(part) : part);
+    }
+  }
+
   function gm(cls, who, text) {
     const d = document.createElement("div");
     d.className = "gm " + cls;
-    d.innerHTML = `<span class="who">[GM · ${esc(who)}]</span>` + esc(text);
+    d.append(textSpan("who", `[GM · ${who}]`), document.createTextNode(String(text)));
     storyEl.appendChild(d);
     storyEl.scrollTop = storyEl.scrollHeight;
   }
-  function log(cls, html) {
+  function log(cls, parts) {
     const d = document.createElement("div");
     d.className = "li " + cls;
-    d.innerHTML = html;
+    appendParts(d, parts);
     sideEl.appendChild(d);
     sideEl.scrollTop = sideEl.scrollHeight;
   }
@@ -204,7 +219,10 @@
     if (on) {
       setPhase("판정 중…", "busy");
       hintEl.className = "hint";
-      hintEl.innerHTML = `<span class="spinner" aria-hidden="true"></span>${esc(label || "GM이 판정하고 서술하는 중… (수십 초 걸릴 수 있어요)")}`;
+      const spinner = document.createElement("span");
+      spinner.className = "spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      hintEl.replaceChildren(spinner, document.createTextNode(label || "GM이 판정하고 서술하는 중… (수십 초 걸릴 수 있어요)"));
     }
   }
 
@@ -236,10 +254,11 @@
       die.className = "fate-die rolling";
       die.setAttribute("role", "img");
       const attrLabel = ATTR_LABELS[check.attribute] || check.attribute;
-      die.innerHTML =
-        `<span class="fate-type">${esc(attrLabel)}</span>` +
-        `<span class="fate-face">…</span>` +
-        `<span class="fate-label">${check.rolls.length === 2 ? (i + 1) + "차" : "판정"}</span>`;
+      die.replaceChildren(
+        textSpan("fate-type", attrLabel),
+        textSpan("fate-face", "…"),
+        textSpan("fate-label", check.rolls.length === 2 ? (i + 1) + "차" : "판정"),
+      );
       dieRow.appendChild(die);
       return die;
     });
@@ -297,7 +316,7 @@
         check.advantage === "advantage" ? " · 유리"
         : check.advantage === "disadvantage" ? " · 불리" : "";
       const rollsText = check.rolls.map(sign).join(", ");
-      log("judge", `🎯 ${esc(a)}·${esc(d)}${advTag} 합 [${esc(rollsText)}] → 채택 ${sign(check.roll)} → <b>${esc(o)}</b>`);
+      log("judge", [`🎯 ${a}·${d}${advTag} 합 [${rollsText}] → 채택 ${sign(check.roll)} → `, textBold(o)]);
     }
   }
 
@@ -335,7 +354,7 @@
   function sayLine(text) {
     const d = document.createElement("div");
     d.className = "gm say";
-    d.innerHTML = `<span class="who">나 (대사)</span>` + esc(`“${text}”`);
+    d.append(textSpan("who", "나 (대사)"), document.createTextNode(`“${text}”`));
     storyEl.appendChild(d);
     storyEl.scrollTop = storyEl.scrollHeight;
   }
@@ -405,9 +424,9 @@
     const { says, action } = parseUtterance(text);
     // 화면 표시: 대사는 서사에, 행동은 행동 로그에.
     for (const s of says) sayLine(s);
-    if (action) log("me", `🧭 <b>나</b>: ${esc(action)}`);
+    if (action) log("me", ["🧭 ", textBold("나"), `: ${action}`]);
     // 따옴표가 닫히지 않는 등으로 아무것도 못 뽑으면 전체를 행동으로 처리.
-    if (says.length === 0 && !action) log("me", `🧭 <b>나</b>: ${esc(text)}`);
+    if (says.length === 0 && !action) log("me", ["🧭 ", textBold("나"), `: ${text}`]);
     msgEl.value = "";
     setBusy(true);
     // 보낼 텍스트: 행동이 섞여 있으면 원문 그대로(따옴표를 GM이 대사로 해석),

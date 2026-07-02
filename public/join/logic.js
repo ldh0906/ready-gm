@@ -276,8 +276,8 @@ export function validateJoinResponse(body) {
 /**
  * 로비 화면으로의 인계 쿼리 문자열을 구성한다.
  *
- * `?roomId=…&playerId=…&token=…&ticket=…` 형식이며, 모든 값은 URL 인코딩된다. 토큰과
- * 연결 티켓(auth-hardening)은 각각 비어 있지 않을 때만 포함한다.
+ * `?roomId=…&playerId=…` 형식이며, 모든 값은 URL 인코딩된다. 토큰과
+ * 연결 티켓은 URL에 싣지 않는다.
  *
  * 주의: 로비는 현재 인계에서 `hostPlayerId`를 읽지만, 입장한 플레이어는 호스트가
  * 아니다. 단계 1에서는 `playerId`만 전달하고 `hostPlayerId`는 설정하지 않는다(후속
@@ -289,18 +289,8 @@ export function validateJoinResponse(body) {
 export function buildLobbySearch(payload) {
   const roomId = payload ? String(payload.roomId == null ? "" : payload.roomId) : "";
   const playerId = payload ? String(payload.playerId == null ? "" : payload.playerId) : "";
-  const token = payload ? String(payload.token == null ? "" : payload.token) : "";
-  const ticket = payload ? String(payload.ticket == null ? "" : payload.ticket) : "";
   const params = new URLSearchParams();
   params.set("roomId", roomId);
   params.set("playerId", playerId);
-  // 토큰은 비어 있지 않을 때만 포함한다.
-  if (token.length > 0) {
-    params.set("token", token);
-  }
-  // 서버 발급 연결 티켓은 비어 있지 않을 때만 포함한다(auth-hardening).
-  if (ticket.length > 0) {
-    params.set("ticket", ticket);
-  }
   return "?" + params.toString();
 }

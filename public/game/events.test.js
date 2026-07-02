@@ -59,6 +59,16 @@ describe("game-play property tests — eventToAction", () => {
       expected: { type: "DELIVERY_FAILED", failedType: p.failedType, detail: p.detail },
     }));
 
+    const checksPendingEvt = fc.record({ checks: fc.array(anyJson) }).map((p) => ({
+      event: { type: "checks_pending", checks: p.checks },
+      expected: { type: "CHECKS_PENDING", checks: p.checks },
+    }));
+
+    const checkRolledEvt = fc.record({ check: anyJson }).map((p) => ({
+      event: { type: "check_rolled", check: p.check },
+      expected: { type: "CHECK_ROLLED", check: p.check },
+    }));
+
     const connOpenEvt = fc.constant({
       event: { type: "connection-open" },
       expected: { type: "CONNECTION_OPENED" },
@@ -79,6 +89,8 @@ describe("game-play property tests — eventToAction", () => {
           "readiness_updated",
           "scenario_set",
           "delivery_failed",
+          "checks_pending",
+          "check_rolled",
           "connection-open",
           "connection-lost",
           "player_list_updated",
@@ -93,6 +105,8 @@ describe("game-play property tests — eventToAction", () => {
       readinessEvt,
       scenarioEvt,
       deliveryEvt,
+      checksPendingEvt,
+      checkRolledEvt,
       connOpenEvt,
       connLostEvt,
       ignoredEvt,

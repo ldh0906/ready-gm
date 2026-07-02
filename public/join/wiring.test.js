@@ -162,7 +162,7 @@ describe("multiplayer-session-flow 단계1 — join wiring", () => {
     const params = new URLSearchParams(search);
     expect(params.get("roomId")).toBe("room-7");
     expect(params.get("playerId")).toBe("player-42");
-    expect(params.get("token")).toBe("secret");
+    expect(params.get("token")).toBeNull();
     // 입장 플레이어는 호스트가 아니다.
     expect(params.has("hostPlayerId")).toBe(false);
   });

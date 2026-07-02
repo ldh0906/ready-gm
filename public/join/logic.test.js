@@ -283,6 +283,18 @@ describe("multiplayer-session-flow 단계1 — validateJoinResponse", () => {
 });
 
 describe("multiplayer-session-flow 단계1 — buildLobbySearch", () => {
+  it("보안: lobby URL에는 token/ticket bearer 값을 싣지 않는다", () => {
+    const search = buildLobbySearch({ roomId: "r1", playerId: "p1", token: "secret", ticket: "ticket-1" });
+    const params = new URLSearchParams(search);
+
+    expect(params.get("roomId")).toBe("r1");
+    expect(params.get("playerId")).toBe("p1");
+    expect(params.has("token")).toBe(false);
+    expect(params.has("ticket")).toBe(false);
+    expect(search).not.toContain("secret");
+    expect(search).not.toContain("ticket-1");
+  });
+
   it("예제: 토큰이 비어 있으면 token 파라미터를 생략한다", () => {
     const search = buildLobbySearch({ roomId: "r1", playerId: "p1", token: "" });
     const params = new URLSearchParams(search);
@@ -293,13 +305,13 @@ describe("multiplayer-session-flow 단계1 — buildLobbySearch", () => {
     expect(params.has("hostPlayerId")).toBe(false);
   });
 
-  it("예제: 토큰이 있으면 token 파라미터를 포함한다", () => {
+  it("예제: 토큰이 있어도 token 파라미터를 포함하지 않는다", () => {
     const search = buildLobbySearch({ roomId: "r1", playerId: "p1", token: "secret" });
     const params = new URLSearchParams(search);
-    expect(params.get("token")).toBe("secret");
+    expect(params.has("token")).toBe(false);
   });
 
-  it("예제: 연결 티켓(ticket)은 비어 있으면 생략, 있으면 포함한다(auth-hardening)", () => {
+  it("예제: 연결 티켓(ticket)은 URL에 포함하지 않는다", () => {
     const without = new URLSearchParams(
       buildLobbySearch({ roomId: "r1", playerId: "p1", token: "", ticket: "" }),
     );
@@ -307,7 +319,7 @@ describe("multiplayer-session-flow 단계1 — buildLobbySearch", () => {
     const with_ = new URLSearchParams(
       buildLobbySearch({ roomId: "r1", playerId: "p1", token: "", ticket: "tkt&1" }),
     );
-    expect(with_.get("ticket")).toBe("tkt&1");
+    expect(with_.has("ticket")).toBe(false);
     // ticket이 없는(undefined) payload도 안전하게 생략한다.
     const omitted = new URLSearchParams(buildLobbySearch({ roomId: "r1", playerId: "p1", token: "" }));
     expect(omitted.has("ticket")).toBe(false);
@@ -319,7 +331,7 @@ describe("multiplayer-session-flow 단계1 — buildLobbySearch", () => {
     );
   });
 
-  it("속성: roundtrip — 인코딩된 값이 정확히 복원되고 token·ticket은 유무에 따른다", () => {
+  it("속성: roundtrip — 식별자는 복원되고 token·ticket은 URL에서 제외된다", () => {
     fc.assert(
       fc.property(
         fc.string({ minLength: 1 }),
@@ -331,16 +343,8 @@ describe("multiplayer-session-flow 단계1 — buildLobbySearch", () => {
           const params = new URLSearchParams(search);
           expect(params.get("roomId")).toBe(roomId);
           expect(params.get("playerId")).toBe(playerId);
-          if (token.length > 0) {
-            expect(params.get("token")).toBe(token);
-          } else {
-            expect(params.has("token")).toBe(false);
-          }
-          if (ticket.length > 0) {
-            expect(params.get("ticket")).toBe(ticket);
-          } else {
-            expect(params.has("ticket")).toBe(false);
-          }
+          expect(params.has("token")).toBe(false);
+          expect(params.has("ticket")).toBe(false);
           // hostPlayerId는 절대 설정하지 않는다.
           expect(params.has("hostPlayerId")).toBe(false);
         },

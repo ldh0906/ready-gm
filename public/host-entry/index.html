@@ -241,6 +241,25 @@
   // ?token= 공유 비밀을 읽어 초기 상태에 주입한다. 이 토큰은 x-playtest-token
   // 헤더(buildCreateRoomRequest)와 로비 인계에만 사용되며, 그 외 인증은 없다.
   const TOKEN = new URLSearchParams(location.search).get("token") || "";
+  const HANDOFF_CREDENTIALS_KEY = "ready-gm:handoff";
+
+  function saveHandoffCredentials(handoff) {
+    try {
+      sessionStorage.setItem(
+        HANDOFF_CREDENTIALS_KEY,
+        JSON.stringify({
+          roomId: handoff.roomId || "",
+          hostPlayerId: handoff.hostPlayerId || "",
+          playerId: handoff.hostPlayerId || "",
+          token: handoff.token || "",
+          ticket: handoff.ticket || "",
+        }),
+      );
+    } catch {
+      // Session storage can be unavailable in private/embedded contexts.
+    }
+  }
+
   let state = createInitialState(TOKEN);
 
   // 단방향 흐름: dispatch → reduce → render. render는 상태의 순수 함수다.
@@ -365,13 +384,10 @@
     // handoffDone이 false→true로 바뀐 그 순간에만 정확히 1회 인계한다.
     if (!before && state.handoffDone) {
       const handoff = buildHandoff(state.success, state.token);
+      saveHandoffCredentials(handoff);
       const params = new URLSearchParams();
       params.set("roomId", handoff.roomId);
       params.set("hostPlayerId", handoff.hostPlayerId);
-      if (handoff.token) params.set("token", handoff.token);
-      // 서버 발급 연결 티켓이 있으면 ticket으로 로비에 인계한다(auth-hardening).
-      if (handoff.ticket) params.set("ticket", handoff.ticket);
-      // 로비 화면으로 식별자·토큰·티켓을 쿼리로 전달하는 URL로 이동한다.
       location.assign(`/lobby/?${params.toString()}`);
     }
   });

@@ -190,8 +190,14 @@
       return `${p.label ? p.label + " " : ""}d${p.sides} → ${p.result}${tag}`;
     });
     const total = plans.reduce((s, p) => s + p.result, 0);
-    resultEl.innerHTML = `결과: ${parts.map((t) => `<b>${t}</b>`).join(" · ")}` +
-      (plans.length > 1 ? ` &nbsp; (합계 ${total})` : "");
+    resultEl.replaceChildren(document.createTextNode("결과: "));
+    parts.forEach((part, index) => {
+      if (index > 0) resultEl.appendChild(document.createTextNode(" · "));
+      const strong = document.createElement("b");
+      strong.textContent = part;
+      resultEl.appendChild(strong);
+    });
+    if (plans.length > 1) resultEl.appendChild(document.createTextNode(` (합계 ${total})`));
   }
 
   async function run(specs) {

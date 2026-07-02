@@ -85,6 +85,67 @@
     box-shadow: 0 0 6px rgba(239, 107, 107, .6);
   }
 
+  /* ---- 캐릭터 상태 (Living Character Sheet, player-visible) ---- */
+  .char-states {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 8px 16px;
+    background: #141822;
+    border-bottom: 1px solid #262b36;
+  }
+  .char-state {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    padding: 6px 10px;
+    border: 1px solid #262b36;
+    border-radius: 8px;
+    background: #181d29;
+    font-size: 12px;
+    color: #c4ccda;
+  }
+  .char-state .cs-name { font-weight: 700; color: #e7e9ee; }
+  .char-state .cs-line { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .char-state .cs-tag {
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: #222836;
+    border: 1px solid #303748;
+    white-space: nowrap;
+  }
+  .char-state .cs-tag.cond { color: #ef8b8b; border-color: #5a2b33; background: #241a20; }
+  .char-state .cs-tag.item { color: #9fc3ef; }
+  .char-state .cs-tag.res { color: #7fd1b9; }
+
+  /* ---- 시나리오 블랙보드 (player-visible: 발견 단서 / NPC / 위협) ---- */
+  .blackboard-bar {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 8px 16px;
+    background: #141822;
+    border-bottom: 1px solid #262b36;
+    font-size: 12px;
+    color: #c4ccda;
+  }
+  .blackboard-bar .bb-group { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .blackboard-bar .bb-label { font-weight: 700; color: #e7e9ee; }
+  .blackboard-bar .bb-tag {
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: #222836;
+    border: 1px solid #303748;
+  }
+  .blackboard-bar .bb-tag.clue { color: #e8cf8f; border-color: #57492a; background: #221e15; }
+  .blackboard-bar .bb-tag.npc { color: #9fc3ef; }
+  .blackboard-bar .bb-tag.threat { color: #ef8b8b; border-color: #5a2b33; background: #241a20; }
+
   /* ---- 인계 무효 안내 ---- */
   .notice-bar {
     color: #ef8b8b;
@@ -404,6 +465,12 @@
 <!-- 진행 시계 (Progress Clocks) — 노출 시나리오에서만 채워짐 -->
 <div id="clocks" class="clocks-bar" role="group" aria-live="polite" aria-label="진행 시계" hidden></div>
 
+<!-- 캐릭터 상태 (player-visible Living Character Sheet) — 내용이 있을 때만 표시 -->
+<div id="charStates" class="char-states" role="group" aria-live="polite" aria-label="캐릭터 상태" hidden></div>
+
+<!-- 시나리오 블랙보드: 발견한 단서 · 보이는 NPC · 활성 위협 (player-visible projection만) -->
+<div id="blackboard" class="blackboard-bar" role="group" aria-live="polite" aria-label="발견한 단서 및 위협" hidden></div>
+
 <!-- 멀티플레이 표시 계층: 단계/차례 · 본인 상태 · 참가자 로스터 (multiplayer-game-ux) -->
 <!-- 갱신은 포커스를 이동시키지 않고 aria-live 라이브 영역으로 낭독된다 (요구사항 8.3) -->
 <section id="rosterPanel" class="roster-panel" aria-label="참가자 및 차례">
@@ -477,12 +544,14 @@
     buildConnectParams,
     effectivePlayerId,
     eventToAction,
-    esc,
     computeCountdownMs,
+    describeCharacterState,
+    describeBlackboard,
     buildChatCommand,
     buildConfirmCommand,
     buildPassCommand,
     buildReviseCommand,
+    buildRollCheckCommand,
     reduce,
     computeVisibility,
     describeClock,
@@ -509,6 +578,8 @@
   const busyEl = $("busy");
   const handoffInvalidEl = $("handoffInvalid");
   const clocksEl = $("clocks");
+  const charStatesEl = $("charStates");
+  const blackboardEl = $("blackboard");
   const storyEl = $("story");
   const sideEl = $("side");
   const msgEl = $("msg");
@@ -528,6 +599,7 @@
     free_chat: "자유 대화",
     ready_check: "준비 체크",
     resolving: "판정 중",
+    rolling: "주사위 굴림",
     ended: "종료",
   };
 
@@ -541,11 +613,32 @@
     (window.__gameSetInterval || window.setInterval).call(window, fn, ms);
   const clearIntervalImpl = (id) =>
     (window.__gameClearInterval || window.clearInterval).call(window, id);
+  const HANDOFF_CREDENTIALS_KEY = "ready-gm:handoff";
+
+  function withStoredCredentials(handoff) {
+    try {
+      const raw = sessionStorage.getItem(HANDOFF_CREDENTIALS_KEY);
+      if (!raw) return handoff;
+      const stored = JSON.parse(raw);
+      if (!stored || stored.roomId !== handoff.roomId) return handoff;
+      const viewer = handoff.playerId || handoff.hostPlayerId || "";
+      const storedViewer = stored.playerId || stored.hostPlayerId || "";
+      if (viewer && storedViewer && viewer !== storedViewer) return handoff;
+      return {
+        ...handoff,
+        hostPlayerId: handoff.hostPlayerId || stored.hostPlayerId || "",
+        playerId: handoff.playerId || stored.playerId || "",
+        token: handoff.token || stored.token || "",
+        ticket: handoff.ticket || stored.ticket || "",
+      };
+    } catch {
+      return handoff;
+    }
+  }
 
   // ---- 상태: 단일 진실 원천 ----------------------------------------------
-  // 인계는 URL 쿼리에서 1회 읽는다. 토큰은 buildConnectParams가 연결 쿼리로
-  // 전달하며, 그 외 인증은 없다(MVP, ws 연결 티켓 간극 가정).
-  const handoff = parseHandoff(location.search);
+  // 인계는 URL 쿼리에서 식별자만 읽고, 같은 탭의 credential은 sessionStorage에서 합친다.
+  const handoff = withStoredCredentials(parseHandoff(location.search));
   let state = createInitialState(handoff);
   // 관전자(본인) 식별자: playerId(캐릭터 화면 인계) 우선, 없으면 hostPlayerId(로비 호스트 인계).
   // /ws URL에 실어 서버가 룸 소속 플레이어로 소켓을 귀속하게 한다(아니면 호스트로 폴백).
@@ -611,8 +704,15 @@
     // 진행 시계 게이지 — 노출 시나리오에서만(payload에 clocks가 실릴 때) 표시
     renderClocks();
 
+    // 캐릭터 상태(player-visible) — 내용이 있는 캐릭터가 있을 때만 표시
+    renderCharacterStates();
+
+    // 시나리오 블랙보드(발견 단서/NPC/위협) — 표시할 내용이 있을 때만
+    renderBlackboard();
+
     // 채팅 + 행동 로그 사이드바 (요구사항 4.2, 4.3, 6.2, 6.3) — 상한 적용, 하단 스크롤
     renderSide();
+    renderRollingChecks();
 
     // 멀티플레이 표시 계층: 단계/차례 · 본인 상태 · 로스터 (multiplayer-game-ux)
     // 기존 단방향 흐름(turn_state/readiness_updated 수신 → reduce → render)에 편승해
@@ -628,6 +728,11 @@
       noticeEl.hidden = false;
       noticeEl.classList.remove("ended");
       noticeEl.textContent = DELIVERY_FAILED_MESSAGE;
+    } else if (state.narrationFailedNotice) {
+      // 서사 생성 실패(narration_failed): 침묵 대신 실패와 재시도 방법을 알린다.
+      noticeEl.hidden = false;
+      noticeEl.classList.remove("ended");
+      noticeEl.textContent = state.narrationFailedNotice;
     } else {
       noticeEl.hidden = true;
       noticeEl.classList.remove("ended");
@@ -642,6 +747,17 @@
     reviseBtn.disabled = disabled;
   }
 
+  function textSpan(className, text) {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    return span;
+  }
+
+  function appendText(parent, text) {
+    parent.appendChild(document.createTextNode(text));
+  }
+
   // 상태의 narrationEntries를 통째로 다시 그린다(<= MAX_ENTRIES이므로 비용 안전).
   function renderStory() {
     const frag = document.createDocumentFragment();
@@ -649,8 +765,7 @@
       const div = document.createElement("div");
       div.className = "gm " + (entry.kind || "");
       const label = entry.kind || "narration";
-      div.innerHTML =
-        `<span class="who">[GM · ${esc(label)}]</span>` + esc(entry.text);
+      div.append(textSpan("who", `[GM · ${label}]`), document.createTextNode(String(entry.text)));
       frag.appendChild(div);
     }
     storyEl.replaceChildren(frag);
@@ -696,20 +811,136 @@
     clocksEl.replaceChildren(frag);
   }
 
+  // player-visible 캐릭터 상태(조건/장비/자원/개인 시계)를 그린다. 서버가 GM 전용
+  // 정보를 이미 제외한 스냅샷을 turn_state에 실어 보내며, 표시할 내용이 있는
+  // 캐릭터가 하나도 없으면 영역을 숨긴다. DOM API로만 조립해 XSS 표면을 만들지 않는다.
+  function renderCharacterStates() {
+    const list = Array.isArray(state.characterStates) ? state.characterStates : [];
+    const cards = [];
+    for (const raw of list) {
+      const cs = describeCharacterState(raw);
+      const hasContent =
+        cs.conditions.length > 0 ||
+        cs.inventory.length > 0 ||
+        cs.resources.length > 0 ||
+        cs.personalClocks.length > 0;
+      if (!hasContent) continue;
+
+      const card = document.createElement("div");
+      card.className = "char-state";
+
+      const nameEl = document.createElement("span");
+      nameEl.className = "cs-name";
+      nameEl.textContent = cs.name || "캐릭터";
+      card.appendChild(nameEl);
+
+      const line = document.createElement("span");
+      line.className = "cs-line";
+      for (const cond of cs.conditions) {
+        const tag = document.createElement("span");
+        tag.className = "cs-tag cond";
+        tag.textContent = cond.severity != null ? `${cond.name} ${cond.severity}` : cond.name;
+        line.appendChild(tag);
+      }
+      for (const item of cs.inventory) {
+        const tag = document.createElement("span");
+        tag.className = "cs-tag item";
+        tag.textContent = item.name;
+        line.appendChild(tag);
+      }
+      for (const res of cs.resources) {
+        const tag = document.createElement("span");
+        tag.className = "cs-tag res";
+        tag.textContent = `${res.key} ${res.value}`;
+        line.appendChild(tag);
+      }
+      for (const clock of cs.personalClocks) {
+        const tag = document.createElement("span");
+        tag.className = "cs-tag";
+        tag.textContent = `${clock.name} ${clock.value}/${clock.max}`;
+        line.appendChild(tag);
+      }
+      card.appendChild(line);
+      cards.push(card);
+    }
+
+    if (cards.length === 0) {
+      charStatesEl.hidden = true;
+      charStatesEl.replaceChildren();
+      return;
+    }
+    charStatesEl.hidden = false;
+    charStatesEl.replaceChildren(...cards);
+  }
+
+  // player-visible 시나리오 블랙보드(발견한 단서 / 보이는 NPC / 활성 위협)를 그린다.
+  // 서버가 숨겨진 secret과 미발견 단서를 이미 제외한 projection만 turn_state에 실어
+  // 보내므로, 여기서는 형태 방어(describeBlackboard) 후 DOM API로만 조립한다.
+  function renderBlackboard() {
+    const bb = describeBlackboard(state.blackboard);
+    const groups = [];
+
+    if (bb.clues.length > 0) {
+      const group = document.createElement("span");
+      group.className = "bb-group";
+      group.appendChild(textSpan("bb-label", "발견한 단서"));
+      for (const clue of bb.clues) {
+        const tag = document.createElement("span");
+        tag.className = "bb-tag clue";
+        tag.textContent = clue.conclusion;
+        group.appendChild(tag);
+      }
+      groups.push(group);
+    }
+    if (bb.npcs.length > 0) {
+      const group = document.createElement("span");
+      group.className = "bb-group";
+      group.appendChild(textSpan("bb-label", "NPC"));
+      for (const npc of bb.npcs) {
+        const tag = document.createElement("span");
+        tag.className = "bb-tag npc";
+        tag.textContent = npc.role ? `${npc.name} (${npc.role})` : npc.name;
+        group.appendChild(tag);
+      }
+      groups.push(group);
+    }
+    if (bb.threats.length > 0) {
+      const group = document.createElement("span");
+      group.className = "bb-group";
+      group.appendChild(textSpan("bb-label", "위협"));
+      for (const threat of bb.threats) {
+        const tag = document.createElement("span");
+        tag.className = "bb-tag threat";
+        tag.textContent = threat.status ? `${threat.name} · ${threat.status}` : threat.name;
+        group.appendChild(tag);
+      }
+      groups.push(group);
+    }
+
+    if (groups.length === 0) {
+      blackboardEl.hidden = true;
+      blackboardEl.replaceChildren();
+      return;
+    }
+    blackboardEl.hidden = false;
+    blackboardEl.replaceChildren(...groups);
+  }
+
   // 채팅(서버 권위)과 본인 행동 로그(로컬 에코)를 한 사이드바에 그린다.
   function renderSide() {
     const frag = document.createDocumentFragment();
     for (const c of state.chatEntries) {
       const div = document.createElement("div");
       div.className = "li chat";
-      const cn = esc(c.characterName);
       const dn = c.displayName;
+      const name = document.createElement("b");
+      name.textContent = c.characterName;
+      div.appendChild(name);
       if (typeof dn === "string" && dn.trim().length > 0 && dn !== c.characterName) {
         // 캐릭터 이름 + 방 합류 표시 이름: "알렉스(라면)" 형태로 귀속한다.
-        div.innerHTML = `<b>${cn}</b><span class="chat-handle">(${esc(dn)})</span>: ${esc(c.text)}`;
-      } else {
-        div.innerHTML = `<b>${cn}</b>: ${esc(c.text)}`;
+        div.appendChild(textSpan("chat-handle", `(${dn})`));
       }
+      appendText(div, `: ${c.text}`);
       frag.appendChild(div);
     }
     for (const a of actionLogModel(turnStateView())) {
@@ -719,7 +950,11 @@
       const nameText = dn && dn !== a.characterName ? `${a.characterName}(${dn})` : a.characterName;
       if (a.kind === "confirm") {
         div.className = "li act";
-        div.innerHTML = `🗡 <b>${esc(nameText)}</b> 행동 확정: ${esc(a.text)}`;
+        appendText(div, "🗡 ");
+        const name = document.createElement("b");
+        name.textContent = nameText;
+        div.appendChild(name);
+        appendText(div, ` 행동 확정: ${a.text}`);
       } else {
         div.className = "li pass";
         div.textContent = `${nameText} — ${a.auto ? "자동 패스" : "패스"}`;
@@ -775,9 +1010,10 @@
     } else {
       detail = "행동 가능한 플레이어 없음";
     }
-    turnIndicatorEl.innerHTML =
-      `<span class="phase-label">단계: ${esc(phaseLabel)}</span>` +
-      `<span class="turn-detail">${esc(detail)}</span>`;
+    turnIndicatorEl.replaceChildren(
+      textSpan("phase-label", `단계: ${phaseLabel}`),
+      textSpan("turn-detail", detail),
+    );
   }
 
   // 본인 상태 표시: 준비/행동완료/관전 (요구사항 6.4)
@@ -821,13 +1057,26 @@
         "aria-label",
         `${nameText}${r.isSelf ? " (나)" : ""}, ${connLabel}, ${readyLabel}, ${actedLabel}`,
       );
-      // 시각 배지는 aria-hidden으로 중복 낭독을 막고, 이름은 esc로 이스케이프한다(요구사항 1.3).
-      li.innerHTML =
-        `<span class="r-name">${esc(nameText)}</span>` +
-        (r.isSelf ? `<span class="r-self" aria-hidden="true">나</span>` : "") +
-        `<span class="r-conn ${esc(r.connectionStatus)}" aria-hidden="true">${esc(connLabel)}</span>` +
-        `<span class="r-ready ${r.status === "ready" ? "on" : ""}" aria-hidden="true">${esc(readyLabel)}</span>` +
-        `<span class="r-acted ${r.hasActed ? "on" : ""}" aria-hidden="true">${esc(actedLabel)}</span>`;
+      const name = textSpan("r-name", nameText);
+      const badges = [name];
+      if (r.isSelf) {
+        const self = textSpan("r-self", "나");
+        self.setAttribute("aria-hidden", "true");
+        badges.push(self);
+      }
+      const connClass =
+        r.connectionStatus === "connected"
+          ? "connected"
+          : r.connectionStatus === "disconnected"
+            ? "disconnected"
+            : "unknown";
+      const conn = textSpan(`r-conn ${connClass}`, connLabel);
+      conn.setAttribute("aria-hidden", "true");
+      const ready = textSpan(`r-ready ${r.status === "ready" ? "on" : ""}`, readyLabel);
+      ready.setAttribute("aria-hidden", "true");
+      const acted = textSpan(`r-acted ${r.hasActed ? "on" : ""}`, actedLabel);
+      acted.setAttribute("aria-hidden", "true");
+      li.replaceChildren(...badges, conn, ready, acted);
       frag.appendChild(li);
     }
     rosterEl.replaceChildren(frag);
@@ -835,8 +1084,9 @@
 
   // ---- 부수효과: 실시간 채널 (주입 가능한 connect 어댑터 + 재연결) --------
   // 기본 어댑터: /ws 경로로 WebSocket을 열고 onmessage JSON을 eventToAction으로
-  // 환원한다. buildConnectParams(roomId, token, viewerPlayerId, ticket).query로 roomId·(있으면)token·
-  // (있으면)playerId·(있으면)ticket를 전달. (auth-hardening: /ws는 ticket으로만 신원 도출)
+  // 환원한다. buildConnectParams(roomId, token, viewerPlayerId, ticket).query로 roomId·
+  // (있으면)playerId·(있으면)ticket만 전달한다. 글로벌 token은 /ws URL에 싣지 않는다.
+  // (auth-hardening: /ws는 ticket으로만 신원 도출)
   // 계약: connect(roomId, token, { onOpen, onMessage, onClose }) -> { send, close }
   function defaultConnect(roomId, token, handlers) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -863,10 +1113,23 @@
 
   function openChannel() {
     channel = connect(state.handoff.roomId, state.handoff.token, {
-      onOpen: () => dispatch(eventToAction({ type: "connection-open" })),
+      onOpen: () => {
+        // 연결이 열리면 대기 중인 재연결 예약을 취소한다(중복 재연결 방지).
+        if (reconnectTimerId != null) {
+          clearTimeout(reconnectTimerId);
+          reconnectTimerId = null;
+        }
+        dispatch(eventToAction({ type: "connection-open" }));
+      },
       onMessage: (parsed) => {
         const action = eventToAction(parsed);
         if (action) dispatch(action);
+        if (parsed && parsed.type === "checks_pending") {
+          animatedServerCheckIds.clear();
+        }
+        if (parsed && parsed.type === "check_rolled") {
+          animateRolledCheck(parsed.check);
+        }
         // 서버가 굴린 이번 라운드 판정을 "운명" 주사위로 연출(visibility=player만).
         // 결과는 resolution 내레이션 payload의 checks로 전달된다.
         if (parsed && parsed.type === "narration" && parsed.narration) {
@@ -880,10 +1143,16 @@
     });
   }
 
+  // 대기 중인 재연결 예약 id. close가 연달아 와도 재연결은 한 번만 예약된다.
+  let reconnectTimerId = null;
+
   function scheduleReconnect() {
     // 종료된 세션은 재연결하지 않는다(요구사항 9.4).
     if (state.ended) return;
-    setTimeout(() => {
+    // 이미 재연결이 예약되어 있으면 새로 쌓지 않는다(타이머 중복 방지).
+    if (reconnectTimerId != null) return;
+    reconnectTimerId = setTimeout(() => {
+      reconnectTimerId = null;
       if (!state.ended) openChannel();
     }, RECONNECT_INTERVAL_MS);
   }
@@ -928,11 +1197,17 @@
     );
   }
 
+  // 커맨드를 전송하고 성공 여부를 반환한다. 채널이 없거나 send가 던지면 false를
+  // 반환하고 전달 실패 안내를 즉시 표시한다 — 호출자는 실패 시 로컬 에코를
+  // dispatch하지 않아 화면과 서버 상태가 갈라지지 않는다.
   function sendCommand(cmd) {
     try {
-      if (channel) channel.send(cmd);
+      if (!channel) throw new Error("no channel");
+      channel.send(cmd);
+      return true;
     } catch {
-      /* 전송 실패는 서버 delivery_failed로 표면화된다. */
+      dispatch({ type: "DELIVERY_FAILED", failedType: "send" });
+      return false;
     }
   }
 
@@ -967,8 +1242,8 @@
     // 행동 확정: canConfirm이 허용할 때만 전송 + 로컬 에코한다(불허면 둘 다 안 함, 요구사항 3.4).
     if (confirmText && perm.canConfirm) {
       const c = buildConfirmCommand(confirmText);
-      if (c) {
-        sendCommand(c);
+      // 전송이 실제로 성공했을 때만 로컬 에코를 남긴다(실패 시 화면-서버 불일치 방지).
+      if (c && sendCommand(c)) {
         dispatch({ type: "CONFIRM_ACTION", playerId: viewerPlayerId, action: c.action });
       }
     }
@@ -981,8 +1256,10 @@
   passBtn.addEventListener("click", () => {
     if (!canSend()) return;
     if (!permission().canPass) return;
-    sendCommand(buildPassCommand());
-    dispatch({ type: "PASS", playerId: viewerPlayerId });
+    // 전송이 실제로 성공했을 때만 로컬 에코를 남긴다(실패 시 화면-서버 불일치 방지).
+    if (sendCommand(buildPassCommand())) {
+      dispatch({ type: "PASS", playerId: viewerPlayerId });
+    }
   });
 
   // 수정: 전송만(서버 readiness로 반영) (요구사항 6.4) — canRevise 게이팅(요구사항 3.4)
@@ -1021,6 +1298,129 @@
     return entry && typeof entry.characterName === "string" ? entry.characterName : "";
   }
 
+  function renderSettledDice(check, dieRow, caption) {
+    const rolls = Array.isArray(check.rolls) && check.rolls.length > 0 ? check.rolls : [check.roll];
+    const dice = rolls.map((roll, i) => {
+      const die = document.createElement("span");
+      die.className = "fate-die settled";
+      die.setAttribute("aria-label", `운명 주사위 ${fsign(roll)}`);
+      die.append(
+        textSpan("fate-face", fsign(roll)),
+        textSpan("fate-label", rolls.length === 2 ? (i + 1) + "차" : "판정"),
+      );
+      return die;
+    });
+    if (rolls.length === 2) {
+      let keptIdx = rolls.findIndex((r) => r === check.roll);
+      if (keptIdx < 0) {
+        keptIdx = check.advantage === "advantage"
+          ? (rolls[0] >= rolls[1] ? 0 : 1)
+          : (rolls[0] <= rolls[1] ? 0 : 1);
+      }
+      dice.forEach((die, i) => die.classList.add(i === keptIdx ? "kept" : "dropped"));
+    }
+    dieRow.replaceChildren(...dice);
+    const diff = DIFF_LABELS[check.difficulty] || check.difficulty;
+    const outcome = OUTCOME_LABELS[check.outcome] || check.outcome || "";
+    caption.textContent = outcome ? `난이도 ${diff} · 결과 ${outcome}` : `난이도 ${diff}`;
+  }
+
+  function renderPendingDice(check, dieRow, caption) {
+    const pendingDie = document.createElement("span");
+    pendingDie.className = "fate-die";
+    pendingDie.setAttribute("aria-label", "아직 굴리지 않은 운명 주사위");
+    pendingDie.append(
+      textSpan("fate-face", "?"),
+      textSpan("fate-label", "대기"),
+    );
+    dieRow.appendChild(pendingDie);
+    const ownerName = check.characterName || "플레이어";
+    if (check.playerId === viewerPlayerId) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "roll-btn";
+      btn.textContent = "굴리기";
+      btn.disabled = !canSend();
+      dieRow.appendChild(btn);
+      btn.addEventListener("click", () => {
+        const cmd = buildRollCheckCommand(check.checkId);
+        // 전송이 성공했을 때만 버튼을 잠근다(실패 시 다시 굴리기를 시도할 수 있게).
+        if (cmd && sendCommand(cmd)) {
+          btn.disabled = true;
+        }
+      });
+      caption.textContent = "당신의 판정입니다.";
+    } else {
+      caption.textContent = `${ownerName}의 굴림을 기다리는 중`;
+    }
+  }
+
+  function renderRollingChecks() {
+    const checks = Array.isArray(state.rollingChecks) ? state.rollingChecks : [];
+    if (checks.length === 0) {
+      if (state.phase === Phase.ROLLING) {
+        checkTray.replaceChildren();
+        checkBar.hidden = true;
+      }
+      return;
+    }
+    checkBar.hidden = false;
+    checkTray.replaceChildren();
+    for (const check of checks) {
+      const group = document.createElement("div");
+      group.className = "check-group";
+      group.dataset.checkId = String(check.checkId || "");
+      const attrLabel = check.attributeLabel || ATTR_LABELS[check.attribute] || check.attribute;
+      const whoName = typeof check.characterName === "string" ? check.characterName.trim() : "";
+      const who = document.createElement("div");
+      who.className = "check-who";
+      who.textContent = whoName ? `${whoName} · ${attrLabel}` : attrLabel;
+      const dieRow = document.createElement("div");
+      dieRow.className = "check-dice";
+      const caption = document.createElement("div");
+      caption.className = "caption";
+      group.append(who, dieRow, caption);
+      checkTray.appendChild(group);
+      if (check.status === "rolled" && typeof check.roll === "number") {
+        renderSettledDice(check, dieRow, caption);
+      } else {
+        renderPendingDice(check, dieRow, caption);
+      }
+    }
+  }
+
+  function animateRolledCheck(check) {
+    if (!check || !check.checkId || typeof check.roll !== "number") return;
+    animatedServerCheckIds.add(check.checkId);
+    const findGroup = () =>
+      Array.from(checkTray.querySelectorAll("[data-check-id]"))
+        .find((el) => el.dataset.checkId === String(check.checkId));
+    let group = findGroup();
+    if (!group) {
+      renderRollingChecks();
+      group = findGroup();
+    }
+    if (!group) return;
+    const dieRow = group.querySelector(".check-dice");
+    const caption = group.querySelector(".caption");
+    if (!dieRow || !caption) return;
+    const rolls = Array.isArray(check.rolls) && check.rolls.length > 0 ? check.rolls : [check.roll];
+    const dice = rolls.map((_, i) => {
+      const die = document.createElement("span");
+      die.className = "fate-die rolling";
+      die.append(
+        textSpan("fate-face", String(frand(-4, 4))),
+        textSpan("fate-label", rolls.length === 2 ? (i + 1) + "차" : "판정"),
+      );
+      return die;
+    });
+    dieRow.replaceChildren(...dice);
+    caption.textContent = "굴리는 중...";
+    window.setTimeout(() => {
+      renderSettledDice(check, dieRow, caption);
+    }, 650);
+  }
+
   // 판정 하나의 DOM을 만들고 주사위 연출을 수행하는 내부 실행기를 돌려준다.
   // manual=true면 "굴리기" 버튼을 노출하고, 버튼을 눌러야 연출이 시작된다(본인 주사위).
   function renderCheck(check, manual) {
@@ -1053,10 +1453,11 @@
         const die = document.createElement("div");
         die.className = "fate-die rolling";
         die.setAttribute("role", "img");
-        die.innerHTML =
-          `<span class="fate-type">${esc(attrLabel)}</span>` +
-          `<span class="fate-face">…</span>` +
-          `<span class="fate-label">${rolls.length === 2 ? (i + 1) + "차" : "판정"}</span>`;
+        die.replaceChildren(
+          textSpan("fate-type", attrLabel),
+          textSpan("fate-face", "…"),
+          textSpan("fate-label", rolls.length === 2 ? (i + 1) + "차" : "판정"),
+        );
         dieRow.appendChild(die);
         return die;
       });
@@ -1124,7 +1525,9 @@
   // resolution 내레이션이 실어 온 이번 라운드 판정을 연출한다. 서버가 이미
   // visibility="player"만 골라 보내므로 그대로 쓰되, 같은 판정 재전송은 시그니처로 막는다.
   let lastCheckSig = "";
+  const animatedServerCheckIds = new Set();
   function maybeAnimateChecks(checks) {
+    if (animatedServerCheckIds.size > 0) return;
     if (!Array.isArray(checks) || checks.length === 0) return;
     const sig = JSON.stringify(
       checks.map((c) => [c.characterName, c.attribute, c.difficulty, c.advantage, c.rolls, c.roll, c.outcome]),
@@ -1165,9 +1568,14 @@
         return `${p.label ? p.label + " " : ""}d${p.sides} → ${p.result}${tag}`;
       });
       const total = plans.reduce((s, p) => s + p.result, 0);
-      resultEl.innerHTML =
-        `결과: ${parts.map((t) => `<b>${t}</b>`).join(" · ")}` +
-        (plans.length > 1 ? ` (합계 ${total})` : "");
+      resultEl.replaceChildren(document.createTextNode("결과: "));
+      parts.forEach((part, index) => {
+        if (index > 0) appendText(resultEl, " · ");
+        const strong = document.createElement("b");
+        strong.textContent = part;
+        resultEl.appendChild(strong);
+      });
+      if (plans.length > 1) appendText(resultEl, ` (합계 ${total})`);
     };
     const run = async (specs) => {
       setBusy(true);

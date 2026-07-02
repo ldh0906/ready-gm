@@ -460,11 +460,54 @@
   const newAbortController = () =>
     window.__lobbyNewAbortController ? window.__lobbyNewAbortController() : new AbortController();
   const getClipboard = () => window.__lobbyClipboard || (typeof navigator !== "undefined" ? navigator.clipboard : null);
+  const HANDOFF_CREDENTIALS_KEY = "ready-gm:handoff";
+
+  function viewerIdOf(handoff) {
+    if (!handoff) return "";
+    return handoff.playerId || handoff.hostPlayerId || "";
+  }
+
+  function withStoredCredentials(handoff) {
+    try {
+      const raw = sessionStorage.getItem(HANDOFF_CREDENTIALS_KEY);
+      if (!raw) return handoff;
+      const stored = JSON.parse(raw);
+      if (!stored || stored.roomId !== handoff.roomId) return handoff;
+      const viewer = viewerIdOf(handoff);
+      const storedViewer = viewerIdOf(stored);
+      if (viewer && storedViewer && viewer !== storedViewer) return handoff;
+      return {
+        ...handoff,
+        hostPlayerId: handoff.hostPlayerId || stored.hostPlayerId || "",
+        playerId: handoff.playerId || stored.playerId || "",
+        token: handoff.token || stored.token || "",
+        ticket: handoff.ticket || stored.ticket || "",
+      };
+    } catch {
+      return handoff;
+    }
+  }
+
+  function saveHandoffCredentials(handoff) {
+    try {
+      sessionStorage.setItem(
+        HANDOFF_CREDENTIALS_KEY,
+        JSON.stringify({
+          roomId: handoff.roomId || "",
+          hostPlayerId: handoff.hostPlayerId || "",
+          playerId: handoff.playerId || handoff.hostPlayerId || "",
+          token: handoff.token || "",
+          ticket: handoff.ticket || "",
+        }),
+      );
+    } catch {
+      // Session storage can be unavailable in private/embedded contexts.
+    }
+  }
 
   // ---- 상태: 단일 진실 원천 ----------------------------------------------
-  // 인계는 URL 쿼리에서 1회 읽는다. 토큰은 build*Request·buildGameHandoff가
-  // x-playtest-token 헤더/쿼리로 전달하며, 그 외 인증은 없다(MVP).
-  let state = createInitialState(parseHandoff(location.search));
+  // 인계는 URL 쿼리에서 식별자만 읽고, 같은 탭의 credential은 sessionStorage에서 합친다.
+  let state = createInitialState(withStoredCredentials(parseHandoff(location.search)));
   let channel = null;
   let sessionTimer = null;
   let navigated = false;
@@ -795,15 +838,14 @@
       params.set("roomId", h.roomId);
       params.set("hostPlayerId", h.hostPlayerId);
       if (h.playerId) params.set("playerId", h.playerId);
-      if (h.token) params.set("token", h.token);
-      // 서버 발급 연결 티켓이 있으면 게임 화면으로 함께 인계한다(auth-hardening).
-      if (h.ticket) params.set("ticket", h.ticket);
+      saveHandoffCredentials(state.handoff);
       location.assign(`/game/?${params.toString()}`);
     }
 
     // 캐릭터 시트 화면 이동 1회 (멀티플레이어 흐름: character_setup 수신 → 각자 자기 시트로)
     if (state.characterSetupDone && !characterNavigated) {
       characterNavigated = true;
+      saveHandoffCredentials(state.handoff);
       location.assign(`/character/${buildCharacterSearch(state.handoff)}`);
     }
   }
@@ -847,7 +889,10 @@
 
   // 초대 링크 조회 → 성공 시 방 정보 체인 (요구사항 2.x, 4.x)
   async function runInvite() {
-    const { outcome, res } = await sendRequest("INVITE", buildInviteRequest(state.handoff.roomId, state.handoff.token));
+    const { outcome, res } = await sendRequest(
+      "INVITE",
+      buildInviteRequest(state.handoff.roomId, state.handoff.token, state.handoff.ticket),
+    );
     if (outcome === "success") {
       const body = await readJson(res);
       const inviteLink = body && typeof body.inviteLink === "string" ? body.inviteLink : "";
@@ -899,13 +944,15 @@
   //  - onClose()           : 연결 종료
   function defaultConnect(roomId, token, handlers) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const auth = token ? `&token=${encodeURIComponent(token)}` : "";
-    // viewer 신원(playerId || hostPlayerId)을 함께 보내 서버가 접속자를 식별하고
-    // 호스트 전용 시작을 게이트할 수 있게 한다(멀티플레이어 흐름).
+    // 서버 발급 연결 티켓으로 접속자 신원을 식별한다(auth-hardening): 서버는 이제
+    // 쿼리 playerId가 아니라 ticket에서 신원을 도출하고 호스트 전용 시작을 게이트한다.
+    // playerId는 UI 표시/호환용으로만 함께 보낸다(권한 판단에는 쓰이지 않음).
+    const ticket = state.handoff && state.handoff.ticket ? state.handoff.ticket : "";
+    const tk = ticket ? `&ticket=${encodeURIComponent(ticket)}` : "";
     const viewerId = effectiveViewerId(state.handoff);
     const who = viewerId ? `&playerId=${encodeURIComponent(viewerId)}` : "";
     const ws = new WebSocket(
-      `${proto}://${location.host}/lobby/ws?roomId=${encodeURIComponent(roomId)}${who}${auth}`,
+      `${proto}://${location.host}/lobby/ws?roomId=${encodeURIComponent(roomId)}${who}${tk}`,
     );
     ws.onopen = () => handlers.onOpen();
     ws.onmessage = (ev) => {
@@ -928,7 +975,14 @@
 
   function openChannel() {
     channel = connect(state.handoff.roomId, state.handoff.token, {
-      onOpen: () => dispatch(eventToAction({ type: "connection-open" })),
+      onOpen: () => {
+        // 연결이 열리면 대기 중인 재연결 예약을 취소한다(중복 재연결 방지).
+        if (reconnectTimerId != null) {
+          clearTimeout(reconnectTimerId);
+          reconnectTimerId = null;
+        }
+        dispatch(eventToAction({ type: "connection-open" }));
+      },
       onMessage: (parsed) => {
         const action = eventToAction(parsed);
         if (action) dispatch(action);
@@ -940,9 +994,15 @@
     });
   }
 
+  // 대기 중인 재연결 예약 id. close가 연달아 와도 재연결은 한 번만 예약된다.
+  let reconnectTimerId = null;
+
   function scheduleReconnect() {
     if (state.handoffDone) return;
-    setTimeout(() => {
+    // 이미 재연결이 예약되어 있으면 새로 쌓지 않는다(타이머 중복 방지).
+    if (reconnectTimerId != null) return;
+    reconnectTimerId = setTimeout(() => {
+      reconnectTimerId = null;
       if (!state.handoffDone) openChannel();
     }, RECONNECT_INTERVAL_MS);
   }

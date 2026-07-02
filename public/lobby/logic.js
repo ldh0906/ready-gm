@@ -288,13 +288,13 @@ export function createInitialState(handoff) {
 /**
  * 페이지 URL 쿼리 문자열에서 인계 값을 추출한다.
  *
- * 선행 `?`가 있어도 없어도 받아들이며, `roomId`·`hostPlayerId`·`playerId`·`token`·`ticket`을 공백 제거 후
- * 추출한다. 토큰·티켓은 트림 후 비어 있으면 `""`로 둔다. (요구사항 1.1, 1.2, 1.5)
+ * 선행 `?`가 있어도 없어도 받아들이며, `roomId`·`hostPlayerId`·`playerId`와 legacy
+ * `token`/`ticket` 값을 공백 제거 후 추출한다. 새 navigation URL은 token/ticket을 싣지 않고
+ * 같은 탭 credential storage에서 복원한다. (요구사항 1.1, 1.2, 1.5)
  *
  * `playerId`는 초대 입장 플레이어가 자기 신원으로 로비에 들어올 때 전달된다(멀티플레이어 흐름).
- * `ticket`은 서버 발급 연결 티켓으로 캐릭터/게임 화면까지 흐른다(auth-hardening).
  *
- * @param {string} search 쿼리 문자열(예: "?roomId=r1&hostPlayerId=h1&token=t")
+ * @param {string} search 쿼리 문자열(예: "?roomId=r1&hostPlayerId=h1")
  * @returns {Handoff}
  */
 export function parseHandoff(search) {
@@ -362,6 +362,18 @@ export function buildAuthHeaders(token) {
   return {};
 }
 
+/**
+ * 연결 티켓으로 인증 헤더를 구성한다.
+ * @param {string} ticket
+ * @returns {Record<string, string>}
+ */
+export function buildTicketHeaders(ticket) {
+  if (isNonEmptyString(ticket)) {
+    return { "x-connection-ticket": ticket };
+  }
+  return {};
+}
+
 // ---------------------------------------------------------------------------
 // REST 요청 빌더 (Request Building) — 작업 2.2
 // ---------------------------------------------------------------------------
@@ -370,13 +382,14 @@ export function buildAuthHeaders(token) {
  * `GET /rooms/:id/invite` 요청 명세를 구성한다. (요구사항 2.1, 10.1, 10.2)
  * @param {string} roomId
  * @param {string} token
+ * @param {string=} ticket
  * @returns {{ url: string, method: string, headers: Record<string, string> }}
  */
-export function buildInviteRequest(roomId, token) {
+export function buildInviteRequest(roomId, token, ticket) {
   return {
     url: "/rooms/" + encodeURIComponent(roomId) + "/invite",
     method: "GET",
-    headers: buildAuthHeaders(token),
+    headers: { ...buildAuthHeaders(token), ...buildTicketHeaders(ticket) },
   };
 }
 
@@ -897,32 +910,24 @@ export function detectSessionActive(turnState) {
 /**
  * 게임 화면 인계 페이로드를 구성한다.
  *
- * `roomId`·`hostPlayerId`를 담고, 토큰이 비어 있지 않으면 `token`도 포함한다.
+ * `roomId`·`hostPlayerId`를 담는다.
  * viewer의 유효 신원(`effectiveViewerId`)이 비어 있지 않으면 `playerId`로 포함해
- * 게임 화면이 합류 플레이어의 본인 신원을 표시하게 한다. 서버 발급 연결 티켓이 비어
- * 있지 않으면 `ticket`으로 포함한다(auth-hardening: 게임 `/ws` 연결 식별에 쓰임).
+ * 게임 화면이 합류 플레이어의 본인 신원을 표시하게 한다.
  * (요구사항 10.3, 10.4)
  *
  * @param {Handoff} handoff
- * @returns {{ roomId: string, hostPlayerId: string, token?: string, playerId?: string, ticket?: string }}
+ * @returns {{ roomId: string, hostPlayerId: string, playerId?: string }}
  */
 export function buildGameHandoff(handoff) {
-  /** @type {{ roomId: string, hostPlayerId: string, token?: string, playerId?: string, ticket?: string }} */
+  /** @type {{ roomId: string, hostPlayerId: string, playerId?: string }} */
   const payload = {
     roomId: handoff ? handoff.roomId : "",
     hostPlayerId: handoff ? handoff.hostPlayerId : "",
   };
-  if (handoff && isNonEmptyString(handoff.token)) {
-    payload.token = handoff.token;
-  }
   // viewer 유효 신원(playerId 우선, 없으면 hostPlayerId)을 게임 화면에 전달한다.
   const viewerId = effectiveViewerId(handoff);
   if (isNonEmptyString(viewerId)) {
     payload.playerId = viewerId;
-  }
-  // 서버 발급 연결 티켓이 있으면 게임 화면으로 함께 인계한다(auth-hardening).
-  if (handoff && isNonEmptyString(handoff.ticket)) {
-    payload.ticket = handoff.ticket;
   }
   return payload;
 }
@@ -930,29 +935,20 @@ export function buildGameHandoff(handoff) {
 /**
  * 캐릭터 시트 화면(`/character/`) 인계 쿼리 문자열을 구성한다.
  *
- * `?roomId=…&playerId=…&token=…&ticket=…` 형태로, 토큰·티켓은 각각 비어 있지 않을 때만 포함한다.
+ * `?roomId=…&playerId=…` 형태로, 토큰·티켓은 URL에 포함하지 않는다.
  * `playerId`는 viewer의 유효 신원(`playerId` 우선, 없으면 `hostPlayerId`)이며, 각 값은 URL 인코딩된다.
  * `ticket`은 서버 발급 연결 티켓(auth-hardening)으로 캐릭터 화면이 player-acting REST 요청에 실어 보낸다.
  * `character_setup` 이벤트 수신 시 각 클라이언트가 자기 캐릭터 시트로 이동하는 데 쓴다.
  *
  * @param {Handoff} handoff
- * @returns {string} 선행 "?"를 포함한 쿼리 문자열(예: "?roomId=r1&playerId=p1&token=t")
+ * @returns {string} 선행 "?"를 포함한 쿼리 문자열(예: "?roomId=r1&playerId=p1")
  */
 export function buildCharacterSearch(handoff) {
   const roomId = handoff ? trimToString(handoff.roomId) : "";
   const playerId = effectiveViewerId(handoff);
-  const token = handoff ? trimToString(handoff.token) : "";
-  const ticket = handoff ? trimToString(handoff.ticket) : "";
   const params = new URLSearchParams();
   params.set("roomId", roomId);
   params.set("playerId", playerId);
-  if (token.length >= 1) {
-    params.set("token", token);
-  }
-  // 서버 발급 연결 티켓은 비어 있지 않을 때만 포함한다(auth-hardening).
-  if (ticket.length >= 1) {
-    params.set("ticket", ticket);
-  }
   return "?" + params.toString();
 }
 

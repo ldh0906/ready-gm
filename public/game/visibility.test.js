@@ -22,7 +22,7 @@ const connectionGen = fc.constantFrom(
   ConnectionStatus.DISCONNECTED,
 );
 const phaseGen = fc.oneof(
-  fc.constantFrom(Phase.FREE_CHAT, Phase.READY_CHECK, Phase.RESOLVING, Phase.ENDED),
+  fc.constantFrom(Phase.FREE_CHAT, Phase.READY_CHECK, Phase.RESOLVING, Phase.ROLLING, Phase.ENDED),
   fc.constant(null),
   fc.string(),
 );

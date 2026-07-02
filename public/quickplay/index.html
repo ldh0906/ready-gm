@@ -102,18 +102,34 @@
   const TOKEN = new URLSearchParams(location.search).get("token") || "";
   let ws=null, roomId=null, playerId=null, ticket=null, myName="";
 
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
-  function append(paneId, cls, html) {
+  function append(paneId, cls, parts) {
     const pane = $(paneId);
     const d = document.createElement("div");
     d.className = (paneId === "story" ? "gm " : "li ") + cls;
-    d.innerHTML = html;
+    for (const part of parts) {
+      d.appendChild(typeof part === "string" ? document.createTextNode(part) : part);
+    }
     pane.appendChild(d);
     while (pane.childElementCount > MAX_ENTRIES) pane.removeChild(pane.firstChild);
     pane.scrollTop = pane.scrollHeight;
   }
-  const story = (cls, who, text) => append("story", cls, `<span class="who">[GM · ${esc(who)}]</span>` + esc(text));
-  const side  = (cls, html) => append("side", cls, html);
+  function named(prefix, text) {
+    const el = document.createElement(prefix === "strong" ? "b" : "span");
+    if (prefix !== "strong") el.className = prefix;
+    el.textContent = text;
+    return el;
+  }
+  const story = (cls, who, text) => append("story", cls, [named("who", `[GM · ${who}]`), String(text)]);
+  const side  = (cls, text) => append("side", cls, [String(text)]);
+  const chatLine = (c) => {
+    const parts = [named("strong", c.characterName)];
+    const dn = c.displayName;
+    if (typeof dn === "string" && dn.trim().length > 0 && dn !== c.characterName) {
+      parts.push(named("chat-handle", `(${dn})`));
+    }
+    parts.push(`: ${c.text}`);
+    append("side", "chat", parts);
+  };
 
   $("start").onclick = async () => {
     $("start").disabled = true;
@@ -131,16 +147,15 @@
     $("setup").style.display = "none";
     $("app").classList.add("live");
     $("controls").classList.add("live");
-    side("sys", `시나리오: ${esc(data.scenario.title)}`);
+    side("sys", `시나리오: ${data.scenario.title}`);
     connect();
   };
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const auth = TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : "";
     // Authenticate the socket with the server-issued connection ticket; the
     // server derives our room/player identity from it (never from these params).
-    ws = new WebSocket(`${proto}://${location.host}/ws?ticket=${encodeURIComponent(ticket)}${auth}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws?ticket=${encodeURIComponent(ticket)}`);
     ws.onopen  = () => $("conn").textContent = "연결됨";
     ws.onclose = () => $("conn").textContent = "연결 끊김";
     ws.onmessage = (ev) => {
@@ -163,13 +178,7 @@
     if (s.chatLog.length < chatCount) chatCount = 0;
     for (let i=chatCount; i<s.chatLog.length; i++) {
       const c = s.chatLog[i];
-      const cn = esc(c.characterName);
-      const dn = c.displayName;
-      if (typeof dn === "string" && dn.trim().length > 0 && dn !== c.characterName) {
-        side("chat", `<b>${cn}</b><span class="chat-handle">(${esc(dn)})</span>: ${esc(c.text)}`);
-      } else {
-        side("chat", `<b>${cn}</b>: ${esc(c.text)}`);
-      }
+      chatLine(c);
     }
     chatCount = s.chatLog.length;
 
@@ -182,8 +191,15 @@
   $("chat").onclick = () => { const t=$("msg").value.trim(); if(t){ send({type:"chat",text:t}); $("msg").value=""; } };
   // Local-echo confirmed actions / passes so the player's own moves are visible
   // (they live in readiness, not the chat log, so the server never echoes them).
-  $("confirm").onclick = () => { const t=$("msg").value.trim(); if(t){ send({type:"confirm",action:t}); side("act", `🗡 <b>${esc(myName)}</b> 행동 확정: ${esc(t)}`); $("msg").value=""; } };
-  $("pass").onclick = () => { send({type:"pass"}); side("pass", `${esc(myName)} — 패스`); };
+  $("confirm").onclick = () => {
+    const t=$("msg").value.trim();
+    if(t){
+      send({type:"confirm",action:t});
+      append("side", "act", ["🗡 ", named("strong", myName), ` 행동 확정: ${t}`]);
+      $("msg").value="";
+    }
+  };
+  $("pass").onclick = () => { send({type:"pass"}); side("pass", `${myName} — 패스`); };
   $("msg").addEventListener("keydown", (e) => { if (e.key === "Enter") $("chat").click(); });
 </script>
 </body>

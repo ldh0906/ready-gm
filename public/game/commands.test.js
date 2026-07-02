@@ -15,6 +15,7 @@ import {
   buildConfirmCommand,
   buildReviseCommand,
   buildPassCommand,
+  buildRollCheckCommand,
   Phase,
 } from "./logic.js";
 
@@ -22,14 +23,14 @@ describe("game-play property tests — commands", () => {
   it("Property 8: 입력 잠금은 phase가 resolving 또는 ended일 때에만 참이다", () => {
     // Feature: game-play, Property 8: 입력 잠금은 phase가 resolving 또는 ended일 때에만 참이다
     const phaseGen = fc.oneof(
-      fc.constantFrom(Phase.FREE_CHAT, Phase.READY_CHECK, Phase.RESOLVING, Phase.ENDED),
+      fc.constantFrom(Phase.FREE_CHAT, Phase.READY_CHECK, Phase.RESOLVING, Phase.ROLLING, Phase.ENDED),
       fc.string(),
       fc.constant(null),
       fc.constant(undefined),
     );
     fc.assert(
       fc.property(phaseGen, (phase) => {
-        const expected = phase === Phase.RESOLVING || phase === Phase.ENDED;
+        const expected = phase === Phase.RESOLVING || phase === Phase.ROLLING || phase === Phase.ENDED;
         expect(isInputLocked(phase)).toBe(expected);
       }),
       { numRuns: 100 },
@@ -55,15 +56,18 @@ describe("game-play property tests — commands", () => {
         const chat = buildChatCommand(input);
         const confirm = buildConfirmCommand(input);
         const revise = buildReviseCommand(input);
+        const roll = buildRollCheckCommand(input);
 
         if (isBlank) {
           expect(chat).toBeNull();
           expect(confirm).toBeNull();
           expect(revise).toBeNull();
+          expect(roll).toBeNull();
         } else {
           expect(chat).toStrictEqual({ type: "chat", text: trimmed });
           expect(confirm).toStrictEqual({ type: "confirm", action: trimmed });
           expect(revise).toStrictEqual({ type: "revise", action: trimmed });
+          expect(roll).toStrictEqual({ type: "roll_check", checkId: trimmed });
         }
 
         // 패스는 입력과 무관하게 항상 유효.

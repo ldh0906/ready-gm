@@ -246,6 +246,8 @@
       <button id="backToLobbyBtn" type="button" aria-label="메인(로비)으로 돌아가 시나리오 변경" hidden>메인으로 돌아가기</button>
     </div>
     <p id="backToLobbyHint" class="field-guidance" hidden>시나리오를 바꾸려면 메인으로 돌아가세요. 다른 플레이어는 호스트가 다시 시작할 때까지 기다립니다.</p>
+    <!-- 로비 복귀 POST 실패 안내: 버튼이 재활성화되어 다시 시도할 수 있다. -->
+    <p id="backToLobbyError" class="notice" role="alert" hidden></p>
   </section>
 
   <!-- 인계 무효 안내 (요구사항 1.3/1.4). aria-live=assertive 라이브 영역으로
@@ -258,7 +260,7 @@
   <!-- Card_Based_Sheet 역할 카드 목록 (scenario-character-cards 요구사항 4.1~4.4).
        카드 기반 시나리오가 아니면 숨긴다(isCardBasedSheet 거짓). 미리 선택된 카드 없이
        각 카드를 roleLabel·premise(+backstoryGuidance)와 함께 렌더하고, 클릭 시 CARD_SELECTED를
-       디스패치해 단일 선택을 적용한다(직전 선택은 동기 재렌더로 즉시 해제). 모든 텍스트는 esc 이스케이프. -->
+       디스패치해 단일 선택을 적용한다(직전 선택은 동기 재렌더로 즉시 해제). 모든 텍스트는 textContent로 주입한다. -->
   <section class="card" id="cardSection" aria-labelledby="card-title" hidden>
     <h2 id="card-title">역할 카드</h2>
     <p class="field-guidance">역할 카드를 하나 선택하세요. 선택한 역할 위에 배경 서사를 작성합니다.</p>
@@ -351,6 +353,8 @@
       <!-- 호스트 전용: 전원 확정 시에만 활성. -->
       <button id="startSessionBtn" type="button" aria-label="세션 시작" hidden disabled>세션 시작</button>
     </div>
+    <!-- 시작 요청 타임아웃/네트워크 실패 안내: 버튼이 재활성화되어 다시 시도할 수 있다. -->
+    <p id="startError" class="notice" role="alert" hidden></p>
     <!-- 비호스트: 호스트의 세션 시작을 기다리는 안내. -->
     <p id="waitingForHost" class="field-guidance" role="status" aria-live="polite" hidden></p>
   </section>
@@ -430,6 +434,8 @@
   const scenarioBannerSummary = $("scenarioBannerSummary");
   const backToLobbyBtn = $("backToLobbyBtn");
   const backToLobbyHint = $("backToLobbyHint");
+  const backToLobbyError = $("backToLobbyError");
+  const startError = $("startError");
   const schemaLoading = $("schemaLoading");
   const sheetMount = $("sheetMount");
   // scenario-character-cards: 역할 카드 목록 마운트.
@@ -466,6 +472,40 @@
   // 게임 진행 화면이며, 테스트는 window.__characterNavigate로 실제 이동을 가로챈다.
   const navigate =
     window.__characterNavigate || ((search) => location.assign("/game/" + search));
+  const HANDOFF_CREDENTIALS_KEY = "ready-gm:handoff";
+
+  function withStoredCredentials(handoff) {
+    try {
+      const raw = sessionStorage.getItem(HANDOFF_CREDENTIALS_KEY);
+      if (!raw) return handoff;
+      const stored = JSON.parse(raw);
+      if (!stored || stored.roomId !== handoff.roomId) return handoff;
+      if (handoff.playerId && stored.playerId && handoff.playerId !== stored.playerId) return handoff;
+      return {
+        ...handoff,
+        token: handoff.token || stored.token || "",
+        ticket: handoff.ticket || stored.ticket || "",
+      };
+    } catch {
+      return handoff;
+    }
+  }
+
+  function saveHandoffCredentials(handoff) {
+    try {
+      sessionStorage.setItem(
+        HANDOFF_CREDENTIALS_KEY,
+        JSON.stringify({
+          roomId: handoff.roomId || "",
+          playerId: handoff.playerId || "",
+          token: handoff.token || "",
+          ticket: handoff.ticket || "",
+        }),
+      );
+    } catch {
+      // Session storage can be unavailable in private/embedded contexts.
+    }
+  }
 
   // ---- 메시지 라우팅 집합 -------------------------------------------------
   // 상태/확인 안내는 polite 라이브 영역(#statusMessage)에, 오류·거부는 assertive
@@ -494,10 +534,8 @@
   const RECORD_RESULTS = new Set(["success", ...Object.values(RecordRejection)]);
 
   // ---- 상태: 단일 진실 원천 ----------------------------------------------
-  // 인계는 URL 쿼리에서 1회 읽는다. 무효이면 안내만 표시하고 어떤 백엔드 요청도 시작하지
-  // 않는다(요구사항 1.3). 토큰은 build*Request가 x-playtest-token 헤더로, buildNextSearch가
-  // 쿼리로 전달하며 그 외 인증은 없다(MVP).
-  let state = createInitialState(parseHandoff(location.search));
+  // 인계는 URL 쿼리에서 식별자만 읽고, 같은 탭의 credential은 sessionStorage에서 합친다.
+  let state = createInitialState(withStoredCredentials(parseHandoff(location.search)));
   // 직전 사용자 의도(재시도가 어느 흐름을 다시 실행할지 결정). state.lastRequest와 함께 쓴다.
   let lastIntent = null;
   // 동적 시트 구조 재빌드 추적용: activeSchema 참조가 바뀔 때만 마운트를 다시 그린다.
@@ -755,7 +793,7 @@
   // scenario-character-cards: Card_Based_Sheet의 역할 카드 목록을 렌더한다(cardListModel → DOM).
   // 미리 선택된 카드 없이 각 카드를 roleLabel·premise(+backstoryGuidance)와 함께 그린다. 클릭 시
   // CARD_SELECTED를 디스패치해 단일 선택을 적용하고, 직전 선택은 동기 재렌더(syncCards)로 즉시 해제한다.
-  // 모든 텍스트는 esc로 이스케이프해 HTML로 해석되지 않게 한다(요구사항 4.1, 4.2, 4.4).
+  // 모든 텍스트는 textContent로 주입해 HTML로 해석되지 않게 한다(요구사항 4.1, 4.2, 4.4).
   function buildCards() {
     cardMount.replaceChildren();
     cardEls = [];
@@ -767,13 +805,20 @@
       btn.setAttribute("role", "radio");
       // 비어 있지 않은 접근성 레이블(요구사항 12.5).
       btn.setAttribute("aria-label", card.roleLabel || card.id);
-      let html =
-        '<span class="role-card-label">' + esc(card.roleLabel) + "</span>" +
-        '<span class="role-card-premise">' + esc(card.premise) + "</span>";
+      const label = document.createElement("span");
+      label.className = "role-card-label";
+      label.textContent = card.roleLabel;
+      const premise = document.createElement("span");
+      premise.className = "role-card-premise";
+      premise.textContent = card.premise;
+      const cardParts = [label, premise];
       if (card.backstoryGuidance) {
-        html += '<span class="role-card-guidance">' + esc(card.backstoryGuidance) + "</span>";
+        const guidance = document.createElement("span");
+        guidance.className = "role-card-guidance";
+        guidance.textContent = card.backstoryGuidance;
+        cardParts.push(guidance);
       }
-      btn.innerHTML = html;
+      btn.replaceChildren(...cardParts);
       const cardId = card.id;
       btn.addEventListener("click", () => {
         dispatch({ type: "CARD_SELECTED", cardId });
@@ -1023,7 +1068,7 @@
   // characterCards 폴백을 유지한다(조회 실패가 작성을 막지 않는다).
   async function doCards() {
     const outcome = await sendRequest(
-      buildCardsRequest(state.handoff.roomId, state.handoff.playerId, state.handoff.token),
+      buildCardsRequest(state.handoff.roomId, state.handoff.playerId, state.handoff.token, state.handoff.ticket),
     );
     if (classifyOutcome(outcome) === "success") {
       dispatch({ type: "CARD_HAND_RESOLVED", cards: parseCardHand(outcome.body) });
@@ -1293,6 +1338,7 @@
     if (readiness && readiness.started === true && !startedNavigated) {
       startedNavigated = true;
       stopReadinessPolling();
+      saveHandoffCredentials(state.handoff);
       navigate(buildNextSearch(state.handoff));
     }
   }
@@ -1314,22 +1360,40 @@
     }
   }
 
+  // readiness 폴링 회복 탄력성: 진행 중이면 새 요청을 쌓지 않고(in-flight guard),
+  // 각 요청은 sendRequest의 10초 타임아웃/abort를 공유하며, 연속 실패가 임계치에
+  // 도달하면 polite 라이브 영역(readinessText)에 연결 문제를 알린다.
+  let readinessInFlight = false;
+  let readinessFailureStreak = 0;
+  const READINESS_FAILURE_NOTICE_AFTER = 3;
+  const READINESS_CONNECTION_PROBLEM_MESSAGE =
+    "준비 현황을 불러오지 못하고 있습니다. 연결 상태를 확인해 주세요.";
+
   // 1회 폴링: readiness를 조회·정규화·저장한 뒤 렌더하고, started면 이동한다.
-  // fetch 오류는 무시하고 폴링을 계속한다(회복 탄력성).
+  // 개별 오류는 무시하고 폴링을 계속하되, 연속 실패는 라이브 영역으로 표면화한다.
   async function pollReadinessOnce() {
+    if (readinessInFlight) return;
+    readinessInFlight = true;
     try {
-      const res = await fetchImpl(buildReadinessRequest(state.handoff).url, {
-        method: "GET",
-        headers: buildReadinessRequest(state.handoff).headers,
-      });
-      const body = await readJson(res);
-      readiness = parseReadiness(body);
+      const req = buildReadinessRequest(state.handoff);
+      const outcome = await sendRequest({ url: req.url, method: "GET", headers: req.headers });
+      if (outcome.kind !== "response") {
+        throw new Error(outcome.kind);
+      }
+      readinessFailureStreak = 0;
+      readiness = parseReadiness(outcome.body);
       renderReadiness();
       // 로비 복귀가 요청됐으면 게임 이동보다 우선해 전원을 로비로 되돌린다.
       maybeNavigateOnReturnToLobby();
       maybeNavigateOnStarted();
     } catch {
-      // 네트워크 오류 등은 무시하고 다음 주기를 기다린다.
+      // 타임아웃·네트워크 오류: 다음 주기를 기다리되, 연속 실패면 연결 문제를 알린다.
+      readinessFailureStreak += 1;
+      if (readinessFailureStreak >= READINESS_FAILURE_NOTICE_AFTER) {
+        readinessText.textContent = READINESS_CONNECTION_PROBLEM_MESSAGE;
+      }
+    } finally {
+      readinessInFlight = false;
     }
   }
 
@@ -1343,28 +1407,32 @@
   // 서버가 세션을 실제로 시작했는지(started)를 정직하게 확인해, 시작하지 못했으면(예: 동시 세션
   // 용량 초과) 호스트를 로비 화면으로 되돌리고 실패 안내를 보여준다. 성공이면 다음 폴링이
   // started=true를 관찰해 전원을 게임 화면으로 이동시킨다.
+  const START_REQUEST_FAILED_MESSAGE =
+    "세션 시작 요청이 전달되지 않았습니다. 연결 상태를 확인하고 다시 시도해 주세요.";
+
   async function runStartSession() {
     if (startInFlight || !hostStartEnabled(readiness)) return;
     startInFlight = true;
     startSessionBtn.disabled = true;
-    let failed = false;
-    let reason = "";
-    try {
-      const req = buildStartRequest(state.handoff);
-      const res = await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
-      const body = await readJson(res);
-      const ok = body && body.ok === true && body.started === true;
-      failed = !ok;
-      // 서버가 알려준 실패 사유(AT_CAPACITY / NOT_ALL_CONFIRMED 등)를 로비로 전달해 안내한다.
-      if (!ok && body && typeof body.reason === "string") reason = body.reason;
-    } catch {
-      // 전송 오류도 시작 실패로 간주한다.
-      failed = true;
-      reason = "NETWORK";
-    } finally {
-      startInFlight = false;
+    startError.hidden = true;
+    startError.textContent = "";
+    // sendRequest가 AbortController + 10초 타임아웃을 적용하므로 응답이 없어도
+    // 버튼이 영구히 비활성으로 남지 않는다.
+    const outcome = await sendRequest(buildStartRequest(state.handoff));
+    startInFlight = false;
+    if (outcome.kind !== "response") {
+      // 타임아웃·네트워크 실패: 오류를 표시하고 버튼을 재활성화해 재시도를 허용한다.
+      // 폴링은 계속 돌므로 다른 경로(다른 기기에서의 시작 등)도 계속 관찰된다.
+      startError.hidden = false;
+      startError.textContent = START_REQUEST_FAILED_MESSAGE;
+      renderReadiness();
+      return;
     }
-    if (failed) {
+    const body = outcome.body;
+    const ok = body && body.ok === true && body.started === true;
+    if (!ok) {
+      // 서버가 알려준 실패 사유(AT_CAPACITY / NOT_ALL_CONFIRMED 등)를 로비로 전달해 안내한다.
+      const reason = body && typeof body.reason === "string" ? body.reason : "";
       stopReadinessPolling();
       goToLobby({ startErrorReason: reason || "START_FAILED" });
       return;
@@ -1383,8 +1451,7 @@
     const hostId = readiness && readiness.hostPlayerId ? readiness.hostPlayerId : "";
     if (hostId) params.set("hostPlayerId", hostId);
     if (h.playerId) params.set("playerId", h.playerId);
-    if (h.token) params.set("token", h.token);
-    if (h.ticket) params.set("ticket", h.ticket);
+    saveHandoffCredentials({ ...h, hostPlayerId: hostId });
     const reason = startErrorReason || (withError ? "1" : "");
     if (reason) params.set("startError", reason);
     const url = "/lobby/?" + params.toString();
@@ -1392,18 +1459,26 @@
   }
 
   // "메인으로 돌아가기"(호스트): 서버에 로비 복귀를 알려 캐릭터 화면의 모든 플레이어가 함께
-  // 로비로 돌아오게 한 뒤, 본인도 로비로 이동한다(에러 표시 없음). 다른 플레이어는 readiness
-  // 폴링으로 returnToLobby를 보고 따라온다.
+  // 로비로 돌아오게 한 뒤 본인도 로비로 이동한다. POST가 성공했을 때만 이동한다 —
+  // 실패 시 호스트 혼자 로비로 가고 다른 플레이어는 남는 갈림을 막는다. 실패하면
+  // 오류를 표시하고 버튼을 재활성화해 재시도할 수 있게 한다.
+  const RETURN_TO_LOBBY_FAILED_MESSAGE =
+    "로비 복귀 요청이 전달되지 않았습니다. 연결 상태를 확인하고 다시 시도해 주세요.";
+
   backToLobbyBtn.addEventListener("click", async () => {
     if (backToLobbyBtn.disabled) return;
     backToLobbyBtn.disabled = true;
-    stopReadinessPolling();
-    try {
-      const req = buildReturnToLobbyRequest(state.handoff);
-      await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
-    } catch {
-      // 전송 오류가 나도 본인은 로비로 이동한다(다른 플레이어는 다음 폴링에서 따라올 수 있다).
+    backToLobbyError.hidden = true;
+    backToLobbyError.textContent = "";
+    const outcome = await sendRequest(buildReturnToLobbyRequest(state.handoff));
+    const ok = outcome.kind === "response" && outcome.response.ok;
+    if (!ok) {
+      backToLobbyBtn.disabled = false;
+      backToLobbyError.hidden = false;
+      backToLobbyError.textContent = RETURN_TO_LOBBY_FAILED_MESSAGE;
+      return;
     }
+    stopReadinessPolling();
     goToLobby();
   });
 

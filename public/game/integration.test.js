@@ -634,7 +634,7 @@ describe("game-play integration tests — side-effect wiring", () => {
     }
     window.WebSocket = FakeWebSocket;
     try {
-      // 캐릭터 화면 인계: roomId + playerId + hostPlayerId + token.
+      // 캐릭터 화면 인계: 과거 URL token이 있어도 /ws에는 싣지 않는다.
       await loadPage({ url: "https://localhost/game/?roomId=r1&playerId=p2&hostPlayerId=h1&token=t9" });
       await flush();
 
@@ -644,9 +644,9 @@ describe("game-play integration tests — side-effect wiring", () => {
       const params = new URLSearchParams(url.slice(url.indexOf("?") + 1));
       // 관전자 playerId(=p2)가 그대로 실린다(host h1로 취급되지 않음).
       expect(params.get("playerId")).toBe("p2");
-      // 기존 파라미터(roomId, token)도 보존된다.
+      // room/player 식별은 남기되 bearer token은 URL credential로 남기지 않는다.
       expect(params.get("roomId")).toBe("r1");
-      expect(params.get("token")).toBe("t9");
+      expect(params.get("token")).toBeNull();
     } finally {
       window.WebSocket = OriginalWebSocket;
     }

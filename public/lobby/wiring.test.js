@@ -432,7 +432,8 @@ describe("room-lobby integration tests — side-effect wiring", () => {
     expect(params.get("roomId")).toBe("r1");
     // viewer 신원 = playerId(호스트 아님).
     expect(params.get("playerId")).toBe("p9");
-    expect(params.get("token")).toBe("secret");
+    expect(params.get("token")).toBeNull();
+    expect(params.has("ticket")).toBe(false);
     expect(params.has("hostPlayerId")).toBe(false);
 
     // 반복 수신해도 추가 이동은 없다(1회 보장).

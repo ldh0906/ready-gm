@@ -542,13 +542,13 @@ export function createInitialState(handoff) {
 // -- 인계 파싱·검증 · 토큰 헤더 (작업 2.1) ----------------------------------
 
 /**
- * 페이지 URL 쿼리에서 인계 값(roomId/playerId/token)을 공백 제거 후 추출한다.
+ * 페이지 URL 쿼리에서 인계 값을 공백 제거 후 추출한다.
  *
- * 선행 `?`(또는 `#`)가 있어도 없어도 받아들이며, `roomId`·`playerId`·`token`·`ticket`을 앞뒤 공백
- * 제거 후 추출한다. 키가 존재하지 않으면 빈 문자열로 취급하고, 토큰·티켓은 트림 후 비어 있으면
- * `""`로 둔다. `ticket`은 서버 발급 연결 티켓(auth-hardening)이다. (요구사항 1.1, 1.2, 1.5)
+ * 선행 `?`(또는 `#`)가 있어도 없어도 받아들이며, `roomId`·`playerId`와 legacy
+ * `token`/`ticket` 값을 앞뒤 공백 제거 후 추출한다. 새 navigation URL은 token/ticket을 싣지 않고
+ * 같은 탭 credential storage에서 복원한다. (요구사항 1.1, 1.2, 1.5)
  *
- * @param {string} search 쿼리 문자열(예: "?roomId=r1&playerId=p1&token=t")
+ * @param {string} search 쿼리 문자열(예: "?roomId=r1&playerId=p1")
  * @returns {Handoff}
  */
 export function parseHandoff(search) {
@@ -637,9 +637,10 @@ export function buildSchemaRequest(roomId, token) {
  * @param {string} roomId
  * @param {string} playerId
  * @param {string} token
+ * @param {string=} ticket
  * @returns {{ url: string, method: string, headers: Record<string, string> }}
  */
-export function buildCardsRequest(roomId, playerId, token) {
+export function buildCardsRequest(roomId, playerId, token, ticket) {
   return {
     url:
       "/rooms/" +
@@ -648,7 +649,7 @@ export function buildCardsRequest(roomId, playerId, token) {
       encodeURIComponent(toStringSafe(playerId)) +
       "/cards",
     method: "GET",
-    headers: buildAuthHeaders(token),
+    headers: { ...buildAuthHeaders(token), ...buildTicketHeaders(ticket) },
   };
 }
 
@@ -1337,10 +1338,10 @@ export function buildNextHandoff(handoff) {
 }
 
 /**
- * `?roomId=…&playerId=…&token=…&ticket=…`(토큰·티켓은 있을 때만) 쿼리 문자열을 구성한다. (요구사항 8.2)
+ * `?roomId=…&playerId=…` 쿼리 문자열을 구성한다. 토큰·티켓은 URL에 싣지 않는다. (요구사항 8.2)
  *
- * `buildNextHandoff`로 인계 페이로드를 구성한 뒤 `URLSearchParams`로 각 값을 URL 인코딩한다.
- * 토큰·티켓은 각각 비어 있지 않을 때만 쿼리에 포함한다(변형 없이). 선행 `?`를 붙여 반환한다.
+ * `buildNextHandoff`로 인계 페이로드를 구성한 뒤 URL에는 식별자만 인코딩한다.
+ * 토큰·티켓은 같은 탭의 credential storage로 이어지고 URL 쿼리에는 포함하지 않는다.
  * @param {Handoff} handoff
  * @returns {string}
  */
@@ -1349,13 +1350,6 @@ export function buildNextSearch(handoff) {
   const params = new URLSearchParams();
   params.set("roomId", next.roomId);
   params.set("playerId", next.playerId);
-  if (isNonEmptyString(next.token)) {
-    params.set("token", next.token);
-  }
-  // 서버 발급 연결 티켓은 비어 있지 않을 때만 포함한다(auth-hardening).
-  if (isNonEmptyString(next.ticket)) {
-    params.set("ticket", next.ticket);
-  }
   return "?" + params.toString();
 }
 
@@ -2012,7 +2006,7 @@ export function buildReadinessRequest(handoff) {
   return {
     url: "/rooms/" + encodeURIComponent(toStringSafe(safeHandoff.roomId)) + "/readiness",
     method: "GET",
-    headers: buildAuthHeaders(safeHandoff.token),
+    headers: { ...buildAuthHeaders(safeHandoff.token), ...buildTicketHeaders(safeHandoff.ticket) },
   };
 }
 

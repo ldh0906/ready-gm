@@ -27,6 +27,23 @@ const handoffGen = fc.record({
 });
 
 describe("character-sheet property tests — Next_Screen 인계 페이로드와 1회 인계", () => {
+  it("보안: game URL에는 token/ticket bearer 값을 싣지 않는다", () => {
+    const search = buildNextSearch({
+      roomId: "r1",
+      playerId: "p1",
+      token: "secret",
+      ticket: "ticket-1",
+    });
+    const params = new URLSearchParams(search);
+
+    expect(params.get("roomId")).toBe("r1");
+    expect(params.get("playerId")).toBe("p1");
+    expect(params.has("token")).toBe(false);
+    expect(params.has("ticket")).toBe(false);
+    expect(search).not.toContain("secret");
+    expect(search).not.toContain("ticket-1");
+  });
+
   it("Property 21: Next_Screen 인계 페이로드와 1회 인계", () => {
     // Feature: character-sheet, Property 21: Next_Screen 인계 페이로드와 1회 인계
     fc.assert(
@@ -52,22 +69,13 @@ describe("character-sheet property tests — Next_Screen 인계 페이로드와 
             expect("ticket" in payload).toBe(false);
           }
 
-          // -- 인계 쿼리(buildNextSearch): roomId·playerId(+비어있지 않은 토큰)를 URL 인코딩해 포함. --
+          // -- 인계 쿼리(buildNextSearch): roomId·playerId만 URL 인코딩해 포함. --
           const search = buildNextSearch(handoff);
           const params = new URLSearchParams(search);
           expect(params.get("roomId")).toBe(handoff.roomId);
           expect(params.get("playerId")).toBe(handoff.playerId);
-          if (handoff.token.length >= 1) {
-            expect(params.get("token")).toBe(handoff.token);
-          } else {
-            expect(params.has("token")).toBe(false);
-          }
-          // 연결 티켓도 비어있지 않을 때만 쿼리에 포함된다(auth-hardening).
-          if (handoff.ticket.length >= 1) {
-            expect(params.get("ticket")).toBe(handoff.ticket);
-          } else {
-            expect(params.has("ticket")).toBe(false);
-          }
+          expect(params.has("token")).toBe(false);
+          expect(params.has("ticket")).toBe(false);
 
           // -- 초기 상태 구성 후 confirmed 여부만 설정한다. --
           const initial = { ...createInitialState(handoff), confirmed };

@@ -161,8 +161,6 @@
   const hintEl = $("hint");
 
   const tray = createDiceTray($("diceTray"));
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-
   // 플레이 로그 기록(브라우저에 자동 보관 → 새로고침해도 직전 세션 확인 가능).
   const transcript = [];
   const LOG_KEY = "readygm-scenario-log";
@@ -171,18 +169,35 @@
     try { localStorage.setItem(LOG_KEY, transcript.join("\n")); } catch {}
   }
 
+  function textSpan(className, text) {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    return span;
+  }
+  function textBold(text) {
+    const b = document.createElement("b");
+    b.textContent = text;
+    return b;
+  }
+  function appendParts(parent, parts) {
+    for (const part of Array.isArray(parts) ? parts : [parts]) {
+      parent.appendChild(typeof part === "string" ? document.createTextNode(part) : part);
+    }
+  }
+
   function gm(cls, who, text) {
     const d = document.createElement("div");
     d.className = "gm " + cls;
-    d.innerHTML = `<span class="who">[GM · ${esc(who)}]</span>` + esc(text);
+    d.append(textSpan("who", `[GM · ${who}]`), document.createTextNode(String(text)));
     storyEl.appendChild(d);
     storyEl.scrollTop = storyEl.scrollHeight;
     record(`[GM · ${who}]\n${text}\n`);
   }
-  function log(cls, text) {
+  function log(cls, parts) {
     const d = document.createElement("div");
     d.className = "li " + cls;
-    d.innerHTML = text;
+    appendParts(d, parts);
     sideEl.appendChild(d);
     sideEl.scrollTop = sideEl.scrollHeight;
     record(`· ${d.textContent}`);
@@ -240,7 +255,7 @@
       hintEl.textContent = "먼저 하려는 행동을 입력해 주세요.";
       return;
     }
-    log("me", `🧭 <b>나</b>: ${esc(text)}`);
+    log("me", ["🧭 ", textBold("나"), `: ${text}`]);
     msgEl.value = "";
 
     // 로컬 "AI 판정관"이 능력치·난이도를 정한다.
@@ -317,14 +332,19 @@
       const result = resolveOutcome(chosen, check.difficulty);
 
       // 우측 로그: 굴림 수치 + 채택 + 결과.
-      const rollsText =
+      const rollParts =
         n === 2
-          ? `d20 [${rolls.join(", ")}] → ${check.advantage === "advantage" ? "높은" : "낮은"} 값 <b>${chosen}</b> 채택`
-          : `d20 <b>${chosen}</b>`;
-      log(
-        result.outcome === "Failure" ? "sys" : "me",
-        `🎯 ${rollsText} vs 목표 ${result.target} → <b>${esc(result.outcome)}</b>`,
-      );
+          ? [
+              `🎯 d20 [${rolls.join(", ")}] → ${check.advantage === "advantage" ? "높은" : "낮은"} 값 `,
+              textBold(String(chosen)),
+              " 채택",
+            ]
+          : ["🎯 d20 ", textBold(String(chosen))];
+      log(result.outcome === "Failure" ? "sys" : "me", [
+        ...rollParts,
+        ` vs 목표 ${result.target} → `,
+        textBold(result.outcome),
+      ]);
 
       // 장면 엔진에 결과를 적용 — 진행도/위기가 변하고 맥락 있는 후속 상황이 서술된다.
       const applied = applyOutcome(scene, {
@@ -351,7 +371,7 @@
       gm(cls, "결과", applied.narration);
     } catch (err) {
       gm("result fumble", "결과", "판정 처리 중 오류가 발생했어요. 다시 시도해 주세요.");
-      log("sys", "⚠ 판정 오류: " + esc(String(err && err.message ? err.message : err)));
+      log("sys", "⚠ 판정 오류: " + String(err && err.message ? err.message : err));
     } finally {
       pendingCheck = null;
       rollBtn.hidden = true;

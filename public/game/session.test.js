@@ -25,7 +25,7 @@ describe("game-play property tests — session end", () => {
   it("Property 11: 세션 종료 감지는 입력을 비활성화한다", () => {
     // Feature: game-play, Property 11: 세션 종료 감지는 입력을 비활성화한다
     const phaseGen = fc.oneof(
-      fc.constantFrom(Phase.FREE_CHAT, Phase.READY_CHECK, Phase.RESOLVING, Phase.ENDED),
+      fc.constantFrom(Phase.FREE_CHAT, Phase.READY_CHECK, Phase.RESOLVING, Phase.ROLLING, Phase.ENDED),
       fc.string(),
       fc.constant(undefined),
     );

@@ -205,6 +205,23 @@
       : new AbortController();
   const navigate =
     window.__joinNavigate || ((search) => location.assign("/lobby/" + search));
+  const HANDOFF_CREDENTIALS_KEY = "ready-gm:handoff";
+
+  function saveHandoffCredentials(handoff) {
+    try {
+      sessionStorage.setItem(
+        HANDOFF_CREDENTIALS_KEY,
+        JSON.stringify({
+          roomId: handoff.roomId || "",
+          playerId: handoff.playerId || "",
+          token: handoff.token || "",
+          ticket: handoff.ticket || "",
+        }),
+      );
+    } catch {
+      // Session storage can be unavailable in private/embedded contexts.
+    }
+  }
 
   // ---- 인계 입력: 경로에서 초대 토큰을, 쿼리에서 접근 토큰을 1회 읽는다. ---
   const INVITE_TOKEN = extractInviteToken(location.pathname);
@@ -276,6 +293,12 @@
       if (validated.ok) {
         // 입장 성공: 로비로 입장 플레이어 신원(playerId)과 연결 티켓(ticket)을 인계한다.
         const search = buildLobbySearch({
+          roomId: validated.roomId,
+          playerId: validated.playerId,
+          token: TOKEN,
+          ticket: validated.connectionToken,
+        });
+        saveHandoffCredentials({
           roomId: validated.roomId,
           playerId: validated.playerId,
           token: TOKEN,

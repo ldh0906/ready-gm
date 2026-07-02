@@ -21,7 +21,7 @@
 
 /**
  * 라운드 루프 단계. (src/core/types.ts의 Phase와 동일)
- * @typedef {"free_chat" | "ready_check" | "resolving" | "ended"} Phase
+ * @typedef {"free_chat" | "ready_check" | "resolving" | "rolling" | "ended"} Phase
  * - free_chat: 자유 대화 단계
  * - ready_check: 준비 체크 단계(카운트다운 표시)
  * - resolving: GM 판정/서술 중(입력 잠금 + busy 표시)
@@ -33,6 +33,7 @@ export const Phase = Object.freeze({
   FREE_CHAT: "free_chat",
   READY_CHECK: "ready_check",
   RESOLVING: "resolving",
+  ROLLING: "rolling",
   ENDED: "ended",
 });
 
@@ -87,6 +88,25 @@ export const DELIVERY_FAILED_MESSAGE = "전송에 실패해 재시도하고 있�
 /** 세션이 종료되었을 때의 안내. (요구사항 9.3) */
 export const SESSION_ENDED_MESSAGE = "세션이 종료되었습니다. 함께해 주셔서 감사합니다.";
 
+/** 서사 생성 실패(narration_failed)의 단계별 안내. 침묵 대신 실패와 재시도 방법을 알린다. */
+export const NARRATION_FAILED_MESSAGES = {
+  opening: "도입부 생성에 실패했습니다. 잠시 후 자동으로 다시 시도됩니다.",
+  ending: "마무리 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+  resolution: "GM 서사 생성이 반복 실패했습니다. 준비 완료를 다시 눌러 재시도해 주세요.",
+};
+
+/**
+ * narration_failed의 phase를 한국어 안내로 변환한다(알 수 없는 phase는 일반 안내).
+ * @param {unknown} phase
+ * @returns {string}
+ */
+export function narrationFailureMessage(phase) {
+  return (
+    NARRATION_FAILED_MESSAGES[/** @type {keyof typeof NARRATION_FAILED_MESSAGES} */ (phase)] ||
+    "GM 서사 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 타입 주석 (JSDoc Typedefs)
 // ---------------------------------------------------------------------------
@@ -137,6 +157,7 @@ export const SESSION_ENDED_MESSAGE = "세션이 종료되었습니다. 함께해
  * @property {boolean} handoffValid
  * @property {ConnectionStatus} connection
  * @property {string | null} deliveryFailedNotice delivery_failed 표시 (요구사항 8.2)
+ * @property {string | null} narrationFailedNotice narration_failed 표시(서사 생성 실패)
  * @property {boolean} turnReceived               첫 turn_state 수신 여부 (요구사항 1.4)
  * @property {number | null} roundNumber
  * @property {Phase | null} phase
@@ -147,6 +168,9 @@ export const SESSION_ENDED_MESSAGE = "세션이 종료되었습니다. 함께해
  * @property {ChatEntry[]} chatEntries             표시된 채팅(append-new-only)
  * @property {ActionEntry[]} actionLog             본인 confirm/pass 로컬 에코, MAX_ENTRIES 상한
  * @property {VisibleClock[]} clocks               최근 노출된 Progress Clock 스냅샷(노출 시나리오만)
+ * @property {any[]} characterStates               player-visible 캐릭터 상태 스냅샷(turn_state로 갱신)
+ * @property {any} blackboard                      player-visible 시나리오 블랙보드(발견한 단서/NPC/위협)
+ * @property {any[]} rollingChecks                 현재 라운드의 pending/rolled 공개 판정 목록
  * @property {boolean} ended                       Session_Ended (요구사항 9.1)
  * @property {string | null} [activePlayerId]      [intended] 활성 플레이어(없으면 null) (요구사항 2.3)
  * @property {string[]} [turnOrder]                [intended] 턴 순서(없으면 []) (요구사항 2.4)
@@ -213,6 +237,7 @@ export function createInitialState(handoff) {
     handoffValid: isHandoffValid(safeHandoff),
     connection: ConnectionStatus.DISCONNECTED,
     deliveryFailedNotice: null,
+    narrationFailedNotice: null,
     turnReceived: false,
     roundNumber: null,
     phase: null,
@@ -223,6 +248,9 @@ export function createInitialState(handoff) {
     chatEntries: [],
     actionLog: [],
     clocks: [],
+    characterStates: [],
+    blackboard: null,
+    rollingChecks: [],
     ended: false,
     // [intended] 턴 메타: turn_state 최상위 필드. 없으면 기본값 유지(단계 기반 폴백). (요구사항 2.3, 2.4, 7.2, 7.4)
     activePlayerId: null,
@@ -237,12 +265,11 @@ export function createInitialState(handoff) {
 /**
  * 페이지 URL 쿼리 문자열에서 인계 값을 추출한다.
  *
- * 선행 `?`(또는 `#`)가 있어도 없어도 받아들이며, `roomId`·`hostPlayerId`·`playerId`·`token`·`ticket`을
- * 공백 제거 후 추출한다. 토큰·티켓은 트림 후 비어 있으면 `""`로 둔다. `playerId`는 관전자(본인)
- * 식별자로, 캐릭터 화면 인계(`?roomId&playerId&token&ticket`)에서 실린다. `ticket`은 서버 발급
- * 연결 티켓(auth-hardening)이다. (요구사항 1.1, 1.2, 1.5)
+ * 선행 `?`(또는 `#`)가 있어도 없어도 받아들이며, `roomId`·`hostPlayerId`·`playerId`와 legacy
+ * `token`/`ticket` 값을 공백 제거 후 추출한다. 새 navigation URL은 token/ticket을 싣지 않고
+ * 같은 탭 credential storage에서 복원한다. (요구사항 1.1, 1.2, 1.5)
  *
- * @param {string} search 쿼리 문자열(예: "?roomId=r1&hostPlayerId=h1&token=t")
+ * @param {string} search 쿼리 문자열(예: "?roomId=r1&hostPlayerId=h1")
  * @returns {Handoff}
  */
 export function parseHandoff(search) {
@@ -302,9 +329,8 @@ export function effectivePlayerId(handoff) {
 /**
  * 연결 파라미터를 구성한다.
  *
- * `roomId`를 `encodeURIComponent`로 인코딩해 쿼리에 포함하고, 토큰이 비어 있지 않으면
- * `token`도 `encodeURIComponent`로 인코딩해 포함한다. 토큰이 비어 있으면 쿼리에 `token`을
- * 포함하지 않는다. `playerId`가 비어 있지 않으면 `playerId`도 인코딩해 포함한다(비어 있으면
+ * `roomId`를 `encodeURIComponent`로 인코딩해 쿼리에 포함한다. 글로벌 `token`은 반환값에는
+ * 보존하지만 WebSocket URL에는 절대 포함하지 않는다. `playerId`가 비어 있지 않으면 `playerId`도 인코딩해 포함한다(비어 있으면
  * 생략) — 서버 `/ws`가 룸에 속한 해당 플레이어로 소켓을 귀속한다(아니면 호스트로 폴백).
  * `ticket`이 비어 있지 않으면 `ticket`도 인코딩해 포함한다(비어 있으면 생략) — 서버 `/ws`는
  * 이 연결 티켓으로만 신원을 도출한다(auth-hardening). 반환의 `token`·`playerId`·`ticket` 필드는
@@ -323,9 +349,6 @@ export function buildConnectParams(roomId, token, playerId, ticket) {
   const safeTicket = String(ticket == null ? "" : ticket);
   const params = new URLSearchParams();
   params.set("roomId", safeRoomId);
-  if (isNonEmptyString(safeToken)) {
-    params.set("token", safeToken);
-  }
   if (isNonEmptyString(safePlayerId)) {
     params.set("playerId", safePlayerId);
   }
@@ -382,6 +405,10 @@ export function eventToAction(event) {
       // 노출 시나리오의 payload에만 실리는 clock 스냅샷은 있을 때만 포함한다
       // (없을 때 액션 형태를 동일하게 유지 → 기존 환원 계약 보존).
       if (Array.isArray(narration.clocks)) action.clocks = narration.clocks;
+      // player-visible 블랙보드 projection도 payload에 실려 올 때만 포함한다.
+      if (narration.blackboard != null && typeof narration.blackboard === "object") {
+        action.blackboard = narration.blackboard;
+      }
       return action;
     }
     case "readiness_updated":
@@ -395,6 +422,14 @@ export function eventToAction(event) {
       };
     case "delivery_failed":
       return { type: "DELIVERY_FAILED", failedType: event.failedType, detail: event.detail };
+    case "narration_failed":
+      // 서버가 명시한 서사 생성 실패(도입부/마무리/라운드 재시도 소진). 사용자에게
+      // 침묵 대신 실패와 재시도 방법을 알린다.
+      return { type: "NARRATION_FAILED", phase: event.phase, retryable: event.retryable === true };
+    case "checks_pending":
+      return { type: "CHECKS_PENDING", checks: event.checks };
+    case "check_rolled":
+      return { type: "CHECK_ROLLED", check: event.check };
     // 배선 계층이 주입하는 합성 연결 이벤트(room-lobby와 동형).
     case "connection-open":
       return { type: "CONNECTION_OPENED" };
@@ -476,6 +511,94 @@ export function describeClock(clock) {
   const rawValue = clock ? Number(clock.value) : 0;
   const value = Number.isFinite(rawValue) ? Math.max(0, Math.min(max, Math.trunc(rawValue))) : 0;
   return { name: trimToString(clock ? clock.name : ""), value, max };
+}
+
+/**
+ * 서버가 turn_state에 실어 보내는 player-visible 캐릭터 상태(Living Character
+ * Sheet) 한 건을 렌더링 가능한 안전한 형태로 정규화한다. 서버는 GM 전용
+ * 정보(기억/플래그/관계)를 이미 제외하고 보낸다; 여기서는 형태만 방어한다.
+ *
+ * @param {any} raw
+ * @returns {{ characterId: string, name: string,
+ *   conditions: Array<{ name: string, severity: number | null }>,
+ *   inventory: Array<{ name: string, tags: string[] }>,
+ *   resources: Array<{ key: string, value: number }>,
+ *   personalClocks: Array<{ name: string, value: number, max: number }> }}
+ */
+export function describeCharacterState(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const conditions = (Array.isArray(source.conditions) ? source.conditions : [])
+    .map((c) => ({
+      name: trimToString(c ? c.name : ""),
+      severity: c && Number.isFinite(Number(c.severity)) ? Math.trunc(Number(c.severity)) : null,
+    }))
+    .filter((c) => c.name.length > 0);
+  const inventory = (Array.isArray(source.inventory) ? source.inventory : [])
+    .map((item) => ({
+      name: trimToString(item ? item.name : ""),
+      tags: (Array.isArray(item && item.tags) ? item.tags : [])
+        .map(trimToString)
+        .filter((tag) => tag.length > 0),
+    }))
+    .filter((item) => item.name.length > 0);
+  const resourcesRaw =
+    source.resources && typeof source.resources === "object" ? source.resources : {};
+  const resources = Object.keys(resourcesRaw)
+    .map((key) => ({ key: trimToString(key), value: Number(resourcesRaw[key]) }))
+    .filter((entry) => entry.key.length > 0 && Number.isFinite(entry.value));
+  const personalClocks = (Array.isArray(source.personalClocks) ? source.personalClocks : [])
+    .map(describeClock)
+    .filter((clock) => clock.name.length > 0 && clock.max > 0);
+  return {
+    characterId: trimToString(source.characterId),
+    name: trimToString(source.name),
+    conditions,
+    inventory,
+    resources,
+    personalClocks,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 블랙보드 뷰 모델 (Blackboard View)
+// ---------------------------------------------------------------------------
+
+/**
+ * player-visible 시나리오 블랙보드 projection을 안전하게 정규화한다. 서버가
+ * 숨겨진 secret/미발견 clue를 이미 제외한 스냅샷만 보내므로 여기서는 형태만
+ * 방어한다: 발견한 단서(conclusion), 보이는 NPC(이름/역할/위치), 활성 위협.
+ *
+ * @param {any} raw
+ * @returns {{ clues: Array<{ id: string, conclusion: string }>,
+ *   npcs: Array<{ name: string, role: string, location: string }>,
+ *   threats: Array<{ name: string, status: string }> }}
+ */
+export function describeBlackboard(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const clues = (Array.isArray(source.clues) ? source.clues : [])
+    .map((clue) => {
+      const group = trimToString(clue ? clue.redundantPathGroup : "");
+      return {
+        id: trimToString(clue ? clue.id : ""),
+        conclusion: trimToString(clue ? clue.conclusion : ""),
+        ...(group.length > 0 ? { redundantPathGroup: group } : {}),
+      };
+    })
+    .filter((clue) => clue.conclusion.length > 0);
+  const npcs = (Array.isArray(source.npcs) ? source.npcs : [])
+    .map((npc) => ({
+      name: trimToString(npc ? npc.name : ""),
+      role: trimToString(npc ? npc.role : ""),
+      location: trimToString(npc ? npc.location : ""),
+    }))
+    .filter((npc) => npc.name.length > 0);
+  const threats = (Array.isArray(source.activeThreats) ? source.activeThreats : [])
+    .map((threat) => ({
+      name: trimToString(threat ? threat.name : ""),
+      status: trimToString(threat ? threat.status : ""),
+    }))
+    .filter((threat) => threat.name.length > 0);
+  return { clues, npcs, threats };
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +719,17 @@ export function buildReviseCommand(action) {
   return { type: "revise", action: trimmed };
 }
 
+/**
+ * 서버 권위 판정 굴림 명령을 만든다. 클라이언트는 값이 아니라 checkId만 보낸다.
+ * @param {string} checkId
+ * @returns {{ type: "roll_check", checkId: string } | null}
+ */
+export function buildRollCheckCommand(checkId) {
+  const trimmed = trimToString(checkId);
+  if (trimmed.length === 0) return null;
+  return { type: "roll_check", checkId: trimmed };
+}
+
 // ---------------------------------------------------------------------------
 // 입력 잠금·세션 종료 감지 (Input Lock / Session End) — 작업 3.10
 // ---------------------------------------------------------------------------
@@ -608,7 +742,7 @@ export function buildReviseCommand(action) {
  * @returns {boolean}
  */
 export function isInputLocked(phase) {
-  return phase === Phase.RESOLVING || phase === Phase.ENDED;
+  return phase === Phase.RESOLVING || phase === Phase.ROLLING || phase === Phase.ENDED;
 }
 
 /**
@@ -734,6 +868,11 @@ export function reduce(state, action) {
       }
       const phase = turnState.phase != null ? turnState.phase : state.phase;
       const ended = state.ended || detectSessionEnded({ phase });
+      const rollingChecks = Array.isArray(turnState.rollingChecks)
+        ? turnState.rollingChecks
+        : phase === Phase.ROLLING
+          ? state.rollingChecks
+          : [];
       return {
         ...state,
         turnReceived: true,
@@ -748,6 +887,17 @@ export function reduce(state, action) {
         chatEntries,
         narrationEntries,
         ended,
+        // player-visible 캐릭터 상태: turn_state가 실어 보낼 때만 갱신(재연결 재동기화 포함).
+        characterStates: Array.isArray(turnState.characterStates)
+          ? turnState.characterStates
+          : state.characterStates,
+        // player-visible 블랙보드(발견 단서/NPC/위협): 서버가 숨김 정보를 이미
+        // 제외한 projection만 싣는다. 실려 올 때만 갱신(재연결 재동기화 포함).
+        blackboard:
+          turnState.blackboard != null && typeof turnState.blackboard === "object"
+            ? turnState.blackboard
+            : state.blackboard,
+        rollingChecks,
         // [intended] 턴 메타 선택적 흡수: 값이 없으면 기존 상태 보존(요구사항 2.3, 2.4, 7.2, 7.4).
         activePlayerId:
           turnState.activePlayerId !== undefined ? turnState.activePlayerId : state.activePlayerId,
@@ -776,7 +926,13 @@ export function reduce(state, action) {
       const ended = state.ended || action.kind === NarrationKind.CLOSING;
       // 노출 시나리오의 narration payload는 clock 스냅샷을 함께 싣는다(있으면 갱신).
       const clocks = Array.isArray(action.clocks) ? action.clocks : state.clocks;
-      return { ...state, narrationEntries, clocks, ended };
+      // 라운드 해석이 실어 보낸 player-visible 블랙보드도 있으면 갱신한다.
+      const blackboard =
+        action.blackboard != null && typeof action.blackboard === "object"
+          ? action.blackboard
+          : state.blackboard;
+      // 서사가 실제로 도착했으므로 이전의 서사 생성 실패 안내는 지운다.
+      return { ...state, narrationEntries, clocks, blackboard, ended, narrationFailedNotice: null };
     }
 
     // -- 준비 갱신 (요구사항 5.2, 5.3) ---------------------------------------
@@ -802,6 +958,32 @@ export function reduce(state, action) {
     // -- 전달 실패 (요구사항 8.2) --------------------------------------------
     case "DELIVERY_FAILED": {
       return { ...state, deliveryFailedNotice: DELIVERY_FAILED_MESSAGE };
+    }
+
+    // -- 서사 생성 실패 (narration_failed) ------------------------------------
+    // 도입부/마무리/라운드 재시도 소진 실패를 사용자에게 표면화한다. 다음 서사가
+    // 실제로 도착하면(NARRATION) 안내를 지운다.
+    case "NARRATION_FAILED": {
+      return { ...state, narrationFailedNotice: narrationFailureMessage(action.phase) };
+    }
+
+    case "CHECKS_PENDING": {
+      return { ...state, rollingChecks: Array.isArray(action.checks) ? action.checks : [] };
+    }
+
+    case "CHECK_ROLLED": {
+      const check = action.check || {};
+      const existing = Array.isArray(state.rollingChecks) ? state.rollingChecks : [];
+      let found = false;
+      const rollingChecks = existing.map((entry) => {
+        if (!entry || entry.checkId !== check.checkId) return entry;
+        found = true;
+        return { ...entry, ...check, status: "rolled" };
+      });
+      return {
+        ...state,
+        rollingChecks: found ? rollingChecks : rollingChecks.concat([{ ...check, status: "rolled" }]),
+      };
     }
 
     // -- 본인 행동 로컬 에코 (요구사항 6.2, 6.3) -----------------------------
