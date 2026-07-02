@@ -11,3 +11,4 @@ export * from "./gm-moves.js";
 export * from "./dice.js";
 export * from "./ezfudge.js";
 export * from "./round-loop.js";
+export * from "./sinks-day-state.js";
