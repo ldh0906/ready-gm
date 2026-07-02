@@ -83,6 +83,19 @@ export function seedSceneForScenario(scenarioId: string): SceneState | null {
         exits: ["laundry_alley", "mayor_garden", "festival_ground"],
         lastGmQuestion: "몰래 다가가 파이를 노릴 건가요, 아니면 먼저 광장의 시선을 다른 곳으로 돌릴 건가요?",
       });
+    case "until-it-sinks":
+      return makeSceneState({
+        sceneId: "hotel_ballroom",
+        location: "바다를 마주한 오래된 호텔 연회장, 첫째 날 저녁 식탁 주변",
+        sceneGoal: "첫째 날 아침 해변에서 발견된 낚시꾼의 죽음을 두고 저녁 대화를 시작한다",
+        currentTension: "첫째 날 저녁, 호텔의 유일한 다른 손님이던 낚시꾼은 그날 아침 해변에서 시체로 발견되었다",
+        presentNpcs: [],
+        visibleThreats: ["고립된 섬과 불길하게 높아지는 바닷물", "사고인지 살인인지 알 수 없는 낚시꾼의 죽음"],
+        availableClues: [],
+        revealedClues: [],
+        exits: ["beach", "fisherman_grave", "hotel_front"],
+        lastGmQuestion: "누가 먼저 낚시꾼의 죽음에 대해 입을 열까요?",
+      });
     default:
       return null;
   }

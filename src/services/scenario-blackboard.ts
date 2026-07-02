@@ -111,10 +111,7 @@ function seedTerribleGeeseBlackboard(roomId: string, empty: ScenarioBlackboard):
     clues: [],
     secrets: [],
     npcs: selectedNpcs.map((npc) => ({ ...npc, attitudeByCharacter: { ...npc.attitudeByCharacter }, goals: [...npc.goals], knownSecretIds: [] })),
-    worldFlags: [
-      { key: "prank_deck", value: selectedFronts.map((front) => front.id).join(",") },
-      { key: "npc_deck", value: selectedNpcs.map((npc) => npc.npcId).join(",") },
-    ],
+    worldFlags: [],
   };
 }
 

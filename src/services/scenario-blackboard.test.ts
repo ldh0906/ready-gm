@@ -80,7 +80,7 @@ describe("seedBlackboardForScenario — terrible-geese", () => {
     expect(new Set(blackboard.npcs.map((npc) => npc.npcId)).size).toBe(3);
   });
 
-  it("keeps comedy clue webs empty and records replay flags", () => {
+  it("keeps comedy clue webs empty without leaking hidden deck flags", () => {
     const blackboard = seedBlackboardForScenario("room-goose-alpha", TERRIBLE_GEESE.id);
 
     expect(blackboard.clues).toEqual([]);
@@ -91,12 +91,8 @@ describe("seedBlackboardForScenario — terrible-geese", () => {
       "mayor_garden",
       "festival_ground",
     ]);
-    expect(blackboard.worldFlags).toEqual(
-      expect.arrayContaining([
-        { key: "prank_deck", value: blackboard.fronts.map((front) => front.id).join(",") },
-        { key: "npc_deck", value: blackboard.npcs.map((npc) => npc.npcId).join(",") },
-      ]),
-    );
+    expect(blackboard.worldFlags.some((flag) => flag.key === "prank_deck")).toBe(false);
+    expect(blackboard.worldFlags.some((flag) => flag.key === "npc_deck")).toBe(false);
   });
 
   it("maps terrible-geese to the comedy one-shot profile", () => {

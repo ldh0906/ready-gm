@@ -15,3 +15,4 @@ export * from "./scenario-scenes.js";
 export * from "./character-state-store.js";
 export * from "./blackboard-store.js";
 export * from "./turn-state-context.js";
+export * from "./sinks-event-deck.js";

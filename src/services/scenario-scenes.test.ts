@@ -1,7 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { seedBlackboardForScenario } from "./scenario-blackboard.js";
 import { seedSceneForScenario } from "./scenario-scenes.js";
-import { ASHFALL_MONASTERY, MVP_SCENARIO, TERRIBLE_GEESE, TIDEWATCH_SMUGGLERS } from "./scenario-service.js";
+import {
+  ASHFALL_MONASTERY,
+  MVP_SCENARIO,
+  TERRIBLE_GEESE,
+  TIDEWATCH_SMUGGLERS,
+  UNTIL_IT_SINKS,
+} from "./scenario-service.js";
 
 describe("seedSceneForScenario", () => {
   it("seeds the sunless-crypt opening scene with goal, NPCs, clues, and exits", () => {
@@ -53,5 +59,20 @@ describe("seedSceneForScenario", () => {
     expect(scene?.location).toContain("마을 광장");
     expect(scene?.visibleThreats).toContain("파이를 지키려는 빵집 주인의 빗자루");
     expect(scene?.exits).toEqual(["laundry_alley", "mayor_garden", "festival_ground"]);
+  });
+
+  it("seeds the until-it-sinks opening scene without clue procedures", () => {
+    const scene = seedSceneForScenario(UNTIL_IT_SINKS.id);
+
+    expect(scene).toMatchObject({
+      sceneId: "hotel_ballroom",
+      sceneGoal: "첫째 날 아침 해변에서 발견된 낚시꾼의 죽음을 두고 저녁 대화를 시작한다",
+      presentNpcs: [],
+      availableClues: [],
+      revealedClues: [],
+      exits: ["beach", "fisherman_grave", "hotel_front"],
+    });
+    expect(scene?.location).toContain("호텔 연회장");
+    expect(scene?.currentTension).toContain("첫째 날 저녁");
   });
 });
