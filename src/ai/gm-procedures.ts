@@ -64,6 +64,7 @@ export interface NarrationCritiqueInput {
   narration: string;
   resolvedChecks: readonly CheckRecord[];
   scene?: SceneState;
+  blackboard?: ScenarioBlackboard;
   safetyProfile?: SafetyProfile;
 }
 
@@ -122,8 +123,14 @@ const characterSpotlightHandler: GmProcedureHandler = {
 
 const clueRevealHandler: GmProcedureHandler = {
   id: "clue_reveal",
-  buildHint({ context, scene }) {
-    if (scene === undefined || scene.availableClues.length === 0) return undefined;
+  buildHint({ context, scene, blackboard }) {
+    const clueState =
+      blackboard !== undefined
+        ? clueStateFromBlackboard(blackboard, scene)
+        : scene !== undefined
+          ? { availableClues: scene.availableClues, alreadyRevealed: scene.revealedClues }
+          : undefined;
+    if (clueState === undefined || clueState.availableClues.length === 0) return undefined;
     const investigativeActions = context.thisRound.actions.filter(
       (action) => action.actionText !== null && INVESTIGATION_RE.test(action.actionText),
     );
@@ -135,13 +142,33 @@ const clueRevealHandler: GmProcedureHandler = {
       instruction:
         "조사 행동이 있으므로 SCENE.availableClues 중 하나를 hint/partial/full 수준으로 드러낼지 판단하세요. 이미 revealedClues에 있는 단서는 반복 공개하지 마세요.",
       data: {
-        availableClues: [...scene.availableClues],
-        alreadyRevealed: [...scene.revealedClues],
+        availableClues: [...clueState.availableClues],
+        alreadyRevealed: [...clueState.alreadyRevealed],
         investigativeCharacters: investigativeActions.map((action) => action.characterName),
       },
     };
   },
 };
+
+function clueStateFromBlackboard(
+  blackboard: ScenarioBlackboard,
+  scene?: SceneState,
+): { availableClues: string[]; alreadyRevealed: string[] } {
+  const sceneScope =
+    scene === undefined ? undefined : new Set([...scene.availableClues, ...scene.revealedClues]);
+  const scopedClues =
+    sceneScope === undefined
+      ? blackboard.clues
+      : blackboard.clues.filter((clue) => sceneScope.has(clue.id));
+  return {
+    availableClues: scopedClues
+      .filter((clue) => clue.visibility === "undiscovered")
+      .map((clue) => clue.id),
+    alreadyRevealed: scopedClues
+      .filter((clue) => clue.visibility === "discovered")
+      .map((clue) => clue.id),
+  };
+}
 
 const pressureClockHandler: GmProcedureHandler = {
   id: "pressure_clock",
@@ -254,7 +281,7 @@ export function formatGmProcedurePlan(plan: GmProcedurePlan): string {
 
 export function critiqueNarration(input: NarrationCritiqueInput): NarrationCritique {
   const warnings: NarrationCritiqueWarning[] = [];
-  const { narration, resolvedChecks, scene, safetyProfile } = input;
+  const { narration, resolvedChecks, scene, blackboard, safetyProfile } = input;
 
   if (safetyProfile !== undefined) {
     const violations = findSafetyViolations(narration, safetyProfile);
@@ -267,7 +294,18 @@ export function critiqueNarration(input: NarrationCritiqueInput): NarrationCriti
     }
   }
 
-  if (scene !== undefined) {
+  if (blackboard !== undefined) {
+    const leaked = blackboard.clues
+      .filter((clue) => clue.visibility === "undiscovered")
+      .find((clue) => narration.includes(clue.id));
+    if (leaked !== undefined) {
+      warnings.push({
+        code: "unrevealed_clue_id_leaked",
+        message: "Narration mentions a clue id that is still unrevealed in ScenarioBlackboard.",
+        detail: leaked.id,
+      });
+    }
+  } else if (scene !== undefined) {
     const leaked = scene.availableClues.find((clueId) => narration.includes(clueId));
     if (leaked !== undefined) {
       warnings.push({

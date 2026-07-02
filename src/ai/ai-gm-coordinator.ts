@@ -61,7 +61,7 @@ import {
   isClockComplete,
   type ProgressClock,
 } from "../core/progress-clock.js";
-import { revealClue, type SceneState } from "../core/scene-state.js";
+import { revealClue, syncSceneCluesFromBlackboard, type SceneState } from "../core/scene-state.js";
 import { applyFiredEffects, firedEffectsToBlackboardDeltas } from "../core/front-effects.js";
 import {
   deriveRoundMemories,
@@ -512,6 +512,10 @@ export class AiGmCoordinator {
 
   async declareRound(input: ResolveRoundInput): Promise<DeclareRoundResult> {
     const { state, scenario, characters, budget, clocks, scene, characterStates, blackboard, memories } = input;
+    const sceneForRound =
+      scene !== undefined && blackboard !== undefined
+        ? syncSceneCluesFromBlackboard(scene, blackboard)
+        : scene;
     const context = toContext(state, scenario, characters, budget, characterStates);
     const correlation: CorrelationKey = {
       sessionId: state.roomId,
@@ -527,7 +531,7 @@ export class AiGmCoordinator {
       {
         context,
         ...(clocks !== undefined ? { clocks } : {}),
-        ...(scene !== undefined ? { scene } : {}),
+        ...(sceneForRound !== undefined ? { scene: sceneForRound } : {}),
         ...(blackboard !== undefined ? { blackboard } : {}),
       },
       handlersForEnabledProcedures(profile.enabledProcedures),
@@ -545,7 +549,7 @@ export class AiGmCoordinator {
       buildCheckSelectionPrompt(
         context,
         clocks,
-        scene,
+        sceneForRound,
         procedurePlan,
         blackboard,
         memoryContext,
@@ -642,7 +646,7 @@ export class AiGmCoordinator {
       procedurePlan,
       correlation,
       ...(clocks !== undefined ? { clocks } : {}),
-      ...(scene !== undefined ? { scene } : {}),
+      ...(sceneForRound !== undefined ? { scene: sceneForRound } : {}),
       ...(characterStates !== undefined ? { characterStates } : {}),
       ...(blackboard !== undefined ? { blackboard } : {}),
       ...(memories !== undefined ? { memories } : {}),
@@ -704,9 +708,20 @@ export class AiGmCoordinator {
         : undefined;
     // Safety pre-apply gate: a proposed blackboard delta that touches a banned
     // topic never reaches the reducer (fail-closed, deterministic).
+    const proposedBlackboardDeltas =
+      blackboard !== undefined
+        ? [
+            ...decision.blackboardDeltas,
+            ...decision.revealedClues.map((clueId): BlackboardDelta => ({
+              type: "reveal_clue",
+              clueId,
+              reason: "legacy revealedClues proposal",
+            })),
+          ]
+        : decision.blackboardDeltas;
     const safeBlackboardDeltas: BlackboardDelta[] = [];
     const safetyRejectedDeltas: { delta: unknown; reason: "SAFETY_REJECTED" }[] = [];
-    for (const delta of decision.blackboardDeltas) {
+    for (const delta of proposedBlackboardDeltas) {
       if (findSafetyViolations(JSON.stringify(delta), safetyProfile).length > 0) {
         safetyRejectedDeltas.push({ delta, reason: "SAFETY_REJECTED" });
       } else {
@@ -764,6 +779,11 @@ export class AiGmCoordinator {
       narration: narrationOutcome.value.narration,
       resolvedChecks,
       ...(scene !== undefined ? { scene } : {}),
+      ...(blackboardDeltaApplication?.blackboard !== undefined
+        ? { blackboard: blackboardDeltaApplication.blackboard }
+        : blackboard !== undefined
+          ? { blackboard }
+          : {}),
       safetyProfile,
     });
     this.emitGmProcedureCritique(correlation, narrationCritique);
@@ -842,22 +862,26 @@ export class AiGmCoordinator {
     // Apply the GM's revealed clues to the scene SERVER-SIDE (the model proposes
     // which clues it surfaced in its decision; the engine moves them
     // available -> revealed), then layer the fired-clock scene effects on top.
-    if (scene !== undefined) {
-      let updatedScene = scene;
-      for (const clueId of decision.revealedClues) {
-        updatedScene = revealClue(updatedScene, clueId);
-      }
-      updatedScene = applyFiredEffects(updatedScene, fired).scene ?? updatedScene;
-      result.scene = updatedScene;
-    }
-    // A filled clock's world effects also land in the ScenarioBlackboard (not
-    // only the Scene State) so threats/clues survive as blackboard state. The
-    // deltas still pass the normal reducer, so unknown clue ids are rejected.
-    if (result.blackboard !== undefined && fired.length > 0) {
+    let blackboardAfterEffects = result.blackboard;
+    if (blackboardAfterEffects !== undefined && fired.length > 0) {
       const effectDeltas = firedEffectsToBlackboardDeltas(fired);
       if (effectDeltas.length > 0) {
-        result.blackboard = applyBlackboardDeltas(result.blackboard, effectDeltas).blackboard;
+        blackboardAfterEffects = applyBlackboardDeltas(blackboardAfterEffects, effectDeltas).blackboard;
+        result.blackboard = blackboardAfterEffects;
       }
+    }
+    if (scene !== undefined) {
+      let updatedScene = scene;
+      if (blackboardAfterEffects === undefined) {
+        for (const clueId of decision.revealedClues) {
+          updatedScene = revealClue(updatedScene, clueId);
+        }
+      }
+      updatedScene = applyFiredEffects(updatedScene, fired).scene ?? updatedScene;
+      if (blackboardAfterEffects !== undefined) {
+        updatedScene = syncSceneCluesFromBlackboard(updatedScene, blackboardAfterEffects);
+      }
+      result.scene = updatedScene;
     }
     return result;
   }

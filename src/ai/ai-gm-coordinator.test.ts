@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { makeEngineConfig } from "../core/config.js";
 import { makeCharacterState } from "../core/character-state.js";
+import { createEmptyBlackboard } from "../core/scenario-blackboard.js";
 import { createDiceService, type UniformIntSource } from "../core/dice.js";
 import { resolveCheck } from "../core/ezfudge.js";
 import { makeClock } from "../core/progress-clock.js";
@@ -1285,6 +1286,56 @@ describe("AiGmCoordinator GM procedure layer", () => {
     expect(events[0]?.hints?.some((hint) => hint.id === "character_spotlight")).toBe(true);
     expect(events[0]?.hints?.some((hint) => hint.id === "clue_reveal")).toBe(true);
     expect(events[1]?.critique?.passed).toBe(true);
+  });
+});
+
+describe("AiGmCoordinator clue state synchronization", () => {
+  it("keeps returned scene clue view consistent with blackboard reveal_clue deltas", async () => {
+    const scene = makeSceneState({
+      sceneId: "crypt-mural",
+      location: "벽화의 방",
+      sceneGoal: "아이들이 끌려간 방향을 알아낸다.",
+      availableClues: ["mural_scratch"],
+    });
+    const blackboard = {
+      ...createEmptyBlackboard("room-1", "scenario-1"),
+      clues: [
+        {
+          id: "mural_scratch",
+          conclusion: "The mural was scratched by a child.",
+          discoveryCondition: { kind: "action_intent" as const, intent: "inspect" },
+          visibility: "undiscovered" as const,
+        },
+      ],
+    };
+    const { coordinator } = makeHarness({
+      responder: phaseResponder({
+        checkSelection: {
+          text: JSON.stringify({
+            checks: [],
+            noRollRationales: [{ characterName: "보린", rationale: "단서를 조용히 확인합니다." }],
+            blackboardDeltas: [
+              { type: "reveal_clue", clueId: "mural_scratch", reason: "벽화 조사를 통해 발견" },
+            ],
+            stateChanges: [],
+          }),
+        },
+      }),
+    });
+
+    const result = await coordinator.resolveRound({
+      state: makeState(["p1"]),
+      scenario: SCENARIO,
+      characters: [makeCharacter("p1", "보린")],
+      scene,
+      blackboard,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.blackboard?.clues.find((clue) => clue.id === "mural_scratch")?.visibility).toBe("discovered");
+    expect(result.scene?.availableClues).toEqual([]);
+    expect(result.scene?.revealedClues).toEqual(["mural_scratch"]);
   });
 });
 

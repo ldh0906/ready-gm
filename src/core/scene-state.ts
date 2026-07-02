@@ -14,6 +14,7 @@
  * the hot-path prompt are explicit follow-up integration — see
  * {@link import("../ai/blackboard-scope.js")}.
  */
+import type { ScenarioBlackboard } from "./scenario-blackboard.js";
 
 /** An NPC present in the current scene. */
 export interface SceneNpc {
@@ -110,6 +111,37 @@ export function revealClue(scene: SceneState, clueId: string): SceneState {
     availableClues: scene.availableClues.filter((id) => id !== clueId),
     revealedClues: [...scene.revealedClues, clueId],
   };
+}
+
+/**
+ * Derive a scene's clue view from ScenarioBlackboard visibility while keeping
+ * the scene as the scope of clue ids relevant here. Unknown ids are preserved in
+ * their current scene bucket for backward compatibility with scene-only data.
+ */
+export function syncSceneCluesFromBlackboard(
+  scene: SceneState,
+  blackboard: ScenarioBlackboard,
+): SceneState {
+  const visibilityById = new Map(blackboard.clues.map((clue) => [clue.id, clue.visibility] as const));
+  const originalAvailable = new Set(scene.availableClues);
+  const scope = unique([...scene.availableClues, ...scene.revealedClues]);
+  const availableClues: string[] = [];
+  const revealedClues: string[] = [];
+
+  for (const clueId of scope) {
+    const visibility = visibilityById.get(clueId);
+    if (visibility === "discovered") {
+      revealedClues.push(clueId);
+    } else if (visibility === "undiscovered") {
+      availableClues.push(clueId);
+    } else if (originalAvailable.has(clueId)) {
+      availableClues.push(clueId);
+    } else {
+      revealedClues.push(clueId);
+    }
+  }
+
+  return { ...scene, availableClues, revealedClues };
 }
 
 /** Return a new scene with the GM's most recent open question set. */
