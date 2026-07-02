@@ -28,6 +28,7 @@ const BASE_CONTEXT: TurnStateContext = {
       { characterName: "보린", actionKind: "confirmed_action", actionText: "문을 밀어붙인다." },
       { characterName: "세라", actionKind: "confirmed_action", actionText: "벽화를 조사한다." },
     ],
+    chat: [],
     checks: [],
   },
   recentNarrative: [
@@ -100,6 +101,7 @@ describe("buildGmProcedurePlan", () => {
           { characterName: "보린", actionKind: "pass", actionText: null },
           { characterName: "세라", actionKind: "auto_pass", actionText: null },
         ],
+        chat: [],
         checks: [],
       },
     };

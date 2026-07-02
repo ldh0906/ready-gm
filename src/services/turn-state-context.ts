@@ -18,6 +18,7 @@
  */
 import type { ActionKind, AttributeLevel } from "../core/types.js";
 import type {
+  ChatEntry,
   CheckRecord,
   NarrativeContextEntry,
   TurnState,
@@ -89,6 +90,7 @@ export interface TurnStateContext {
   characters: ContextCharacter[];
   thisRound: {
     actions: ContextAction[];
+    chat: ChatEntry[];
     checks: CheckRecord[];
   };
   recentNarrative: NarrativeContextEntry[];
@@ -194,6 +196,7 @@ export function toContext(
         actionKind: entry.actionKind,
         actionText: entry.actionText,
       })),
+      chat: state.chatLog.map((entry) => ({ ...entry })),
       checks: state.checks.map((check) => ({ ...check })),
     },
     recentNarrative: state.narrativeContext.map((entry) => ({ ...entry })),

@@ -6,11 +6,13 @@ import { createDiceService, type UniformIntSource } from "../core/dice.js";
 import { resolveCheck } from "../core/ezfudge.js";
 import { makeClock } from "../core/progress-clock.js";
 import { makeSceneState } from "../core/scene-state.js";
+import type { SinksResolution } from "../core/sinks-day-state.js";
 import type { AttributeKey, AttributeLevel, EngineConfig } from "../core/types.js";
 import type { TurnState } from "../core/turn-state.js";
 import { InMemoryEventSink } from "../observability/event-sink.js";
 import type { AiOutputEvent, GmProcedureEvent, StateMutationEvent } from "../observability/events.js";
-import type { ContextScenario } from "../services/turn-state-context.js";
+import type { ContextScenario, TurnStateContext } from "../services/turn-state-context.js";
+import { SINKS_GENERAL_EVENT_CARDS } from "../services/sinks-event-deck.js";
 import type { Character } from "../services/types.js";
 import { FakeAiGmClient, type CompleteRequest, type FakeCompletion } from "./ai-gm-client.js";
 import { AiGmRouter } from "./ai-gm-router.js";
@@ -853,7 +855,7 @@ describe("AiGmCoordinator Korean validation", () => {
       roundNumber: 0,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [],
     });
     expect(result.ok).toBe(false);
@@ -879,7 +881,7 @@ describe("AiGmCoordinator retry policy", () => {
       roundNumber: 0,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [],
     });
 
@@ -907,7 +909,7 @@ describe("AiGmCoordinator retry policy", () => {
       roundNumber: 0,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [],
     });
 
@@ -934,7 +936,7 @@ describe("AiGmCoordinator retry policy", () => {
       roundNumber: 0,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [],
     });
 
@@ -984,7 +986,7 @@ describe("AiGmCoordinator generation methods", () => {
       roundNumber: 0,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [],
     });
     expect(result.ok).toBe(true);
@@ -1045,7 +1047,7 @@ describe("AiGmCoordinator generation methods", () => {
       roundNumber: 5,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [{ round: 4, text: "이전 라운드 서사." }],
     });
     expect(result.ok).toBe(true);
@@ -1088,7 +1090,7 @@ describe("AiGmCoordinator generation methods", () => {
         roundNumber: 5,
         scenario: SCENARIO,
         characters: [],
-        thisRound: { actions: [], checks: [] },
+        thisRound: { actions: [], chat: [], checks: [] },
         recentNarrative: [{ round: 4, text: "이전 라운드 서사." }],
       },
       undefined,
@@ -1131,7 +1133,7 @@ describe("AiGmCoordinator ai_output QA event", () => {
       roundNumber: 2,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [],
     });
     await sink.flush();
@@ -1157,7 +1159,7 @@ describe("AiGmCoordinator ai_output QA event", () => {
       roundNumber: 2,
       scenario: SCENARIO,
       characters: [],
-      thisRound: { actions: [], checks: [] },
+      thisRound: { actions: [], chat: [], checks: [] },
       recentNarrative: [],
     });
     await sink.flush();
@@ -1169,6 +1171,103 @@ describe("AiGmCoordinator ai_output QA event", () => {
     expect(outputs).toHaveLength(3);
     expect(outputs.every((e) => e.validationPassed === false)).toBe(true);
     expect(outputs.every((e) => typeof e.failureReason === "string")).toBe(true);
+  });
+});
+
+describe("AiGmCoordinator Until It Sinks facilitator", () => {
+  const sinksScenario: ContextScenario = {
+    title: "가라앉을 때까지",
+    summary: "가라앉는 섬의 호텔에서 모두가 해명을 만든다.",
+    openingSeed: "폭풍 전야의 외딴 호텔.",
+    endingCondition: "섬이 가라앉고 모든 사건이 해명되면 끝난다.",
+  };
+
+  function sinksContext(): TurnStateContext {
+    return {
+      roomId: "room-sinks-alpha",
+      roundNumber: 2,
+      scenario: sinksScenario,
+      characters: [makeCharacter("p1", "보린"), makeCharacter("p2", "아리아")],
+      thisRound: {
+        actions: [],
+        chat: [
+          {
+            playerId: "p1",
+            characterName: "보린",
+            text: "젖은 라디오는 내가 실수로 창가에 둔 탓이라고 하자.",
+            ts: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+        resolvedChecks: [],
+      },
+      recentNarrative: [],
+    } as unknown as TurnStateContext;
+  }
+
+  it("builds a day prompt with truths, unresolved ids, and revealed card text but not removed ids", async () => {
+    const prompts: string[] = [];
+    const card = SINKS_GENERAL_EVENT_CARDS.find((c) => c.id === "radio_soaked")!;
+    const truths: SinksResolution[] = [{ cardId: "dead_gull", explanation: "갈매기는 바늘을 삼켰다.", day: 3 }];
+    const { coordinator } = makeHarness({
+      responder: (req) => {
+        prompts.push(req.prompt.user);
+        return {
+          text: JSON.stringify({
+            narration: "한국어 날짜 전환과 카드 낭독입니다.",
+            resolutionProposals: [
+              { cardId: "radio_soaked", explanation: "" },
+              { cardId: "removed-secret-card", explanation: "누출" },
+              { cardId: "fisherman_found", explanation: "낚시꾼 사건은 아직 모릅니다." },
+            ],
+          }),
+        };
+      },
+    });
+
+    const result = await coordinator.facilitateSinksDay({
+      context: sinksContext(),
+      establishedTruths: truths,
+      unresolvedCardIds: ["fisherman_found", "radio_soaked"],
+      revealedCard: card,
+      targetCharacterName: "보린",
+      day: 4,
+      isFinalDay: false,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(prompts[0]).toContain("ESTABLISHED_TRUTHS");
+    expect(prompts[0]).toContain("dead_gull");
+    expect(prompts[0]).toContain("UNRESOLVED_CARD_IDS");
+    expect(prompts[0]).toContain("radio_soaked");
+    expect(prompts[0]).toContain(card.title);
+    expect(prompts[0]).toContain(card.text);
+    expect(prompts[0]).toContain("보린");
+    expect(prompts[0]).not.toContain("removedCardIds");
+    expect(prompts[0]).not.toContain("removed-secret-card");
+    if (!result.ok) return;
+    expect(result.value.resolutionProposals).toEqual([
+      { cardId: "fisherman_found", explanation: "낚시꾼 사건은 아직 모릅니다." },
+    ]);
+  });
+
+  it("withholds non-Korean sinks day narration", async () => {
+    const { coordinator } = makeHarness({
+      responder: () => ({
+        text: JSON.stringify({ narration: "English narration only.", resolutionProposals: [] }),
+      }),
+    });
+
+    const result = await coordinator.facilitateSinksDay({
+      context: sinksContext(),
+      establishedTruths: [],
+      unresolvedCardIds: ["fisherman_found"],
+      day: 2,
+      isFinalDay: false,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.reason).toBe("non_korean");
   });
 });
 

@@ -43,6 +43,7 @@ import {
 import type { TurnState } from "../core/turn-state.js";
 import type { EngineConfig } from "../core/types.js";
 import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
+import { createDiceServiceFromSpec, type DiceService } from "../core/dice.js";
 import type { TurnStateStore } from "../services/turn-state-store.js";
 import type { ClockStore } from "../services/clock-store.js";
 import { seedClocksForScenario, areClocksVisible } from "../services/scenario-clocks.js";
@@ -56,6 +57,17 @@ import type { BlackboardStore } from "../services/blackboard-store.js";
 import { seedBlackboardForScenario } from "../services/scenario-blackboard.js";
 import type { MemoryStore } from "../services/memory-store.js";
 import { resolveGameProfileForScenario } from "../core/game-profile.js";
+import {
+  advanceSinksDay,
+  applySinksResolutions,
+  assignSinksTarget,
+  canEndSinksSession,
+  createSinksDayState,
+  proposableCardIds,
+  type SinksDayState,
+} from "../core/sinks-day-state.js";
+import type { SinksDayStore } from "../services/sinks-day-store.js";
+import { buildSinksEventSchedule, type SinksEventCard } from "../services/sinks-event-deck.js";
 import { toVisibleBlackboard } from "../core/scenario-blackboard.js";
 import type { Character, Player, Room } from "../services/types.js";
 import type { Scenario } from "../services/scenario-service.js";
@@ -69,6 +81,8 @@ import type {
   DeclaredCheck,
   DeclareRoundResult,
   GenerateEndingOptions,
+  FacilitateSinksDayInput,
+  FacilitateSinksDayResult,
   Narration,
   NarrateDeclaredRoundInput,
   RoundDeclaration,
@@ -144,6 +158,15 @@ export interface OrchestratorCoordinator {
     correlation?: CorrelationKey,
     options?: GenerateEndingOptions,
   ): Promise<GenerationResult<{ closing: Narration; summary: SessionSummary }>>;
+  facilitateSinksOpening(
+    ctx: TurnStateContext,
+    openingCard: SinksEventCard,
+    correlation?: CorrelationKey,
+  ): Promise<GenerationResult<Narration>>;
+  facilitateSinksDay(
+    input: FacilitateSinksDayInput,
+    correlation?: CorrelationKey,
+  ): Promise<GenerationResult<FacilitateSinksDayResult>>;
 }
 
 /** Read-only room data the orchestrator needs to enrich commands and context. */
@@ -211,6 +234,10 @@ export interface RoomOrchestratorDeps {
   blackboardStore?: BlackboardStore;
   /** Optional per-room Memory Clerk store (summarized long-term memory). */
   memoryStore?: MemoryStore;
+  /** Optional per-room Until It Sinks day-loop store. */
+  sinksDayStore?: SinksDayStore;
+  /** Optional 1d6 dice service for Until It Sinks lowest-roll target selection. */
+  sinksDice?: DiceService;
   /** Best-effort QA event sink; defaults to no emission. */
   eventSink?: EventSink;
   /** Engine config (ready-check timeout, resolution token budget). */
@@ -251,6 +278,8 @@ export class RoomOrchestrator {
   private readonly characterStateStore: CharacterStateStore | undefined;
   private readonly blackboardStore: BlackboardStore | undefined;
   private readonly memoryStore: MemoryStore | undefined;
+  private readonly sinksDayStore: SinksDayStore | undefined;
+  private readonly sinksDice: DiceService;
   private readonly eventSink: EventSink | undefined;
   private readonly config: EngineConfig;
   private readonly now: () => Date;
@@ -287,6 +316,8 @@ export class RoomOrchestrator {
     this.characterStateStore = deps.characterStateStore;
     this.blackboardStore = deps.blackboardStore;
     this.memoryStore = deps.memoryStore;
+    this.sinksDayStore = deps.sinksDayStore;
+    this.sinksDice = deps.sinksDice ?? createDiceServiceFromSpec({ count: 1, face: { min: 1, max: 6 } });
     this.eventSink = deps.eventSink;
     this.config = deps.config ?? DEFAULT_ENGINE_CONFIG;
     this.now = deps.now ?? (() => new Date());
@@ -563,6 +594,28 @@ export class RoomOrchestrator {
         const scenario = this.scenarioResolver.getSelectedScenario(roomId);
         if (scenario === null) return;
         const ctx = toContext(startedState, scenario, this.charactersFor(roomId));
+        const profile = resolveGameProfileForScenario(scenario.id);
+        if (profile.roundFlow === "gmless-days") {
+          const schedule = buildSinksEventSchedule(roomId);
+          this.sinksDayStore?.save(roomId, createSinksDayState(roomId, schedule));
+          const result = await this.coordinator.facilitateSinksOpening(
+            ctx,
+            schedule.opening,
+            correlationFor(startedState),
+          );
+          if (!result.ok) {
+            this.log("opening_failed", { roomId, reason: result.error.reason, message: result.error.message });
+            this.emitNarrationFailure(roomId, "opening", result.error.message);
+            return;
+          }
+          this.log("narration", { roomId, kind: "opening", round: startedState.roundNumber });
+          this.gateway.deliverNarration(roomId, {
+            kind: "opening",
+            roundNumber: startedState.roundNumber,
+            text: result.value,
+          });
+          return;
+        }
         const result = await this.coordinator.generateOpening(ctx, correlationFor(startedState));
         if (!result.ok) {
           this.log("opening_failed", { roomId, reason: result.error.reason, message: result.error.message });
@@ -598,6 +651,83 @@ export class RoomOrchestrator {
         if (scenario === null) {
           this.log("resolution_no_scenario", { roomId, round: resolving.roundNumber });
           await this.enqueue(roomId, () => this.applyResolutionFailure(roomId));
+          return;
+        }
+        const profile = resolveGameProfileForScenario(scenario.id);
+        if (profile.roundFlow === "gmless-days") {
+          const schedule = buildSinksEventSchedule(roomId);
+          let dayState = this.sinksDayStore?.get(roomId) ?? createSinksDayState(roomId, schedule);
+          let revealedCard: SinksEventCard | undefined;
+          let targetCharacterName: string | undefined;
+          let stalledOnFinalDay = false;
+
+          // The finished evening's proposals may only target cards that were
+          // on the table DURING that conversation — snapshot before advancing,
+          // or the just-revealed card (and, entering the final day, the
+          // fisherman) would unlock a day early.
+          const proposableDuringEvening = proposableCardIds(dayState);
+
+          const advanced = advanceSinksDay(dayState, schedule);
+          if (advanced.ok) {
+            dayState = advanced.state;
+            revealedCard = advanced.revealedCard;
+            if (revealedCard.resolution === "lowest_roll") {
+              const target = this.rollLowestSinksTarget(roomId);
+              if (target !== undefined) {
+                const assigned = assignSinksTarget(dayState, revealedCard.id, target.id);
+                if (assigned.ok) {
+                  dayState = assigned.state;
+                  targetCharacterName = target.name;
+                } else {
+                  this.log("sinks_target_rejected", { roomId, cardId: revealedCard.id, reason: assigned.reason });
+                }
+              }
+            }
+          } else if (advanced.reason === "FINAL_DAY_REACHED") {
+            stalledOnFinalDay = true;
+          } else {
+            this.log("sinks_advance_failed", { roomId, reason: advanced.reason, message: advanced.message });
+            await this.enqueue(roomId, () => this.applyResolutionFailure(roomId));
+            return;
+          }
+
+          const ctx = toContext(resolving, scenario, this.charactersFor(roomId));
+          const input: FacilitateSinksDayInput = {
+            context: ctx,
+            establishedTruths: dayState.resolutions,
+            unresolvedCardIds: proposableDuringEvening,
+            day: dayState.day,
+            isFinalDay: dayState.finalDayReached,
+            ...(revealedCard !== undefined ? { revealedCard } : {}),
+            ...(targetCharacterName !== undefined ? { targetCharacterName } : {}),
+            ...(stalledOnFinalDay ? { stalledOnFinalDay } : {}),
+          };
+          const result = await this.coordinator.facilitateSinksDay(input, correlationFor(resolving));
+          if (!result.ok) {
+            await this.enqueue(roomId, () => this.applyResolutionFailure(roomId));
+            return;
+          }
+
+          const applied = applySinksResolutions(dayState, result.value.resolutionProposals);
+          for (const rejected of applied.rejected) {
+            this.log("sinks_resolution_rejected", {
+              roomId,
+              cardId: rejected.proposal.cardId,
+              reason: rejected.reason,
+            });
+          }
+          const finalDayState = applied.state;
+          const endingReached = canEndSinksSession(finalDayState);
+          await this.enqueue(roomId, () =>
+            this.applySinksFacilitationResult(
+              roomId,
+              resolving.roundNumber,
+              allReadyAtIso,
+              result.value.narration,
+              finalDayState,
+              endingReached,
+            ),
+          );
           return;
         }
         const clocks = this.clockStore?.get(roomId);
@@ -689,6 +819,55 @@ export class RoomOrchestrator {
       this.armRollCheckTimer(roomId);
     } else {
       this.maybeLaunchDeclaredNarration(roomId);
+    }
+  }
+
+  private applySinksFacilitationResult(
+    roomId: string,
+    roundNumber: number,
+    allReadyAtIso: string,
+    narration: Narration,
+    dayState: SinksDayState,
+    endingReached: boolean,
+  ): void {
+    const current = this.loadState(roomId);
+    if (
+      (current.phase !== "resolving" && current.phase !== "rolling") ||
+      !current.resolutionRequested
+    ) {
+      return;
+    }
+    const next = reduce(current, {
+      type: "RESOLUTION_READY",
+      narration,
+      checks: [],
+      endingReached,
+    });
+    if (next === current) return;
+
+    this.sinksDayStore?.save(roomId, dayState);
+    this.store.save(next);
+    this.gateway.broadcastTurnState(roomId);
+    this.gateway.deliverNarration(roomId, {
+      kind: "resolution",
+      roundNumber,
+      text: narration,
+    });
+    this.log("narration", {
+      roomId,
+      kind: "resolution",
+      round: roundNumber,
+      nextPhase: next.phase,
+      endingReached,
+    });
+
+    this.emitRoundTiming(roomId, roundNumber, allReadyAtIso, this.nowIso());
+    const key = timingKey(roomId, roundNumber);
+    this.allReadyAt.delete(key);
+    this.failedResolutionRetries.delete(key);
+
+    if (next.phase === "ended") {
+      this.launchEnding(roomId, next);
     }
   }
 
@@ -1021,6 +1200,10 @@ export class RoomOrchestrator {
         }
         if (this.clockStore !== undefined) endingFacts.clocks = this.clockStore.get(roomId);
         if (this.memoryStore !== undefined) endingFacts.memories = this.memoryStore.list(roomId);
+        if (this.sinksDayStore !== undefined) {
+          const sinksDay = this.sinksDayStore.get(roomId);
+          if (sinksDay !== undefined) endingFacts.resolutions = sinksDay.resolutions;
+        }
         const result = await this.coordinator.generateEnding(ctx, correlationFor(endedState), endingFacts);
         if (!result.ok) {
           this.emitNarrationFailure(roomId, "ending", result.error.message);
@@ -1103,6 +1286,22 @@ export class RoomOrchestrator {
   /** The room's characters as the coordinator/context expect them. */
   private charactersFor(roomId: string): readonly Character[] {
     return this.roomReader.listCharactersByRoom(roomId);
+  }
+
+  private rollLowestSinksTarget(roomId: string): Character | undefined {
+    let candidates = this.charactersFor(roomId).filter((character) => character.confirmed);
+    if (candidates.length === 0) return undefined;
+    while (candidates.length > 1) {
+      const rolled = candidates.map((character) => ({
+        character,
+        roll: this.sinksDice.roll(),
+      }));
+      const lowest = Math.min(...rolled.map((entry) => entry.roll));
+      candidates = rolled
+        .filter((entry) => entry.roll === lowest)
+        .map((entry) => entry.character);
+    }
+    return candidates[0];
   }
 
   /**

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  GMLESS_CARD_PROFILE,
   EZFUDGE_DUNGEON_PROFILE,
   INVESTIGATION_HORROR_PROFILE,
   resolveGameProfile,
@@ -77,6 +78,19 @@ describe("GameProfile — one engine, genre differences as data", () => {
   it("maps ashfall-monastery and tidewatch-smugglers to the investigation profile", () => {
     expect(resolveGameProfileForScenario(ASHFALL_MONASTERY.id).gameId).toBe("investigation-horror-oneshot");
     expect(resolveGameProfileForScenario(TIDEWATCH_SMUGGLERS.id).gameId).toBe("investigation-horror-oneshot");
+  });
+
+  it("maps until-it-sinks to the GM-less card day profile", () => {
+    expect(GMLESS_CARD_PROFILE).toMatchObject({
+      gameId: "gmless-card-oneshot",
+      rulesFamily: "card",
+      sessionStyle: "one-shot",
+      minRounds: 0,
+      roundFlow: "gmless-days",
+      enabledProcedures: ["narration_critic"],
+    });
+    expect(resolveGameProfileForScenario("until-it-sinks")).toBe(GMLESS_CARD_PROFILE);
+    expect(resolveGameProfile("gmless-card-oneshot")).toBe(GMLESS_CARD_PROFILE);
   });
 
   it("produces different procedure hint sets for the two profiles on the same state", () => {

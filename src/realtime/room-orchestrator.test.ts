@@ -21,6 +21,13 @@ import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
 import { makeCharacterState } from "../core/character-state.js";
 import { createEmptyBlackboard } from "../core/scenario-blackboard.js";
 import { makeClock as makeProgressClock } from "../core/progress-clock.js";
+import { DiceRollError, type DiceRollRecord, type DiceService } from "../core/dice.js";
+import {
+  applySinksResolutions,
+  createSinksDayState,
+  unresolvedRequiredCardIds,
+  type SinksResolutionProposal,
+} from "../core/sinks-day-state.js";
 import type { TurnState } from "../core/turn-state.js";
 import { InMemoryRoomStore } from "../services/room-store.js";
 import { InMemoryTurnStateStore } from "../services/turn-state-store.js";
@@ -29,7 +36,9 @@ import { InMemorySceneStore } from "../services/scene-store.js";
 import { InMemoryCharacterStateStore } from "../services/character-state-store.js";
 import { InMemoryBlackboardStore } from "../services/blackboard-store.js";
 import { InMemoryMemoryStore } from "../services/memory-store.js";
-import { MVP_SCENARIO, ScenarioService } from "../services/scenario-service.js";
+import { InMemorySinksDayStore } from "../services/sinks-day-store.js";
+import { buildSinksEventSchedule } from "../services/sinks-event-deck.js";
+import { DEMO_SCENARIO_CATALOG, MVP_SCENARIO } from "../services/scenario-service.js";
 import type { Character, Player, Room } from "../services/types.js";
 import { InMemorySessionSummaryRepository } from "../persistence/pg-session-summary-repository.js";
 import { InMemoryEventSink } from "../observability/event-sink.js";
@@ -45,6 +54,8 @@ import type {
   DeclareRoundResult,
   GenerationResult,
   GenerateEndingOptions,
+  FacilitateSinksDayInput,
+  FacilitateSinksDayResult,
   Narration,
   NarrateDeclaredRoundInput,
   RoundDeclaration,
@@ -165,7 +176,10 @@ class FakeCoordinator implements OrchestratorCoordinator {
   rollCalls = 0;
   openingCalls = 0;
   endingCalls = 0;
+  sinksOpeningCalls = 0;
+  sinksDayCalls = 0;
   lastResolveInput: ResolveRoundInput | undefined;
+  lastSinksDayInput: FacilitateSinksDayInput | undefined;
   lastEndingOptions: GenerateEndingOptions | undefined;
   readonly resolveInputs: ResolveRoundInput[] = [];
   private lastDeclaredLegacyResult: ResolveRoundResult | undefined;
@@ -177,6 +191,8 @@ class FakeCoordinator implements OrchestratorCoordinator {
       narrate?: (input: NarrateDeclaredRoundInput) => ResolveRoundResult;
       declaredChecks?: DeclaredCheck[];
       opening?: Narration;
+      sinksOpening?: Narration;
+      sinksDay?: (input: FacilitateSinksDayInput) => FacilitateSinksDayResult;
       ending?: { closing: Narration; summary: SessionSummary };
       openingFailure?: string;
       endingFailure?: string;
@@ -270,6 +286,20 @@ class FakeCoordinator implements OrchestratorCoordinator {
     return Promise.resolve({ ok: true, value: this.opts.opening ?? "오프닝 내레이션" });
   }
 
+  facilitateSinksOpening(): Promise<GenerationResult<Narration>> {
+    this.sinksOpeningCalls += 1;
+    return Promise.resolve({ ok: true, value: this.opts.sinksOpening ?? "낚시꾼이 시체로 발견되다. 저녁 대화를 시작합니다." });
+  }
+
+  facilitateSinksDay(input: FacilitateSinksDayInput): Promise<GenerationResult<FacilitateSinksDayResult>> {
+    this.sinksDayCalls += 1;
+    this.lastSinksDayInput = input;
+    return Promise.resolve({
+      ok: true,
+      value: this.opts.sinksDay?.(input) ?? { narration: "한국어 날짜 전환 내레이션", resolutionProposals: [] },
+    });
+  }
+
   generateEnding(
     _ctx?: TurnStateContext,
     _correlation?: unknown,
@@ -291,6 +321,7 @@ class FakeCoordinator implements OrchestratorCoordinator {
 }
 
 interface Harness {
+  roomId: string;
   orchestrator: RoomOrchestrator;
   gateway: RealtimeGateway;
   connection: FakeConnection;
@@ -305,12 +336,13 @@ interface Harness {
   characterStateStore: InMemoryCharacterStateStore | undefined;
   blackboardStore: InMemoryBlackboardStore | undefined;
   memoryStore: InMemoryMemoryStore | undefined;
+  sinksDayStore: InMemorySinksDayStore | undefined;
 }
 
 /** Build a room with a host + one other player, both with confirmed characters. */
-function seedRoom(roomStore: InMemoryRoomStore): void {
+function seedRoom(roomStore: InMemoryRoomStore, roomId = ROOM_ID): void {
   const room: Room = {
-    id: ROOM_ID,
+    id: roomId,
     inviteToken: "tok",
     hostPlayerId: HOST,
     scenarioId: MVP_SCENARIO.id,
@@ -320,15 +352,45 @@ function seedRoom(roomStore: InMemoryRoomStore): void {
   };
   roomStore.saveRoom(room);
   const players: Player[] = [
-    { id: HOST, roomId: ROOM_ID, displayName: "Aria", isHost: true, characterId: "c1", connectionStatus: "connected" },
-    { id: PLAYER_2, roomId: ROOM_ID, displayName: "Borin", isHost: false, characterId: "c2", connectionStatus: "connected" },
+    { id: HOST, roomId, displayName: "Aria", isHost: true, characterId: "c1", connectionStatus: "connected" },
+    { id: PLAYER_2, roomId, displayName: "Borin", isHost: false, characterId: "c2", connectionStatus: "connected" },
   ];
   for (const p of players) roomStore.savePlayer(p);
   const characters: Character[] = [
-    { id: "c1", playerId: HOST, roomId: ROOM_ID, name: "Aria", concept: "scout", attributes: { Might: 0, Agility: 2, Wits: 1, Spirit: 0 }, confirmed: true },
-    { id: "c2", playerId: PLAYER_2, roomId: ROOM_ID, name: "Borin", concept: "smith", attributes: { Might: 2, Agility: 0, Wits: 0, Spirit: 1 }, confirmed: true },
+    { id: "c1", playerId: HOST, roomId, name: "Aria", concept: "scout", attributes: { Might: 0, Agility: 2, Wits: 1, Spirit: 0 }, confirmed: true },
+    { id: "c2", playerId: PLAYER_2, roomId, name: "Borin", concept: "smith", attributes: { Might: 2, Agility: 0, Wits: 0, Spirit: 1 }, confirmed: true },
   ];
   for (const c of characters) roomStore.saveCharacter(c);
+}
+
+function setRoomScenario(roomStore: InMemoryRoomStore, scenarioId: string, roomId = ROOM_ID): void {
+  const room = roomStore.getRoom(roomId);
+  if (room !== undefined) roomStore.saveRoom({ ...room, scenarioId });
+}
+
+function scriptedDice(values: readonly number[]): DiceService {
+  let index = 0;
+  const next = (): number => {
+    const value = values[index];
+    index += 1;
+    if (value === undefined) throw new Error("scripted dice exhausted");
+    return value;
+  };
+  return {
+    range: { min: 1, max: 6 },
+    roll: next,
+    tryRoll: () => {
+      try {
+        return { ok: true as const, value: next() };
+      } catch (error) {
+        return { ok: false as const, error: new DiceRollError("scripted dice exhausted", error) };
+      }
+    },
+    rollWithRecord: () => {
+      const value = next();
+      return { value, rawValues: [value], seed: null, range: { min: 1, max: 6 } } satisfies DiceRollRecord;
+    },
+  };
 }
 
 function makeHarness(
@@ -341,16 +403,20 @@ function makeHarness(
   endingStores: {
     blackboardStore?: InMemoryBlackboardStore;
     memoryStore?: InMemoryMemoryStore;
+    sinksDayStore?: InMemorySinksDayStore;
+    sinksDice?: DiceService;
+    roomId?: string;
   } = {},
 ): Harness {
+  const roomId = endingStores.roomId ?? ROOM_ID;
   const roomStore = new InMemoryRoomStore();
   const turnStateStore = new InMemoryTurnStateStore();
   const summaries = new InMemorySessionSummaryRepository();
   const sink = new InMemoryEventSink();
-  seedRoom(roomStore);
+  seedRoom(roomStore, roomId);
 
   const gateway = new RealtimeGateway({ getTurnState: (id) => turnStateStore.get(id) });
-  const connection = new FakeConnection("conn-1", ROOM_ID, HOST);
+  const connection = new FakeConnection("conn-1", roomId, HOST);
   gateway.connect(connection);
 
   const orchestrator = new RoomOrchestrator({
@@ -358,7 +424,12 @@ function makeHarness(
     gateway,
     coordinator,
     roomReader: roomStore,
-    scenarioResolver: new ScenarioService(),
+    scenarioResolver: {
+      getSelectedScenario: (id) => {
+        const scenarioId = roomStore.getRoom(id)?.scenarioId ?? MVP_SCENARIO.id;
+        return DEMO_SCENARIO_CATALOG.find((scenario) => scenario.id === scenarioId) ?? null;
+      },
+    },
     sessionSummaryRepository: summaries,
     eventSink: sink,
     config: DEFAULT_ENGINE_CONFIG,
@@ -368,10 +439,13 @@ function makeHarness(
     ...(characterStateStore ? { characterStateStore } : {}),
     ...(endingStores.blackboardStore ? { blackboardStore: endingStores.blackboardStore } : {}),
     ...(endingStores.memoryStore ? { memoryStore: endingStores.memoryStore } : {}),
+    ...(endingStores.sinksDayStore ? { sinksDayStore: endingStores.sinksDayStore } : {}),
+    ...(endingStores.sinksDice ? { sinksDice: endingStores.sinksDice } : {}),
     ...(timers ? { scheduleTimer: timers.scheduleTimer, cancelTimer: timers.cancelTimer } : {}),
   });
 
   return {
+    roomId,
     orchestrator,
     gateway,
     connection,
@@ -386,16 +460,150 @@ function makeHarness(
     characterStateStore,
     blackboardStore: endingStores.blackboardStore,
     memoryStore: endingStores.memoryStore,
+    sinksDayStore: endingStores.sinksDayStore,
   };
 }
 
 /** Start the session and drain the opening narration. */
 async function start(h: Harness): Promise<void> {
-  await h.orchestrator.dispatch(ROOM_ID, { type: "START_SESSION", by: HOST });
+  await h.orchestrator.dispatch(h.roomId, { type: "START_SESSION", by: HOST });
   await h.orchestrator.whenSettled();
 }
 
 describe("RoomOrchestrator", () => {
+  it("runs GM-less sinks day advancement on all-ready without declaring checks", async () => {
+    const sinksDayStore = new InMemorySinksDayStore();
+    const coordinator = new FakeCoordinator();
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, undefined, { sinksDayStore });
+    setRoomScenario(h.roomStore, "until-it-sinks");
+
+    await start(h);
+    expect(coordinator.sinksOpeningCalls).toBe(1);
+    expect(coordinator.openingCalls).toBe(0);
+    expect(sinksDayStore.get(ROOM_ID)?.day).toBe(1);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "SEND_CHAT", from: HOST, text: "낚시꾼 사건을 이야기한다." });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: HOST });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.sinksDayCalls).toBe(1);
+    expect(coordinator.declareCalls).toBe(0);
+    expect(h.connection.checksPending()).toHaveLength(0);
+    expect(sinksDayStore.get(ROOM_ID)?.day).toBe(2);
+    expect(h.turnStateStore.get(ROOM_ID)?.phase).toBe("free_chat");
+    expect(h.connection.narrations().some((n) => n.kind === "resolution" && n.text === "한국어 날짜 전환 내레이션")).toBe(true);
+  });
+
+  it("assigns exactly one lowest-roll target and rerolls ties", async () => {
+    const sinksDayStore = new InMemorySinksDayStore();
+    let roomId = ROOM_ID;
+    let schedule = buildSinksEventSchedule(roomId);
+    for (let i = 0; i < 200 && schedule.days.every((event) => event.card.resolution !== "lowest_roll"); i += 1) {
+      roomId = `room-lowest-${i}`;
+      schedule = buildSinksEventSchedule(roomId);
+    }
+    const lowest = schedule.days.find((event) => event.card.resolution === "lowest_roll");
+    if (lowest === undefined) throw new Error("fixture schedule should contain a lowest_roll card");
+    const beforeLowest = createSinksDayState(roomId, schedule);
+    const revealedBefore = ["fisherman_found", ...schedule.days.filter((event) => event.day < lowest.day).map((event) => event.card.id)];
+    const coordinator = new FakeCoordinator();
+    const h = makeHarness(
+      coordinator,
+      makeClock(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { sinksDayStore, sinksDice: scriptedDice([2, 2, 5, 3]), roomId },
+    );
+    setRoomScenario(h.roomStore, "until-it-sinks", h.roomId);
+    await start(h);
+    sinksDayStore.save(h.roomId, {
+      ...beforeLowest,
+      day: lowest.day - 1,
+      revealedCardIds: revealedBefore,
+    });
+
+    await h.orchestrator.dispatch(h.roomId, { type: "PASS", from: HOST });
+    await h.orchestrator.dispatch(h.roomId, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    const state = sinksDayStore.get(h.roomId);
+    expect(Object.keys(state?.targetByCardId ?? {})).toEqual([lowest.card.id]);
+    expect(Object.values(state?.targetByCardId ?? {})).toEqual(["c2"]);
+    expect(coordinator.lastSinksDayInput?.targetCharacterName).toBe("Borin");
+  });
+
+  it("reopens final-day conversation when unresolved cards remain, then ends with resolutions", async () => {
+    const sinksDayStore = new InMemorySinksDayStore();
+    const schedule = buildSinksEventSchedule(ROOM_ID);
+    let finalState = createSinksDayState(ROOM_ID, schedule);
+    for (const event of schedule.days) {
+      finalState = {
+        ...finalState,
+        day: event.day,
+        revealedCardIds: [...finalState.revealedCardIds, event.card.id],
+        finalDayReached: event.isFinalDay,
+      };
+      if (event.isFinalDay) break;
+    }
+    const coordinator = new FakeCoordinator({
+      sinksDay: (input) => ({
+        narration: input.stalledOnFinalDay ? "한국어 마지막 대화를 다시 엽니다." : "한국어 날짜 전환",
+        resolutionProposals: [],
+      }),
+    });
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, undefined, { sinksDayStore });
+    setRoomScenario(h.roomStore, "until-it-sinks");
+    await start(h);
+    sinksDayStore.save(ROOM_ID, finalState);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: HOST });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.lastSinksDayInput?.stalledOnFinalDay).toBe(true);
+    expect(sinksDayStore.get(ROOM_ID)?.day).toBe(finalState.day);
+    expect(h.turnStateStore.get(ROOM_ID)?.phase).toBe("free_chat");
+    expect(coordinator.endingCalls).toBe(0);
+
+    const resolved = applySinksResolutions(
+      sinksDayStore.get(ROOM_ID)!,
+      unresolvedRequiredCardIds(sinksDayStore.get(ROOM_ID)!).map((cardId): SinksResolutionProposal => ({
+        cardId,
+        explanation: `해명 ${cardId}`,
+      })),
+    ).state;
+    sinksDayStore.save(ROOM_ID, resolved);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: HOST });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(h.turnStateStore.get(ROOM_ID)?.phase).toBe("ended");
+    expect(coordinator.endingCalls).toBe(1);
+    expect(coordinator.lastEndingOptions?.resolutions?.map((r) => r.cardId).sort()).toEqual(
+      resolved.resolutions.map((r) => r.cardId).sort(),
+    );
+  });
+
+  it("keeps the existing checks flow for sunless-crypt", async () => {
+    const sinksDayStore = new InMemorySinksDayStore();
+    const coordinator = new FakeCoordinator();
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, undefined, { sinksDayStore });
+    setRoomScenario(h.roomStore, "the-sunless-crypt");
+
+    await start(h);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.declareCalls).toBe(1);
+    expect(coordinator.sinksDayCalls).toBe(0);
+    expect(sinksDayStore.get(ROOM_ID)).toBeUndefined();
+  });
+
   it("runs a full round: free-chat -> all-ready -> resolving -> next round", async () => {
     const coordinator = new FakeCoordinator();
     const h = makeHarness(coordinator);

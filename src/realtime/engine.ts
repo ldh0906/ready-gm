@@ -33,6 +33,7 @@ import { NoopSessionLogger, type SessionLogger } from "../observability/session-
 import { createPersistence, type Persistence } from "../persistence/factory.js";
 import type { EnvLike } from "../persistence/pg-client.js";
 import { ScenarioService, type Scenario } from "../services/scenario-service.js";
+import { InMemorySinksDayStore } from "../services/sinks-day-store.js";
 import { RealtimeGateway } from "./gateway.js";
 import { RoomOrchestrator } from "./room-orchestrator.js";
 
@@ -161,6 +162,10 @@ export function createEngine(deps: CreateEngineDeps): Engine {
   const dice = createDiceServiceFromSpec(config.dice, deps.diceSource, {
     sink: eventSink,
   });
+  const sinksDice = createDiceServiceFromSpec({ count: 1, face: { min: 1, max: 6 } }, deps.diceSource, {
+    sink: eventSink,
+  });
+  const sinksDayStore = new InMemorySinksDayStore();
 
   const router = new AiGmRouter({
     client: deps.aiClient,
@@ -191,6 +196,8 @@ export function createEngine(deps: CreateEngineDeps): Engine {
     characterStateStore: persistence.characterStateStore,
     blackboardStore: persistence.blackboardStore,
     memoryStore: persistence.memoryStore,
+    sinksDayStore,
+    sinksDice,
     eventSink,
     config,
     ...(deps.now ? { now: deps.now } : {}),

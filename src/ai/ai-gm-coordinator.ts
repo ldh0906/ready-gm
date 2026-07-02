@@ -71,6 +71,11 @@ import {
   type RejectedMemoryWrite,
 } from "../core/memory-record.js";
 import { resolveGameProfile, type GameProfile } from "../core/game-profile.js";
+import type {
+  SinksResolution,
+  SinksResolutionProposal,
+} from "../core/sinks-day-state.js";
+import type { SinksEventCard } from "../services/sinks-event-deck.js";
 import {
   findSafetyViolations,
   formatSafetyPolicy,
@@ -379,6 +384,24 @@ export interface GenerateEndingOptions {
   clocks?: readonly ProgressClock[];
   /** Optional Memory Clerk records; only player-visible summaries are exposed. */
   memories?: readonly MemoryRecord[];
+  /** Until It Sinks permanent card explanations, exposed as confirmed facts. */
+  resolutions?: readonly SinksResolution[];
+}
+
+export interface FacilitateSinksDayInput {
+  context: TurnStateContext;
+  establishedTruths: SinksResolution[];
+  unresolvedCardIds: string[];
+  revealedCard?: SinksEventCard;
+  targetCharacterName?: string;
+  day: number;
+  isFinalDay: boolean;
+  stalledOnFinalDay?: boolean;
+}
+
+export interface FacilitateSinksDayResult {
+  narration: Narration;
+  resolutionProposals: SinksResolutionProposal[];
 }
 
 /** Construction dependencies for {@link AiGmCoordinator}. */
@@ -450,6 +473,31 @@ export class AiGmCoordinator {
       correlation ?? this.correlationFor(ctx),
     );
     return outcome;
+  }
+
+  async facilitateSinksOpening(
+    ctx: TurnStateContext,
+    openingCard: SinksEventCard,
+    correlation?: CorrelationKey,
+  ): Promise<GenerationResult<Narration>> {
+    return this.runRequest(
+      "opening",
+      buildSinksOpeningPrompt(ctx, openingCard),
+      (raw) => this.parseNarration(raw),
+      correlation ?? this.correlationFor(ctx),
+    );
+  }
+
+  async facilitateSinksDay(
+    input: FacilitateSinksDayInput,
+    correlation?: CorrelationKey,
+  ): Promise<GenerationResult<FacilitateSinksDayResult>> {
+    return this.runRequest(
+      "resolution",
+      buildSinksDayPrompt(input),
+      (raw) => this.parseSinksDay(raw, new Set(input.unresolvedCardIds)),
+      correlation ?? this.correlationFor(input.context),
+    );
   }
 
   /**
@@ -987,6 +1035,37 @@ export class AiGmCoordinator {
     return { ok: true, value: { narration, endingReached, stateChanges } };
   }
 
+  private parseSinksDay(
+    raw: string,
+    allowedCardIds: ReadonlySet<string>,
+  ): Validated<FacilitateSinksDayResult> {
+    const parsed = parseJson(raw);
+    if (!parsed.ok) return parsed;
+    const obj = parsed.value;
+    const narration = readString(obj, "narration");
+    if (narration === undefined || narration.trim().length === 0) {
+      return invalidSchema("response is missing a non-empty 'narration' field");
+    }
+    if (!this.detectKorean(narration)) {
+      return notKorean();
+    }
+    const proposals: SinksResolutionProposal[] = [];
+    const rawProposals = obj["resolutionProposals"];
+    if (Array.isArray(rawProposals)) {
+      for (const entry of rawProposals) {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+        const source = entry as Record<string, unknown>;
+        const cardId = readString(source, "cardId");
+        const explanation = readString(source, "explanation");
+        if (cardId === undefined || explanation === undefined) continue;
+        const trimmed = explanation.trim();
+        if (!allowedCardIds.has(cardId) || trimmed.length === 0) continue;
+        proposals.push({ cardId, explanation: trimmed });
+      }
+    }
+    return { ok: true, value: { narration, resolutionProposals: proposals } };
+  }
+
   /** Validate the ending response: Korean closing narration + Korean summary. */
   private parseEnding(
     raw: string,
@@ -1374,6 +1453,77 @@ function buildOpeningPrompt(ctx: TurnStateContext): Prompt {
   };
 }
 
+function buildSinksOpeningPrompt(ctx: TurnStateContext, openingCard: SinksEventCard): Prompt {
+  return {
+    system:
+      "당신은 GM리스 카드 미스터리 '가라앉을 때까지'의 한국어 진행자입니다. " +
+      "판정, 심판, 주사위 해석을 하지 않습니다. 플레이어들의 대화와 합의가 게임입니다. " +
+      "출력 형식: 설명이나 코드펜스 없이 요청된 단일 JSON 객체 하나만 반환하세요.",
+    user:
+      "PHASE: sinks_opening\n" +
+      "시나리오 openingSeed와 첫째 날 아침의 사건을 바탕으로 짧은 도입을 작성하세요. " +
+      "첫째 날 아침 낚시꾼의 시체가 발견되었고, 이후 저녁 연회장 대화를 여는 진행 멘트로 끝내세요. " +
+      "아래 OPENING_CARD의 title과 text를 낭독 내용에 정확히 포함하세요. 판정이나 주사위를 요구하지 마세요.\n" +
+      'Respond as {"narration": "<korean text>"}.\n' +
+      formatScenarioRules(ctx.scenario) +
+      "OPENING_CARD: " +
+      JSON.stringify({ title: openingCard.title, text: openingCard.text }) +
+      "\n" +
+      formatUntrustedJsonBlock("UNTRUSTED_SINKS_OPENING_CONTEXT", {
+        scenario: {
+          title: ctx.scenario.title,
+          summary: ctx.scenario.summary,
+          openingSeed: ctx.scenario.openingSeed,
+        },
+        characters: ctx.characters,
+      }),
+  };
+}
+
+function buildSinksDayPrompt(input: FacilitateSinksDayInput): Prompt {
+  const card = input.revealedCard;
+  return {
+    system:
+      "당신은 GM리스 카드 미스터리 '가라앉을 때까지'의 한국어 진행자입니다. " +
+      "AI는 심판이 아니며 판정, 주사위 결과 해석, 숨은 진실 창작을 하지 않습니다. " +
+      "플레이어들의 대화에서 합의된 해명만 정리하고 다음 대화를 이어 줍니다. " +
+      "출력 형식: 설명이나 코드펜스 없이 요청된 단일 JSON 객체 하나만 반환하세요.",
+    user:
+      "PHASE: sinks_day\n" +
+      "직전 저녁 대화에서 플레이어들이 실질적으로 합의한 해명만 resolutionProposals로 추출하세요. " +
+      "cardId는 UNRESOLVED_CARD_IDS 안에서만 사용하세요. 합의가 불분명하면 제안하지 마세요. " +
+      "대화에 없는 해명을 창작하지 마세요. ESTABLISHED_TRUTHS는 영구적으로 참이며 절대 모순하지 마세요. " +
+      "narration은 짧은 날짜 전환입니다. REVEALED_CARD가 있으면 title과 text를 낭독하세요. " +
+      "TARGET_CHARACTER_NAME이 있으면 그 인물이 카드 대상임을 자연스럽게 반영하세요. " +
+      "STALLED_ON_FINAL_DAY가 true이면 카드 낭독 없이 미해명 카드들을 상기시키며 마지막 대화를 재개하세요. " +
+      "IS_FINAL_DAY가 true이면 배경은 가라앉는 섬을 떠난 고장난 보트 위입니다.\n" +
+      'Respond as {"narration": "<korean>", "resolutionProposals": [{"cardId": "...", "explanation": "..."}]}.\n' +
+      "ESTABLISHED_TRUTHS: " +
+      JSON.stringify(input.establishedTruths.map((r) => ({ cardId: r.cardId, explanation: r.explanation }))) +
+      "\n" +
+      "UNRESOLVED_CARD_IDS: " +
+      JSON.stringify(input.unresolvedCardIds) +
+      "\n" +
+      "DAY_TRANSITION: " +
+      JSON.stringify({
+        day: input.day,
+        isFinalDay: input.isFinalDay,
+        stalledOnFinalDay: input.stalledOnFinalDay === true,
+        revealedCard: card === undefined ? null : { title: card.title, text: card.text },
+        targetCharacterName: input.targetCharacterName ?? null,
+      }) +
+      "\n" +
+      formatUntrustedJsonBlock("UNTRUSTED_SINKS_EVENING_CONTEXT", {
+        scenario: {
+          title: input.context.scenario.title,
+          summary: input.context.scenario.summary,
+        },
+        characters: input.context.characters,
+        chat: input.context.thisRound.chat,
+      }),
+  };
+}
+
 /**
  * The per-scenario rules/tone overlay ("custom system over the universal base"),
  * or "" when the scenario has none. Injected into every GM prompt so the model
@@ -1711,17 +1861,23 @@ function formatConfirmedEndingFacts(options: GenerateEndingOptions): string {
     options.memories
       ?.filter((record) => record.visibility === "player_visible")
       .map((record) => ({ kind: record.kind, summary: record.summary })) ?? [];
+  const resolutions =
+    options.resolutions?.map((resolution) => ({
+      cardId: resolution.cardId,
+      explanation: resolution.explanation,
+    })) ?? [];
   if (
     discoveredClues.length === 0 &&
     revealedSecrets.length === 0 &&
     clocks.length === 0 &&
-    memories.length === 0
+    memories.length === 0 &&
+    resolutions.length === 0
   ) {
     return "";
   }
   return (
     "CONFIRMED_ENDING_FACTS (서버가 확정한 사실만 포함합니다. 여기에 없는 단서/비밀/결말은 해결된 것처럼 쓰지 마세요): " +
-    JSON.stringify({ discoveredClues, revealedSecrets, clocks, memories }) +
+    JSON.stringify({ discoveredClues, revealedSecrets, clocks, memories, resolutions }) +
     "\n"
   );
 }

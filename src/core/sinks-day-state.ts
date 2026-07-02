@@ -208,6 +208,20 @@ export function unresolvedRequiredCardIds(state: SinksDayState): string[] {
   return state.revealedCardIds.filter((cardId) => cardId !== ISLAND_SINKS_CARD_ID && !resolved.has(cardId));
 }
 
+/**
+ * Return the card ids a facilitator may legitimately propose resolutions for
+ * RIGHT NOW: revealed, unresolved, never island_sinks, and fisherman_found only
+ * once the final day has been reached (rulebook: the fisherman is not resolved
+ * before the last day). Evaluate this against the state the just-finished
+ * conversation actually played under — not a later, already-advanced state —
+ * so a pre-final-day evening can never unlock the fisherman early.
+ */
+export function proposableCardIds(state: SinksDayState): string[] {
+  return unresolvedRequiredCardIds(state).filter(
+    (cardId) => cardId !== FISHERMAN_FOUND_CARD_ID || state.finalDayReached,
+  );
+}
+
 /** True only after island_sinks has been revealed and every required card is resolved. */
 export function canEndSinksSession(state: SinksDayState): boolean {
   return state.finalDayReached && unresolvedRequiredCardIds(state).length === 0;

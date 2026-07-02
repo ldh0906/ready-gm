@@ -7,6 +7,7 @@ import {
   canEndSinksSession,
   cloneSinksDayState,
   createSinksDayState,
+  proposableCardIds,
   unresolvedRequiredCardIds,
   type SinksDayState,
 } from "./sinks-day-state.js";
@@ -165,6 +166,22 @@ describe("sinks day state", () => {
     expect(late.applied).toEqual([
       { cardId: "fisherman_found", explanation: "The last-day explanation.", day: final.day },
     ]);
+  });
+
+  it("locks fisherman_found out of proposable ids until the final day", () => {
+    const schedule = buildSinksEventSchedule("room-sinks-alpha");
+    let state = createSinksDayState("room-sinks-alpha", schedule);
+    expect(proposableCardIds(state)).toEqual([]);
+
+    const advanced = advanceSinksDay(state, schedule);
+    if (!advanced.ok) throw new Error(advanced.reason);
+    state = advanced.state;
+    // Day 2: the revealed general card is proposable, the fisherman is not.
+    expect(proposableCardIds(state)).toEqual([advanced.revealedCard.id]);
+
+    const final = advanceToFinal(state, schedule);
+    expect(proposableCardIds(final)).toContain("fisherman_found");
+    expect(proposableCardIds(final)).not.toContain("island_sinks");
   });
 
   it("can end only on the final day after every required revealed card is resolved", () => {

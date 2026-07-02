@@ -259,7 +259,7 @@ describe("AI GM Router/Coordinator — property tests", async () => {
           roundNumber: 0,
           scenario: SCENARIO,
           characters: [],
-          thisRound: { actions: [], checks: [] },
+          thisRound: { actions: [], chat: [], checks: [] },
           recentNarrative: [],
         });
         expect(failed.ok).toBe(false);
@@ -283,7 +283,7 @@ describe("AI GM Router/Coordinator — property tests", async () => {
           roundNumber: 0,
           scenario: SCENARIO,
           characters: [],
-          thisRound: { actions: [], checks: [] },
+          thisRound: { actions: [], chat: [], checks: [] },
           recentNarrative: [],
         });
         expect(ok.ok).toBe(true);

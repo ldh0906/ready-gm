@@ -25,6 +25,8 @@ export interface GameProfile {
   /** The deterministic GM procedures active for this profile. */
   enabledProcedures: GmProcedureId[];
   safetyProfileId: string;
+  /** Round-loop mode; defaults to checks when omitted. */
+  roundFlow?: "checks" | "gmless-days";
 }
 
 /**
@@ -75,11 +77,26 @@ export const COMEDY_ONESHOT_PROFILE: GameProfile = {
   safetyProfileId: "default-table-safety",
 };
 
+/** GM-less card one-shot: the round loop is reused as an evening/day cadence. */
+export const GMLESS_CARD_PROFILE: GameProfile = {
+  gameId: "gmless-card-oneshot",
+  rulesFamily: "card",
+  sessionStyle: "one-shot",
+  minRounds: 0,
+  characterSheetSchemaId: "sinks-sheet-v1",
+  characterStateSchemaId: "character-state-v1",
+  scenarioBlackboardSchemaId: "sinks-blackboard-v1",
+  enabledProcedures: ["narration_critic"],
+  safetyProfileId: "default-table-safety",
+  roundFlow: "gmless-days",
+};
+
 /** Registered profiles, keyed by gameId. */
 export const GAME_PROFILES: Record<string, GameProfile> = {
   [EZFUDGE_DUNGEON_PROFILE.gameId]: EZFUDGE_DUNGEON_PROFILE,
   [INVESTIGATION_HORROR_PROFILE.gameId]: INVESTIGATION_HORROR_PROFILE,
   [COMEDY_ONESHOT_PROFILE.gameId]: COMEDY_ONESHOT_PROFILE,
+  [GMLESS_CARD_PROFILE.gameId]: GMLESS_CARD_PROFILE,
 };
 
 /**
@@ -91,6 +108,7 @@ const PROFILE_BY_SCENARIO: Record<string, string> = {
   "ashfall-monastery": INVESTIGATION_HORROR_PROFILE.gameId,
   "tidewatch-smugglers": INVESTIGATION_HORROR_PROFILE.gameId,
   "terrible-geese": COMEDY_ONESHOT_PROFILE.gameId,
+  "until-it-sinks": GMLESS_CARD_PROFILE.gameId,
 };
 
 /** Resolve a profile by gameId, falling back to the dungeon profile. */
