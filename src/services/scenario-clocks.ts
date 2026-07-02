@@ -49,6 +49,59 @@ export function seedClocksForScenario(scenarioId: string): ProgressClock[] {
           ],
         }),
       ];
+    case "ashfall-monastery":
+      return [
+        makeClock({
+          id: "bell_toll",
+          name: "끝내 울리는 종",
+          scope: "front",
+          max: 8,
+          value: 0,
+          onComplete: "returned_ones_arrive",
+          consequence:
+            "종이 끝까지 울리고 잿빛 안개 속 '돌아온 자들'이 수도원 문턱을 넘는다. 남은 길은 악몽 같은 결말뿐이다.",
+          onCompleteEffects: [
+            { type: "add_threat", threat: "안개 속에서 문턱을 넘어오는 돌아온 자들" },
+            { type: "force_ending" },
+          ],
+        }),
+        makeClock({
+          id: "closing_fog",
+          name: "출구를 지우는 안개",
+          scope: "scene",
+          max: 6,
+          value: 0,
+          onComplete: "fog_erases_exits",
+          consequence: "잿빛 안개가 수도원의 길목과 발자국을 삼켜, 일행이 들어온 문과 산길의 방향을 지운다.",
+          onCompleteEffects: [{ type: "add_threat", threat: "출구를 지운 잿빛 안개" }],
+        }),
+      ];
+    case "tidewatch-smugglers":
+      return [
+        makeClock({
+          id: "discovery_risk",
+          name: "발각 위험",
+          scope: "scene",
+          max: 6,
+          value: 0,
+          onComplete: "smugglers_identify_intruders",
+          consequence: "밀수단이 일행의 정체를 눈치챈다. 부두와 배 안의 시선이 한꺼번에 좁혀 온다.",
+          onCompleteEffects: [{ type: "add_threat", threat: "정체를 눈치챈 밀수단" }],
+        }),
+        makeClock({
+          id: "departure_tide",
+          name: "출항 물때",
+          scope: "front",
+          max: 8,
+          value: 0,
+          onComplete: "black_gull_departure",
+          consequence: "물때가 차오르고 검은 갈매기호가 밧줄을 끊듯 항구를 떠난다. 진실도 인질도 배와 함께 사라진다.",
+          onCompleteEffects: [
+            { type: "add_threat", threat: "항구를 벗어나는 검은 갈매기호" },
+            { type: "force_ending" },
+          ],
+        }),
+      ];
     default:
       return [];
   }
@@ -63,6 +116,9 @@ export function areClocksVisible(scenarioId: string): boolean {
   switch (scenarioId) {
     case "the-sunless-crypt":
       // A dungeon delve: a visible "alarm rising" gauge sharpens the tension.
+      return true;
+    case "tidewatch-smugglers":
+      // An infiltration caper: visible gauges make risk and tide deadlines legible.
       return true;
     default:
       return false;

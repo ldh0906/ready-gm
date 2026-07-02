@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { seedClocksForScenario, areClocksVisible } from "./scenario-clocks.js";
-import { MVP_SCENARIO } from "./scenario-service.js";
+import { seedBlackboardForScenario } from "./scenario-blackboard.js";
+import { ASHFALL_MONASTERY, MVP_SCENARIO, TIDEWATCH_SMUGGLERS } from "./scenario-service.js";
 
 describe("seedClocksForScenario", () => {
   it("seeds the sunless-crypt scenario with its two pressure clocks at value 0", () => {
@@ -19,6 +20,58 @@ describe("seedClocksForScenario", () => {
   it("returns no clocks for an unknown scenario", () => {
     expect(seedClocksForScenario("unknown-scenario")).toEqual([]);
   });
+
+  it("seeds ashfall-monastery with hidden horror pressure clocks", () => {
+    const clocks = seedClocksForScenario(ASHFALL_MONASTERY.id);
+
+    expect(clocks.map((c) => c.id).sort()).toEqual(["bell_toll", "closing_fog"]);
+    expect(clocks.find((c) => c.id === "bell_toll")).toMatchObject({
+      scope: "front",
+      max: 8,
+      onComplete: "returned_ones_arrive",
+    });
+    expect(clocks.find((c) => c.id === "bell_toll")?.onCompleteEffects).toEqual(
+      expect.arrayContaining([{ type: "add_threat", threat: "안개 속에서 문턱을 넘어오는 돌아온 자들" }, { type: "force_ending" }]),
+    );
+    expect(clocks.find((c) => c.id === "closing_fog")).toMatchObject({
+      scope: "scene",
+      max: 6,
+      onComplete: "fog_erases_exits",
+    });
+  });
+
+  it("seeds tidewatch-smugglers with infiltration pressure clocks", () => {
+    const clocks = seedClocksForScenario(TIDEWATCH_SMUGGLERS.id);
+
+    expect(clocks.map((c) => c.id).sort()).toEqual(["departure_tide", "discovery_risk"]);
+    expect(clocks.find((c) => c.id === "discovery_risk")).toMatchObject({
+      scope: "scene",
+      max: 6,
+      onComplete: "smugglers_identify_intruders",
+    });
+    expect(clocks.find((c) => c.id === "departure_tide")).toMatchObject({
+      scope: "front",
+      max: 8,
+      onComplete: "black_gull_departure",
+    });
+    expect(clocks.find((c) => c.id === "departure_tide")?.onCompleteEffects).toEqual(
+      expect.arrayContaining([{ type: "force_ending" }]),
+    );
+  });
+
+  it.each([ASHFALL_MONASTERY.id, TIDEWATCH_SMUGGLERS.id])(
+    "keeps %s NPC pressure clocks pointing at seeded clocks",
+    (scenarioId) => {
+      const clockIds = new Set(seedClocksForScenario(scenarioId).map((clock) => clock.id));
+      const blackboard = seedBlackboardForScenario("room-1", scenarioId);
+      const referencedClockIds = blackboard.npcs
+        .map((npc) => npc.pressureClockId)
+        .filter((clockId): clockId is string => clockId !== undefined);
+
+      expect(referencedClockIds.length).toBeGreaterThan(0);
+      expect(referencedClockIds.every((clockId) => clockIds.has(clockId))).toBe(true);
+    },
+  );
 });
 
 describe("areClocksVisible", () => {
@@ -28,5 +81,10 @@ describe("areClocksVisible", () => {
 
   it("hides clocks by default for unlisted scenarios", () => {
     expect(areClocksVisible("unknown-scenario")).toBe(false);
+  });
+
+  it("hides ashfall clocks and shows tidewatch clocks", () => {
+    expect(areClocksVisible(ASHFALL_MONASTERY.id)).toBe(false);
+    expect(areClocksVisible(TIDEWATCH_SMUGGLERS.id)).toBe(true);
   });
 });

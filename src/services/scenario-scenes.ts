@@ -30,6 +30,39 @@ export function seedSceneForScenario(scenarioId: string): SceneState | null {
         exits: ["crypt_stairs", "chapel_interior"],
         lastGmQuestion: "봉인을 조용히 살필 건가요, 아니면 곧장 계단을 내려갈 건가요?",
       });
+    case "ashfall-monastery":
+      return makeSceneState({
+        sceneId: "shattered_gate",
+        location: "산정 수도원의 부서진 정문, 얼어붙은 성수반과 핏빛 낙서 앞",
+        sceneGoal: "마지막 수도사가 남긴 흔적을 따라 밤마다 울리는 종소리의 의미를 알아낸다",
+        currentTension: "눈보라가 멎었는데도 잿빛 안개가 정문 안쪽에서만 천천히 흘러나온다",
+        presentNpcs: [],
+        visibleThreats: ["성수반 위에 얼어붙은 검은 피", "정문 너머에서 한 박자 늦게 울리는 희미한 종소리"],
+        availableClues: ["blood_scrawl", "frozen_bell_wax", "fog_footprints"],
+        revealedClues: [],
+        exits: ["bell_tower", "under_chapel", "monk_cells"],
+        lastGmQuestion: "핏빛 낙서를 먼저 살필 건가요, 아니면 안개 속 종소리를 따라 들어갈 건가요?",
+      });
+    case "tidewatch-smugglers":
+      return makeSceneState({
+        sceneId: "rain_pier",
+        location: "비에 젖은 조수감시 항구의 7번 부두, 검은 갈매기호의 흔들리는 현문 앞",
+        sceneGoal: "출항 전에 배에 접근해 사라진 화물과 실종 선원의 단서를 확보한다",
+        currentTension: "새벽 물때가 차오르고, 밀수단의 등불이 부두 끝에서 하나씩 켜진다",
+        presentNpcs: [
+          {
+            id: "npc_dock_informant",
+            name: "부두 정보상 라온",
+            disposition: "wary",
+            visibleIntent: "대가를 받고 승선 경로를 넘기되 자신의 이름은 숨기려 한다",
+          },
+        ],
+        visibleThreats: ["순찰 중인 항만 경비", "출항 준비를 서두르는 밀수단 선원들"],
+        availableClues: ["sealed_crate_manifest", "wet_boot_drag", "changed_watch_signal"],
+        revealedClues: [],
+        exits: ["ship_deck", "cargo_hold", "captain_cabin"],
+        lastGmQuestion: "정보상에게 말을 붙일 건가요, 아니면 곧장 배로 숨어들 건가요?",
+      });
     default:
       return null;
   }

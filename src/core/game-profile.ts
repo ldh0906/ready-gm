@@ -74,6 +74,8 @@ export const GAME_PROFILES: Record<string, GameProfile> = {
  */
 const PROFILE_BY_SCENARIO: Record<string, string> = {
   "the-sunless-crypt": INVESTIGATION_HORROR_PROFILE.gameId,
+  "ashfall-monastery": INVESTIGATION_HORROR_PROFILE.gameId,
+  "tidewatch-smugglers": INVESTIGATION_HORROR_PROFILE.gameId,
 };
 
 /** Resolve a profile by gameId, falling back to the dungeon profile. */

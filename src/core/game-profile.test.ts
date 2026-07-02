@@ -7,6 +7,7 @@ import {
 } from "./game-profile.js";
 import { buildGmProcedurePlan, handlersForEnabledProcedures } from "../ai/gm-procedures.js";
 import { createEmptyBlackboard, type ScenarioBlackboard } from "./scenario-blackboard.js";
+import { ASHFALL_MONASTERY, TIDEWATCH_SMUGGLERS } from "../services/scenario-service.js";
 import type { TurnStateContext } from "../services/turn-state-context.js";
 
 function makeContext(): TurnStateContext {
@@ -71,6 +72,11 @@ describe("GameProfile — one engine, genre differences as data", () => {
   it("maps the authored investigation scenario to the investigation profile", () => {
     expect(resolveGameProfileForScenario("the-sunless-crypt")).toBe(INVESTIGATION_HORROR_PROFILE);
     expect(resolveGameProfileForScenario("some-dungeon")).toBe(EZFUDGE_DUNGEON_PROFILE);
+  });
+
+  it("maps ashfall-monastery and tidewatch-smugglers to the investigation profile", () => {
+    expect(resolveGameProfileForScenario(ASHFALL_MONASTERY.id).gameId).toBe("investigation-horror-oneshot");
+    expect(resolveGameProfileForScenario(TIDEWATCH_SMUGGLERS.id).gameId).toBe("investigation-horror-oneshot");
   });
 
   it("produces different procedure hint sets for the two profiles on the same state", () => {
