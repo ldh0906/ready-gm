@@ -102,6 +102,32 @@ export function seedClocksForScenario(scenarioId: string): ProgressClock[] {
           ],
         }),
       ];
+    case "terrible-geese":
+      return [
+        makeClock({
+          id: "village_uproar",
+          name: "마을의 봉기",
+          scope: "front",
+          max: 8,
+          value: 0,
+          onComplete: "village_organizes_goose_sweep",
+          consequence: "마을 사람들이 더는 당하지 않겠다고 외치며 조직적으로 거위 소탕에 나선다.",
+          onCompleteEffects: [
+            { type: "add_threat", threat: "조직적으로 거위 소탕에 나선 마을 사람들" },
+            { type: "force_ending" },
+          ],
+        }),
+        makeClock({
+          id: "warden_alert",
+          name: "파수꾼 경계",
+          scope: "scene",
+          max: 6,
+          value: 0,
+          onComplete: "broom_warden_mob",
+          consequence: "호루라기 소리에 빗자루를 든 파수꾼 무리가 골목 끝에서 우르르 나타난다.",
+          onCompleteEffects: [{ type: "add_threat", threat: "빗자루를 든 파수꾼 무리" }],
+        }),
+      ];
     default:
       return [];
   }
@@ -119,6 +145,9 @@ export function areClocksVisible(scenarioId: string): boolean {
       return true;
     case "tidewatch-smugglers":
       // An infiltration caper: visible gauges make risk and tide deadlines legible.
+      return true;
+    case "terrible-geese":
+      // Comedy works better when everyone can see exactly how much trouble is piling up.
       return true;
     default:
       return false;

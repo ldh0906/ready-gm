@@ -14,37 +14,8 @@
  *
  * The function never mutates its inputs and never throws.
  */
+import { seededShuffle } from "./seeded-random.js";
 import type { CharacterCard } from "./sheet-schema.js";
-
-/**
- * FNV-1a hash of a string to an unsigned 32-bit integer. Pure, dependency-free,
- * and stable across runs/platforms so the derived hand stays deterministic.
- */
-function fnv1a32(seed: string): number {
-  let hash = 0x811c9dc5; // FNV offset basis
-  for (let i = 0; i < seed.length; i += 1) {
-    hash ^= seed.charCodeAt(i);
-    // 32-bit FNV prime multiply via shifts to stay in 32-bit range.
-    hash = Math.imul(hash, 0x01000193);
-  }
-  // Coerce to unsigned 32-bit.
-  return hash >>> 0;
-}
-
-/**
- * mulberry32 PRNG. Given a 32-bit seed it returns a generator producing floats
- * in [0, 1). Deterministic and dependency-free.
- */
-function mulberry32(seedInt: number): () => number {
-  let a = seedInt >>> 0;
-  return function next(): number {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 /**
  * Deal a deterministic random hand of up to `handSize` distinct cards for a
@@ -97,16 +68,7 @@ export function dealCardHand(
   }
 
   const seedString = typeof seed === "string" ? seed : String(seed ?? "");
-  const random = mulberry32(fnv1a32(seedString));
-
-  // Fisher–Yates shuffle of the index list (copy; inputs untouched).
-  const order = cards.map((_, index) => index);
-  for (let i = order.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(random() * (i + 1));
-    const tmp = order[i];
-    order[i] = order[j];
-    order[j] = tmp;
-  }
+  const order = seededShuffle(cards.map((_, index) => index), seedString);
 
   const size = Number.isInteger(handSize) && handSize > 0 ? handSize : 0;
   const hand: CharacterCard[] = [];

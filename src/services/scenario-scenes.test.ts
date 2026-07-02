@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { seedBlackboardForScenario } from "./scenario-blackboard.js";
 import { seedSceneForScenario } from "./scenario-scenes.js";
-import { ASHFALL_MONASTERY, MVP_SCENARIO, TIDEWATCH_SMUGGLERS } from "./scenario-service.js";
+import { ASHFALL_MONASTERY, MVP_SCENARIO, TERRIBLE_GEESE, TIDEWATCH_SMUGGLERS } from "./scenario-service.js";
 
 describe("seedSceneForScenario", () => {
   it("seeds the sunless-crypt opening scene with goal, NPCs, clues, and exits", () => {
@@ -40,4 +40,18 @@ describe("seedSceneForScenario", () => {
       expect(sceneClueIds.every((id) => blackboardClueIds.has(id))).toBe(true);
     },
   );
+
+  it("seeds the terrible-geese opening scene without clue procedures", () => {
+    const scene = seedSceneForScenario(TERRIBLE_GEESE.id);
+
+    expect(scene).toMatchObject({
+      sceneId: "village_square",
+      sceneGoal: "창턱에서 식어 가는 파이를 망쳐 첫 장난을 성공시킨다",
+      availableClues: [],
+      revealedClues: [],
+    });
+    expect(scene?.location).toContain("마을 광장");
+    expect(scene?.visibleThreats).toContain("파이를 지키려는 빵집 주인의 빗자루");
+    expect(scene?.exits).toEqual(["laundry_alley", "mayor_garden", "festival_ground"]);
+  });
 });

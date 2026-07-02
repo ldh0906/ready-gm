@@ -1,11 +1,128 @@
 import {
   createEmptyBlackboard,
+  type FrontState,
+  type NpcState,
   type ScenarioBlackboard,
 } from "../core/scenario-blackboard.js";
+import { seededPick } from "./seeded-random.js";
+
+const GEESE_OPENING_PRANKS: readonly FrontState[] = [
+  { id: "geese_prank_window_pie", name: "창턱의 파이 망치기" },
+  { id: "geese_prank_fountain_ribbons", name: "분수대 축하 리본 전부 풀어헤치기" },
+  { id: "geese_prank_bakery_bell", name: "빵집 종을 완벽히 엉뚱한 타이밍에 울리기" },
+];
+
+const GEESE_MIDGAME_PRANKS: readonly FrontState[] = [
+  { id: "geese_prank_laundry_collapse", name: "빨랫줄 전면 붕괴" },
+  { id: "geese_prank_mayor_wig", name: "시장님 가발 탈취" },
+  { id: "geese_prank_market_labels", name: "장터 가격표 뒤죽박죽 만들기" },
+  { id: "geese_prank_goat_parade", name: "염소 행렬을 광장 한복판으로 유도하기" },
+];
+
+const GEESE_FINALE_PRANKS: readonly FrontState[] = [
+  { id: "geese_prank_festival_rehearsal", name: "축제 리허설 아수라장" },
+  { id: "geese_prank_town_photo", name: "마을 단체 사진 완전 점령" },
+  { id: "geese_prank_clocktower_chorus", name: "시계탑 종소리에 맞춘 대합창 난입" },
+];
+
+const GEESE_NPCS: readonly NpcState[] = [
+  {
+    npcId: "npc_baker_broom",
+    name: "빗자루 든 빵집 주인",
+    role: "파이의 수호자",
+    attitudeByCharacter: {},
+    goals: ["거위가 파이에 접근하면 빗자루를 든다", "파이를 살리려다 더 큰 소동을 만든다"],
+    knownSecretIds: [],
+    location: "village_square",
+    pressureClockId: "warden_alert",
+  },
+  {
+    npcId: "npc_goose_child",
+    name: "거위를 편드는 꼬마",
+    role: "혼돈의 응원단",
+    attitudeByCharacter: {},
+    goals: ["어른들의 시선을 엉뚱한 곳으로 돌린다", "거위가 귀엽다고 우기며 시간을 벌어 준다"],
+    knownSecretIds: [],
+    location: "village_square",
+  },
+  {
+    npcId: "npc_mayor_vain",
+    name: "체면이 전부인 시장님",
+    role: "마을 질서의 얼굴",
+    attitudeByCharacter: {},
+    goals: ["가발과 위엄을 동시에 지킨다", "축제 손님 앞에서는 아무 일도 없는 척한다"],
+    knownSecretIds: [],
+    location: "mayor_garden",
+    pressureClockId: "village_uproar",
+  },
+  {
+    npcId: "npc_laundry_grandma",
+    name: "빨랫줄 할머니",
+    role: "골목의 감시자",
+    attitudeByCharacter: {},
+    goals: ["빨래를 사수하려고 창문마다 고개를 내민다", "거위 울음소리를 정확히 흉내 내어 맞받아친다"],
+    knownSecretIds: [],
+    location: "laundry_alley",
+    pressureClockId: "warden_alert",
+  },
+  {
+    npcId: "npc_sleepy_warden",
+    name: "졸린 파수꾼",
+    role: "늦게 발동하는 추격자",
+    attitudeByCharacter: {},
+    goals: ["처음엔 하품하지만 소동이 커지면 호루라기를 분다", "빗자루 든 사람들을 엉성하게 지휘한다"],
+    knownSecretIds: [],
+    location: "festival_ground",
+    pressureClockId: "warden_alert",
+  },
+  {
+    npcId: "npc_festival_director",
+    name: "축제 준비 위원장",
+    role: "리허설 통제자",
+    attitudeByCharacter: {},
+    goals: ["축제 동선을 끝까지 맞추려 한다", "거위를 무대 장치의 일부로 오해한다"],
+    knownSecretIds: [],
+    location: "festival_ground",
+    pressureClockId: "village_uproar",
+  },
+];
+
+function seedTerribleGeeseBlackboard(roomId: string, empty: ScenarioBlackboard): ScenarioBlackboard {
+  const scenarioId = "terrible-geese";
+  const selectedFronts = [
+    ...seededPick(GEESE_OPENING_PRANKS, 1, `${roomId}:${scenarioId}:opening-prank`),
+    ...seededPick(GEESE_MIDGAME_PRANKS, 2, `${roomId}:${scenarioId}:midgame-pranks`),
+    ...seededPick(GEESE_FINALE_PRANKS, 1, `${roomId}:${scenarioId}:finale-prank`),
+  ].map((front, index) => ({
+    ...front,
+    stage: index === 0 ? "진행 중" : "대기",
+  }));
+  const selectedNpcs = seededPick(GEESE_NPCS, 3, `${roomId}:${scenarioId}:village-npcs`);
+
+  return {
+    ...empty,
+    sceneNodes: [
+      { id: "village_square", name: "마을 광장", status: "active" },
+      { id: "laundry_alley", name: "빨랫줄 골목" },
+      { id: "mayor_garden", name: "시장 관저 정원" },
+      { id: "festival_ground", name: "축제 준비장" },
+    ],
+    fronts: selectedFronts,
+    clues: [],
+    secrets: [],
+    npcs: selectedNpcs.map((npc) => ({ ...npc, attitudeByCharacter: { ...npc.attitudeByCharacter }, goals: [...npc.goals], knownSecretIds: [] })),
+    worldFlags: [
+      { key: "prank_deck", value: selectedFronts.map((front) => front.id).join(",") },
+      { key: "npc_deck", value: selectedNpcs.map((npc) => npc.npcId).join(",") },
+    ],
+  };
+}
 
 export function seedBlackboardForScenario(roomId: string, scenarioId: string): ScenarioBlackboard {
   const empty = createEmptyBlackboard(roomId, scenarioId);
   switch (scenarioId) {
+    case "terrible-geese":
+      return seedTerribleGeeseBlackboard(roomId, empty);
     case "the-sunless-crypt":
       return {
         ...empty,

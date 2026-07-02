@@ -63,6 +63,26 @@ export function seedSceneForScenario(scenarioId: string): SceneState | null {
         exits: ["ship_deck", "cargo_hold", "captain_cabin"],
         lastGmQuestion: "정보상에게 말을 붙일 건가요, 아니면 곧장 배로 숨어들 건가요?",
       });
+    case "terrible-geese":
+      return makeSceneState({
+        sceneId: "village_square",
+        location: "이슬 맺힌 마을 광장, 창턱의 파이가 식어 가고 분수대 리본이 바람에 흔들리는 아침",
+        sceneGoal: "창턱에서 식어 가는 파이를 망쳐 첫 장난을 성공시킨다",
+        currentTension: "아직 마을은 평화롭지만, 빵집 주인의 눈이 창턱과 거위 무리를 번갈아 본다",
+        presentNpcs: [
+          {
+            id: "npc_baker_broom",
+            name: "빗자루 든 빵집 주인",
+            disposition: "wary",
+            visibleIntent: "파이를 지키려고 창문 아래를 서성인다",
+          },
+        ],
+        visibleThreats: ["파이를 지키려는 빵집 주인의 빗자루", "광장 한복판에서 모든 소리를 키우는 분수대"],
+        availableClues: [],
+        revealedClues: [],
+        exits: ["laundry_alley", "mayor_garden", "festival_ground"],
+        lastGmQuestion: "몰래 다가가 파이를 노릴 건가요, 아니면 먼저 광장의 시선을 다른 곳으로 돌릴 건가요?",
+      });
     default:
       return null;
   }

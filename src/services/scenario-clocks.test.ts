@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { seedClocksForScenario, areClocksVisible } from "./scenario-clocks.js";
 import { seedBlackboardForScenario } from "./scenario-blackboard.js";
-import { ASHFALL_MONASTERY, MVP_SCENARIO, TIDEWATCH_SMUGGLERS } from "./scenario-service.js";
+import { ASHFALL_MONASTERY, MVP_SCENARIO, TERRIBLE_GEESE, TIDEWATCH_SMUGGLERS } from "./scenario-service.js";
 
 describe("seedClocksForScenario", () => {
   it("seeds the sunless-crypt scenario with its two pressure clocks at value 0", () => {
@@ -59,6 +59,27 @@ describe("seedClocksForScenario", () => {
     );
   });
 
+  it("seeds terrible-geese with visible comedy pressure clocks", () => {
+    const clocks = seedClocksForScenario(TERRIBLE_GEESE.id);
+
+    expect(clocks.map((clock) => clock.id).sort()).toEqual(["village_uproar", "warden_alert"]);
+    expect(clocks.find((clock) => clock.id === "village_uproar")).toMatchObject({
+      name: "마을의 봉기",
+      scope: "front",
+      max: 8,
+      onComplete: "village_organizes_goose_sweep",
+    });
+    expect(clocks.find((clock) => clock.id === "village_uproar")?.onCompleteEffects).toEqual(
+      expect.arrayContaining([{ type: "add_threat", threat: "조직적으로 거위 소탕에 나선 마을 사람들" }, { type: "force_ending" }]),
+    );
+    expect(clocks.find((clock) => clock.id === "warden_alert")).toMatchObject({
+      name: "파수꾼 경계",
+      scope: "scene",
+      max: 6,
+      onComplete: "broom_warden_mob",
+    });
+  });
+
   it.each([ASHFALL_MONASTERY.id, TIDEWATCH_SMUGGLERS.id])(
     "keeps %s NPC pressure clocks pointing at seeded clocks",
     (scenarioId) => {
@@ -86,5 +107,9 @@ describe("areClocksVisible", () => {
   it("hides ashfall clocks and shows tidewatch clocks", () => {
     expect(areClocksVisible(ASHFALL_MONASTERY.id)).toBe(false);
     expect(areClocksVisible(TIDEWATCH_SMUGGLERS.id)).toBe(true);
+  });
+
+  it("shows terrible-geese clocks", () => {
+    expect(areClocksVisible(TERRIBLE_GEESE.id)).toBe(true);
   });
 });
