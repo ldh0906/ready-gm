@@ -22,6 +22,7 @@ import type {
   NarrativeContextEntry,
   TurnState,
 } from "../core/turn-state.js";
+import { makeCharacterState, type CharacterState } from "../core/character-state.js";
 import type { Character } from "./types.js";
 
 /**
@@ -42,8 +43,10 @@ export interface ContextScenario {
   rulesBrief?: string;
 }
 
-/** A single character as the AI GM sees it (no engine-internal ids). */
+/** A single character as the AI GM sees it. */
 export interface ContextCharacter {
+  /** Stable server id used by typed CharacterDelta proposals. */
+  id: string;
   name: string;
   concept: string;
   /**
@@ -53,6 +56,17 @@ export interface ContextCharacter {
    * scenarios flow through unchanged.
    */
   attributes: Record<string, AttributeLevel>;
+  /**
+   * Ruleset-specific original sheet fields (disposition, goal, card answers,
+   * …) keyed by sheet field id, when the character carries any. Immutable
+   * creation-time data — the mutable in-session half lives in {@link state}.
+   */
+  sheet?: Record<string, string>;
+  /**
+   * Mutable in-session facts about this character, when the room has a
+   * CharacterStateStore wired in. Omitted for legacy/no-store callers.
+   */
+  state?: CharacterState;
 }
 
 /** One active player's pending action for the current round. */
@@ -135,9 +149,13 @@ export function toContext(
   scenario: ContextScenario,
   characters: readonly Character[],
   budget?: number,
+  characterStates?: readonly CharacterState[],
 ): TurnStateContext {
   const characterNameByPlayerId = new Map(
     characters.map((character) => [character.playerId, character.name] as const),
+  );
+  const characterStateById = new Map(
+    (characterStates ?? []).map((characterState) => [characterState.characterId, characterState] as const),
   );
 
   const context: TurnStateContext = {
@@ -152,11 +170,24 @@ export function toContext(
       // scenarios without one introduce no key (exactOptionalPropertyTypes).
       ...(scenario.rulesBrief !== undefined ? { rulesBrief: scenario.rulesBrief } : {}),
     },
-    characters: characters.map((character) => ({
-      name: character.name,
-      concept: character.concept,
-      attributes: { ...character.attributes },
-    })),
+    characters: characters.map((character) => {
+      const characterState = characterStateById.get(character.id);
+      // Ruleset-specific original sheet fields ground the GM's narration
+      // (only non-empty values; `concept` is already carried separately).
+      const sheet = Object.fromEntries(
+        Object.entries(character.sheetData?.narrativeFields ?? {}).filter(
+          ([key, value]) => key !== "concept" && value.trim().length > 0,
+        ),
+      );
+      return {
+        id: character.id,
+        name: character.name,
+        concept: character.concept,
+        attributes: { ...character.attributes },
+        ...(Object.keys(sheet).length > 0 ? { sheet } : {}),
+        ...(characterState !== undefined ? { state: makeCharacterState(characterState) } : {}),
+      };
+    }),
     thisRound: {
       actions: state.readiness.map((entry) => ({
         characterName: characterNameByPlayerId.get(entry.playerId) ?? entry.playerId,

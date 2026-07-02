@@ -6,6 +6,7 @@ import {
   makeAiCallEvent,
   makeRoundTimingEvent,
   makeAiOutputEvent,
+  makeGmProcedureEvent,
   type EnvelopeGenerators,
   type QaEvent,
 } from "./events.js";
@@ -44,7 +45,7 @@ describe("event envelope", () => {
   });
 });
 
-describe("the five event shapes", () => {
+describe("QA event shapes", () => {
   const corr = { sessionId: "room-1", roundNo: 2 };
   const gen = () => fixedGenerators();
 
@@ -135,6 +136,47 @@ describe("the five event shapes", () => {
     );
     expect(bad.validationPassed).toBe(false);
     expect(bad.failureReason).toBe("schema mismatch");
+  });
+
+  it("builds a gm_procedure event with planning hints or critique output", () => {
+    const planning = makeGmProcedureEvent(
+      corr,
+      {
+        phase: "planning",
+        hints: [
+          {
+            id: "character_spotlight",
+            priority: "medium",
+            instruction: "spotlight target",
+            data: { targetCharacterName: "세라" },
+          },
+        ],
+        criticChecks: ["do not leak hidden rolls"],
+      },
+      gen(),
+    );
+    expect(planning.eventType).toBe("gm_procedure");
+    expect(planning.phase).toBe("planning");
+    expect(planning.hints?.[0]?.id).toBe("character_spotlight");
+
+    const critique = makeGmProcedureEvent(
+      corr,
+      {
+        phase: "critique",
+        critique: {
+          passed: false,
+          warnings: [
+            {
+              code: "hidden_gm_roll_exposed",
+              message: "Hidden roll leaked.",
+            },
+          ],
+        },
+      },
+      gen(),
+    );
+    expect(critique.phase).toBe("critique");
+    expect(critique.critique?.passed).toBe(false);
   });
 });
 

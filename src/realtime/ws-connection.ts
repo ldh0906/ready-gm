@@ -57,8 +57,8 @@ export class WsConnection implements Connection {
     }
   }
 
-  close(): void {
-    this.socket.close();
+  close(code?: number, reason?: string): void {
+    this.socket.close(code, reason);
   }
 
   onMessage(handler: (raw: string) => void): void {

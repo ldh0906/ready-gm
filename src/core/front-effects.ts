@@ -13,6 +13,7 @@
  */
 import type { FiredEffect, ProgressClock } from "./progress-clock.js";
 import { addSceneNpc, addVisibleThreat, revealClue, type SceneState } from "./scene-state.js";
+import type { BlackboardDelta } from "./scenario-blackboard.js";
 
 /** Outcome of applying the fired clocks' effects this round. */
 export interface FiredEffectsResult {
@@ -64,4 +65,34 @@ export function applyFiredEffects(
   }
 
   return { scene: nextScene, endingForced, appliedEffects };
+}
+
+/**
+ * Express the fired clocks' world-mutating effects as {@link BlackboardDelta}s
+ * so a filled clock also lands in ScenarioBlackboard state (not only the Scene
+ * State). The deltas still pass the normal blackboard reducer, so an effect
+ * referencing a clue the blackboard does not know is rejected fail-closed.
+ */
+export function firedEffectsToBlackboardDeltas(
+  firedClocks: readonly ProgressClock[],
+): BlackboardDelta[] {
+  const deltas: BlackboardDelta[] = [];
+  for (const clock of firedClocks) {
+    for (const effect of clock.onCompleteEffects ?? []) {
+      if (effect.type === "add_threat") {
+        deltas.push({
+          type: "add_threat",
+          threat: { id: `clock-threat-${clock.id}`, name: effect.threat, status: "active" },
+          reason: `clock ${clock.id} filled`,
+        });
+      } else if (effect.type === "reveal_clue") {
+        deltas.push({
+          type: "reveal_clue",
+          clueId: effect.clueId,
+          reason: `clock ${clock.id} filled`,
+        });
+      }
+    }
+  }
+  return deltas;
 }

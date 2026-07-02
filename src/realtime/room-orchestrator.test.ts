@@ -18,11 +18,13 @@
 import { describe, expect, it } from "vitest";
 import { createInitialTurnState } from "../core/round-loop.js";
 import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
+import { makeCharacterState } from "../core/character-state.js";
 import type { TurnState } from "../core/turn-state.js";
 import { InMemoryRoomStore } from "../services/room-store.js";
 import { InMemoryTurnStateStore } from "../services/turn-state-store.js";
 import { InMemoryClockStore } from "../services/clock-store.js";
 import { InMemorySceneStore } from "../services/scene-store.js";
+import { InMemoryCharacterStateStore } from "../services/character-state-store.js";
 import { MVP_SCENARIO, ScenarioService } from "../services/scenario-service.js";
 import type { Character, Player, Room } from "../services/types.js";
 import { InMemorySessionSummaryRepository } from "../persistence/pg-session-summary-repository.js";
@@ -35,8 +37,12 @@ import {
   type OrchestratorCoordinator,
 } from "./room-orchestrator.js";
 import type {
+  DeclaredCheck,
+  DeclareRoundResult,
   GenerationResult,
   Narration,
+  NarrateDeclaredRoundInput,
+  RoundDeclaration,
   ResolveRoundInput,
   ResolveRoundResult,
   SessionSummary,
@@ -54,6 +60,35 @@ function makeClock(startIso = "2024-01-01T00:00:00.000Z") {
     now: (): Date => new Date(ms),
     advance: (deltaMs: number): void => {
       ms += deltaMs;
+    },
+  };
+}
+
+function makeManualTimers() {
+  const callbacks: Array<(() => void) | undefined> = [];
+  return {
+    scheduleTimer(fn: () => void): number {
+      callbacks.push(fn);
+      return callbacks.length - 1;
+    },
+    cancelTimer(handle: unknown): void {
+      if (typeof handle === "number") callbacks[handle] = undefined;
+    },
+    runLatest(): void {
+      let index = -1;
+      for (let i = callbacks.length - 1; i >= 0; i -= 1) {
+        if (callbacks[i] !== undefined) {
+          index = i;
+          break;
+        }
+      }
+      if (index < 0) return;
+      const fn = callbacks[index];
+      callbacks[index] = undefined;
+      fn?.();
+    },
+    pendingCount(): number {
+      return callbacks.filter((fn) => fn !== undefined).length;
     },
   };
 }
@@ -94,20 +129,51 @@ class FakeConnection implements Connection {
       .filter((e): e is Extract<ServerEvent, { type: "turn_state" }> => e.type === "turn_state")
       .map((e) => e.state);
   }
+
+  narrationFailures(): Array<Extract<ServerEvent, { type: "narration_failed" }>> {
+    return this.events.filter(
+      (e): e is Extract<ServerEvent, { type: "narration_failed" }> =>
+        e.type === "narration_failed",
+    );
+  }
+
+  checksPending(): Array<Extract<ServerEvent, { type: "checks_pending" }>> {
+    return this.events.filter(
+      (e): e is Extract<ServerEvent, { type: "checks_pending" }> =>
+        e.type === "checks_pending",
+    );
+  }
+
+  checksRolled(): Array<Extract<ServerEvent, { type: "check_rolled" }>> {
+    return this.events.filter(
+      (e): e is Extract<ServerEvent, { type: "check_rolled" }> =>
+        e.type === "check_rolled",
+    );
+  }
 }
 
 /** A programmable fake coordinator implementing the orchestrator's port. */
 class FakeCoordinator implements OrchestratorCoordinator {
   resolveCalls = 0;
+  declareCalls = 0;
+  narrateCalls = 0;
+  rollCalls = 0;
   openingCalls = 0;
   endingCalls = 0;
   lastResolveInput: ResolveRoundInput | undefined;
+  readonly resolveInputs: ResolveRoundInput[] = [];
+  private lastDeclaredLegacyResult: ResolveRoundResult | undefined;
 
   constructor(
     private readonly opts: {
       resolve?: (input: ResolveRoundInput) => ResolveRoundResult;
+      declare?: (input: ResolveRoundInput) => DeclareRoundResult;
+      narrate?: (input: NarrateDeclaredRoundInput) => ResolveRoundResult;
+      declaredChecks?: DeclaredCheck[];
       opening?: Narration;
       ending?: { closing: Narration; summary: SessionSummary };
+      openingFailure?: string;
+      endingFailure?: string;
       /** Side effect run synchronously inside resolveRound (e.g. advance clock). */
       onResolve?: () => void;
     } = {},
@@ -116,6 +182,7 @@ class FakeCoordinator implements OrchestratorCoordinator {
   resolveRound(input: ResolveRoundInput): Promise<ResolveRoundResult> {
     this.resolveCalls += 1;
     this.lastResolveInput = input;
+    this.resolveInputs.push(input);
     this.opts.onResolve?.();
     const result =
       this.opts.resolve?.(input) ??
@@ -129,13 +196,82 @@ class FakeCoordinator implements OrchestratorCoordinator {
     return Promise.resolve(result);
   }
 
+  declareRound(input: ResolveRoundInput): Promise<DeclareRoundResult> {
+    this.declareCalls += 1;
+    this.resolveCalls += 1;
+    this.lastResolveInput = input;
+    this.resolveInputs.push(input);
+    this.opts.onResolve?.();
+    const legacy = this.opts.resolve?.(input);
+    if (legacy !== undefined && !legacy.ok) {
+      return Promise.resolve(legacy);
+    }
+    const declaration: RoundDeclaration = {
+      state: input.state,
+      context: input as unknown as TurnStateContext,
+      decision: {} as RoundDeclaration["decision"],
+      checks: this.opts.declaredChecks ?? [],
+      procedurePlan: {} as RoundDeclaration["procedurePlan"],
+      correlation: {} as RoundDeclaration["correlation"],
+    };
+    this.lastDeclaredLegacyResult = legacy;
+    const result =
+      this.opts.declare?.(input) ??
+      ({ ok: true, declaration } satisfies DeclareRoundResult);
+    return Promise.resolve(result);
+  }
+
+  rollDeclaredCheck(check: DeclaredCheck): GenerationResult<import("../core/turn-state.js").CheckRecord> {
+    this.rollCalls += 1;
+    return {
+      ok: true,
+      value: {
+        characterId: check.characterId,
+        attribute: check.attribute,
+        difficulty: check.difficulty,
+        roll: 1,
+        rolls: [1],
+        advantage: check.advantage,
+        visibility: check.visibility,
+        outcome: "Success",
+      },
+    };
+  }
+
+  narrateDeclaredRound(input: NarrateDeclaredRoundInput): Promise<ResolveRoundResult> {
+    this.narrateCalls += 1;
+    const result =
+      this.opts.narrate?.(input) ??
+      this.lastDeclaredLegacyResult ??
+      ({
+        ok: true,
+        narration: "결과 내레이션",
+        checks: input.resolvedChecks,
+        endingReached: false,
+        context: input.declaration.context,
+      } satisfies ResolveRoundResult);
+    return Promise.resolve(result);
+  }
+
   generateOpening(): Promise<GenerationResult<Narration>> {
     this.openingCalls += 1;
+    if (this.opts.openingFailure !== undefined) {
+      return Promise.resolve({
+        ok: false,
+        error: { reason: "ai_request_failed", message: this.opts.openingFailure },
+      });
+    }
     return Promise.resolve({ ok: true, value: this.opts.opening ?? "오프닝 내레이션" });
   }
 
   generateEnding(): Promise<GenerationResult<{ closing: Narration; summary: SessionSummary }>> {
     this.endingCalls += 1;
+    if (this.opts.endingFailure !== undefined) {
+      return Promise.resolve({
+        ok: false,
+        error: { reason: "ai_request_failed", message: this.opts.endingFailure },
+      });
+    }
     return Promise.resolve({
       ok: true,
       value: this.opts.ending ?? { closing: "엔딩 내레이션", summary: { text: "세션 요약" } },
@@ -155,6 +291,7 @@ interface Harness {
   clock: ReturnType<typeof makeClock>;
   clockStore: InMemoryClockStore | undefined;
   sceneStore: InMemorySceneStore | undefined;
+  characterStateStore: InMemoryCharacterStateStore | undefined;
 }
 
 /** Build a room with a host + one other player, both with confirmed characters. */
@@ -186,6 +323,8 @@ function makeHarness(
   clock = makeClock(),
   clockStore?: InMemoryClockStore,
   sceneStore?: InMemorySceneStore,
+  characterStateStore?: InMemoryCharacterStateStore,
+  timers?: ReturnType<typeof makeManualTimers>,
 ): Harness {
   const roomStore = new InMemoryRoomStore();
   const turnStateStore = new InMemoryTurnStateStore();
@@ -209,9 +348,24 @@ function makeHarness(
     now: clock.now,
     ...(clockStore ? { clockStore } : {}),
     ...(sceneStore ? { sceneStore } : {}),
+    ...(characterStateStore ? { characterStateStore } : {}),
+    ...(timers ? { scheduleTimer: timers.scheduleTimer, cancelTimer: timers.cancelTimer } : {}),
   });
 
-  return { orchestrator, gateway, connection, roomStore, turnStateStore, summaries, sink, coordinator, clock, clockStore, sceneStore };
+  return {
+    orchestrator,
+    gateway,
+    connection,
+    roomStore,
+    turnStateStore,
+    summaries,
+    sink,
+    coordinator,
+    clock,
+    clockStore,
+    sceneStore,
+    characterStateStore,
+  };
 }
 
 /** Start the session and drain the opening narration. */
@@ -254,6 +408,192 @@ describe("RoomOrchestrator", () => {
 
     // The resolution narration was delivered (R10.4, R15.5).
     expect(h.connection.narrations().some((n) => n.kind === "resolution" && n.roundNumber === 1)).toBe(true);
+  });
+
+  it("declares pending checks and waits for the owning player roll before narration", async () => {
+    const coordinator = new FakeCoordinator({
+      declaredChecks: [
+        {
+          checkId: "round-1-check-1",
+          characterId: "c1",
+          playerId: HOST,
+          characterName: "Aria",
+          attribute: "Might",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+      ],
+    });
+    const h = makeHarness(coordinator);
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.declareCalls).toBe(1);
+    expect(coordinator.narrateCalls).toBe(0);
+    expect(h.turnStateStore.get(ROOM_ID)?.phase).toBe("rolling");
+    expect(h.connection.checksPending()).toHaveLength(1);
+    expect(h.connection.checksPending()[0]?.checks[0]).toMatchObject({
+      checkId: "round-1-check-1",
+      playerId: HOST,
+      characterName: "Aria",
+      attribute: "Might",
+      difficulty: "Average",
+      status: "pending",
+    });
+    expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(false);
+
+    await h.orchestrator.dispatch(ROOM_ID, {
+      type: "ROLL_CHECK",
+      from: HOST,
+      checkId: "round-1-check-1",
+    });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(1);
+    expect(coordinator.narrateCalls).toBe(1);
+    expect(h.connection.checksRolled()).toHaveLength(1);
+    expect(h.connection.checksRolled()[0]?.check).toMatchObject({
+      checkId: "round-1-check-1",
+      roll: 1,
+      outcome: "Success",
+    });
+    expect(h.connection.narrations().some((n) => n.kind === "resolution" && n.roundNumber === 1)).toBe(true);
+  });
+
+  it("rejects non-owner roll commands and treats duplicate owner rolls as idempotent", async () => {
+    const coordinator = new FakeCoordinator({
+      declaredChecks: [
+        {
+          checkId: "round-1-check-1",
+          characterId: "c1",
+          playerId: HOST,
+          characterName: "Aria",
+          attribute: "Might",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+      ],
+    });
+    const h = makeHarness(coordinator);
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    await h.orchestrator.dispatch(ROOM_ID, {
+      type: "ROLL_CHECK",
+      from: PLAYER_2,
+      checkId: "round-1-check-1",
+    });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(0);
+    expect(h.connection.checksRolled()).toHaveLength(0);
+    expect(h.turnStateStore.get(ROOM_ID)?.rollingChecks?.[0]?.status).toBe("pending");
+
+    await h.orchestrator.dispatch(ROOM_ID, {
+      type: "ROLL_CHECK",
+      from: HOST,
+      checkId: "round-1-check-1",
+    });
+    await h.orchestrator.dispatch(ROOM_ID, {
+      type: "ROLL_CHECK",
+      from: HOST,
+      checkId: "round-1-check-1",
+    });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(1);
+    expect(h.connection.checksRolled()).toHaveLength(1);
+  });
+
+  it("does not narrate until every pending check is rolled", async () => {
+    const coordinator = new FakeCoordinator({
+      declaredChecks: [
+        {
+          checkId: "round-1-check-1",
+          characterId: "c1",
+          playerId: HOST,
+          characterName: "Aria",
+          attribute: "Might",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+        {
+          checkId: "round-1-check-2",
+          characterId: "c2",
+          playerId: PLAYER_2,
+          characterName: "Borin",
+          attribute: "Spirit",
+          difficulty: "Hard",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 1,
+        },
+      ],
+    });
+    const h = makeHarness(coordinator);
+    await start(h);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "ROLL_CHECK", from: HOST, checkId: "round-1-check-1" });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.narrateCalls).toBe(0);
+    expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(false);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "ROLL_CHECK", from: PLAYER_2, checkId: "round-1-check-2" });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.narrateCalls).toBe(1);
+    expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(true);
+  });
+
+  it("auto-rolls pending checks on timeout and proceeds to narration", async () => {
+    const timers = makeManualTimers();
+    const coordinator = new FakeCoordinator({
+      declaredChecks: [
+        {
+          checkId: "round-1-check-1",
+          characterId: "c1",
+          playerId: HOST,
+          characterName: "Aria",
+          attribute: "Might",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+      ],
+    });
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, timers);
+    await start(h);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    timers.runLatest();
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(1);
+    expect(coordinator.narrateCalls).toBe(1);
+    expect(h.connection.checksRolled()[0]?.check).toMatchObject({
+      checkId: "round-1-check-1",
+      autoRolled: true,
+    });
+    expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(true);
   });
 
   it("seeds scenario clocks, supplies them to resolution, and persists the applied result", async () => {
@@ -363,6 +703,72 @@ describe("RoomOrchestrator", () => {
     expect(resolution?.clocks?.map((c) => c.name)).toContain("묘지 경계도");
   });
 
+  it("emits a room-visible failure event when opening narration fails", async () => {
+    const h = makeHarness(new FakeCoordinator({ openingFailure: "model timeout" }));
+
+    await start(h);
+
+    expect(h.connection.narrationFailures()).toContainEqual({
+      type: "narration_failed",
+      roomId: ROOM_ID,
+      phase: "opening",
+      reason: "model timeout",
+      retryable: true,
+    });
+    expect(h.connection.narrations().some((n) => n.kind === "opening")).toBe(false);
+  });
+
+  it("seeds, supplies, and persists character states across resolved rounds", async () => {
+    const characterStateStore = new InMemoryCharacterStateStore();
+    const coordinator = new FakeCoordinator({
+      resolve: (input) => ({
+        ok: true,
+        narration: "결과 내레이션",
+        checks: [],
+        endingReached: false,
+        context: input as unknown as TurnStateContext,
+        characterStates: (input.characterStates ?? []).map((state) =>
+          state.characterId === "c1"
+            ? makeCharacterState({
+                ...state,
+                conditions: [
+                  ...state.conditions,
+                  { name: `round-${input.state.roundNumber}`, reason: "test" },
+                ],
+              })
+            : state,
+        ),
+      }),
+    });
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, characterStateStore);
+
+    await start(h);
+
+    expect(characterStateStore.get(ROOM_ID).map((state) => state.characterId).sort()).toEqual(["c1", "c2"]);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(characterStateStore.get(ROOM_ID).find((state) => state.characterId === "c1")?.conditions).toContainEqual({
+      name: "round-1",
+      reason: "test",
+    });
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "b" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.resolveInputs[1]?.characterStates?.find((state) => state.characterId === "c1")?.conditions).toContainEqual({
+      name: "round-1",
+      reason: "test",
+    });
+    expect(characterStateStore.get(ROOM_ID).find((state) => state.characterId === "c1")?.conditions).toContainEqual({
+      name: "round-2",
+      reason: "test",
+    });
+  });
+
   it("converges interleaved readiness commands and resolves exactly once", async () => {
     const coordinator = new FakeCoordinator();
     const h = makeHarness(coordinator);
@@ -448,6 +854,30 @@ describe("RoomOrchestrator", () => {
     expect(h.connection.narrations().some((n) => n.kind === "closing")).toBe(true);
   });
 
+  it("emits a room-visible failure event when ending narration fails", async () => {
+    const coordinator = new FakeCoordinator({
+      resolve: () => ({ ok: true, narration: "마지막 내레이션", checks: [], endingReached: true, context: {} as TurnStateContext }),
+      endingFailure: "invalid ending output",
+    });
+    const h = makeHarness(coordinator);
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.endingCalls).toBe(1);
+    expect(await h.summaries.get(ROOM_ID)).toBeUndefined();
+    expect(h.roomStore.getRoom(ROOM_ID)?.state).toBe("in_session");
+    expect(h.connection.narrationFailures()).toContainEqual({
+      type: "narration_failed",
+      roomId: ROOM_ID,
+      phase: "ending",
+      reason: "invalid ending output",
+      retryable: true,
+    });
+  });
+
   it("preserves recorded actions when AI resolution fails", async () => {
     const coordinator = new FakeCoordinator({
       resolve: (input) => ({
@@ -474,6 +904,32 @@ describe("RoomOrchestrator", () => {
     expect(host?.actionText).toBe("문을 연다");
     expect(host?.status).toBe("ready");
     expect(p2?.actionKind).toBe("pass");
+  });
+
+  it("caps automatic ready-check retries after repeated AI resolution failures", async () => {
+    const coordinator = new FakeCoordinator({
+      resolve: (input) => ({
+        ok: false,
+        error: { reason: "ai_request_failed", message: "boom" },
+        preservedState: { ...input.state, resolutionRequested: false },
+      }),
+    });
+    const timers = makeManualTimers();
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, timers);
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.resolveCalls).toBe(1);
+    expect(timers.pendingCount()).toBe(1);
+
+    timers.runLatest();
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.resolveCalls).toBe(2);
+    expect(timers.pendingCount()).toBe(0);
   });
 
   it("attaches the sender's room display name alongside the character name on chat", async () => {

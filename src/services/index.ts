@@ -12,4 +12,6 @@ export * from "./clock-store.js";
 export * from "./scenario-clocks.js";
 export * from "./scene-store.js";
 export * from "./scenario-scenes.js";
+export * from "./character-state-store.js";
+export * from "./blackboard-store.js";
 export * from "./turn-state-context.js";

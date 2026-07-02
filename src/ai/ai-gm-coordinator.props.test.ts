@@ -85,6 +85,13 @@ function phaseResponder(cfg: ResponderCfg = {}) {
         cfg.checkSelection ?? {
           text: JSON.stringify({
             checks: [{ characterName: "보린", attribute: "Might", difficulty: "Hard" }],
+            noRollRationales: [
+              { characterName: "용사-1", rationale: "이번 라운드에는 별도 판정 없이 보조합니다." },
+              { characterName: "용사-2", rationale: "이번 라운드에는 별도 판정 없이 보조합니다." },
+              { characterName: "용사-3", rationale: "이번 라운드에는 별도 판정 없이 보조합니다." },
+              { characterName: "용사-4", rationale: "이번 라운드에는 별도 판정 없이 보조합니다." },
+              { characterName: "용사-5", rationale: "이번 라운드에는 별도 판정 없이 보조합니다." },
+            ],
             stateChanges: [],
           }),
         }

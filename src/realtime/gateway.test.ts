@@ -121,6 +121,37 @@ describe("RealtimeGateway — connect / resync", () => {
   });
 });
 
+describe("RealtimeGateway — room cleanup", () => {
+  it("closes every connection in a room and drops room state", () => {
+    const gw = new RealtimeGateway({ getTurnState: () => undefined });
+    const a = new FakeConnection("a", "room-1", "p1");
+    const b = new FakeConnection("b", "room-1", "p2");
+    const other = new FakeConnection("c", "room-2", "p3");
+    gw.connect(a);
+    gw.connect(b);
+    gw.connect(other);
+
+    gw.closeRoom("room-1", 4000, "ended");
+
+    expect(a.closed).toBe(true);
+    expect(b.closed).toBe(true);
+    expect(other.closed).toBe(false);
+    expect(gw.connectionCount("room-1")).toBe(0);
+    expect(gw.connectionCount("room-2")).toBe(1);
+  });
+
+  it("drops buffered narration for a closed room", () => {
+    const gw = new RealtimeGateway({ getTurnState: () => undefined });
+    gw.deliverNarration("room-1", { kind: "opening", roundNumber: 1, text: "오프닝" });
+    gw.closeRoom("room-1", 4000, "ended");
+
+    const conn = new FakeConnection("a", "room-1", "p1");
+    gw.connect(conn);
+
+    expect(conn.ofType("narration")).toEqual([]);
+  });
+});
+
 describe("RealtimeGateway — broadcast (R13.1, R13.3)", () => {
   it("broadcasts an event to every connected member of the room", () => {
     const gw = new RealtimeGateway({ getTurnState: () => undefined });

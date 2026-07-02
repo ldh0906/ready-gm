@@ -18,6 +18,7 @@
  *  - {@link SessionSlotLimiter} — global cap on recent session starts to bound
  *    concurrent AI generation cost regardless of source IP.
  */
+import { URL } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 
@@ -122,6 +123,103 @@ export function tokenMatches(expected: string | undefined, provided: string | un
 }
 
 /**
+ * Build a copied invite URL from the room invite code only. The global
+ * PLAYTEST_TOKEN is deliberately not embedded in the URL; invite-code exchange
+ * and server-issued connection tickets carry participant authorization after
+ * the invite is opened.
+ */
+export function buildPublicInviteLink(
+  protocol: string,
+  host: string,
+  inviteToken: string,
+  _playtestToken?: string,
+): string {
+  const safeProtocol = protocol.endsWith(":") ? protocol.slice(0, -1) : protocol;
+  return `${safeProtocol}://${host}/join/${encodeURIComponent(inviteToken)}`;
+}
+
+/** Express `trust proxy` setting derived from explicit operator intent. */
+export type TrustProxySetting = false | number | string;
+
+/**
+ * Resolve Express' `trust proxy` setting. The safe default is `false`: direct
+ * public binds must not accept spoofable `X-Forwarded-For` as the client IP.
+ * Tunnel/proxy deployments can opt in with `TRUST_PROXY=1`, another positive
+ * hop count, or an Express trust-proxy subnet label such as `loopback`.
+ */
+export function resolveTrustProxy(env: EnvLike): TrustProxySetting {
+  const raw = env.TRUST_PROXY?.trim();
+  if (raw === undefined || raw === "") return false;
+  const lower = raw.toLowerCase();
+  if (lower === "0" || lower === "false" || lower === "off" || lower === "no") return false;
+  if (lower === "1" || lower === "true" || lower === "on" || lower === "yes") return 1;
+  const hops = Number(lower);
+  if (Number.isInteger(hops) && hops > 0) return hops;
+  return raw;
+}
+
+export interface CsrfRequestHeaders {
+  readonly origin?: string | undefined;
+  readonly secFetchSite?: string | undefined;
+}
+
+/** True when a browser state-changing request is same-origin or non-browser. */
+export function isStateChangingRequestCsrfSafe(
+  headers: CsrfRequestHeaders,
+  targetOrigin: string,
+): boolean {
+  const secFetchSite = headers.secFetchSite?.trim().toLowerCase();
+  if (secFetchSite === "cross-site" || secFetchSite === "same-site") return false;
+
+  const origin = headers.origin?.trim();
+  if (origin !== undefined && origin.length > 0) {
+    try {
+      return new URL(origin).origin === new URL(targetOrigin).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  return (
+    secFetchSite === undefined ||
+    secFetchSite === "" ||
+    secFetchSite === "none" ||
+    secFetchSite === "same-origin"
+  );
+}
+
+export type BoundedTextResult =
+  | { readonly ok: true; readonly value: string }
+  | { readonly ok: false; readonly status: 400 | 413; readonly error: string };
+
+export interface BoundedTextOptions {
+  readonly field: string;
+  readonly maxLength: number;
+  readonly required?: boolean;
+  readonly trim?: boolean;
+}
+
+/** Normalize and cap untrusted text before it reaches prompts, logs, or state. */
+export function readBoundedText(value: unknown, options: BoundedTextOptions): BoundedTextResult {
+  if (!Number.isInteger(options.maxLength) || options.maxLength < 1) {
+    throw new RangeError(`maxLength must be a positive integer, got ${options.maxLength}`);
+  }
+  const raw = typeof value === "string" ? value : "";
+  const text = options.trim === false ? raw : raw.trim();
+  if (options.required === true && text.length === 0) {
+    return { ok: false, status: 400, error: `${options.field} is required.` };
+  }
+  if (text.length > options.maxLength) {
+    return {
+      ok: false,
+      status: 413,
+      error: `${options.field} is too long; max ${options.maxLength} characters.`,
+    };
+  }
+  return { ok: true, value: text };
+}
+
+/**
  * A fixed-window per-key request limiter. Each key (e.g. a client IP) may make
  * at most `limit` calls per `windowMs`; the window resets once it elapses.
  * Expired keys are pruned lazily on access so memory stays bounded under churn.
@@ -171,6 +269,93 @@ export class FixedWindowRateLimiter {
 }
 
 /**
+ * Fixed-window weighted budget for AI-cost surfaces. Unlike a request-count
+ * limiter, one caller may consume more than one unit (for example, a route that
+ * fans out to multiple model calls) while still sharing a simple per-key cap.
+ */
+export class FixedWindowBudgetLimiter {
+  private readonly windows = new Map<string, { used: number; resetAt: number }>();
+  private readonly budget: number;
+  private readonly windowMs: number;
+
+  constructor(budget: number, windowMs: number) {
+    if (!Number.isInteger(budget) || budget <= 0) {
+      throw new RangeError(`budget must be a positive integer, got ${budget}`);
+    }
+    if (!Number.isFinite(windowMs) || windowMs <= 0) {
+      throw new RangeError(`windowMs must be a positive number, got ${windowMs}`);
+    }
+    this.budget = budget;
+    this.windowMs = windowMs;
+  }
+
+  /**
+   * Try to consume `cost` units for `key`. Returns `false` when that cost would
+   * exceed the key's current fixed-window budget.
+   */
+  tryConsume(key: string, cost = 1, now: number = Date.now()): boolean {
+    this.assertValidCost(cost);
+    this.prune(now);
+    const existing = this.windows.get(key);
+    if (existing === undefined || now >= existing.resetAt) {
+      this.windows.set(key, { used: cost, resetAt: now + this.windowMs });
+      return true;
+    }
+    if (existing.used + cost > this.budget) {
+      return false;
+    }
+    existing.used += cost;
+    return true;
+  }
+
+  /**
+   * Return previously consumed units for `key`. This keeps multi-axis budget
+   * checks transactional when a later global/room/player axis rejects a request.
+   */
+  refund(key: string, cost = 1, now: number = Date.now()): boolean {
+    this.assertValidCost(cost);
+    this.prune(now);
+    const existing = this.windows.get(key);
+    if (existing === undefined) return false;
+    existing.used = Math.max(0, existing.used - cost);
+    if (existing.used === 0) this.windows.delete(key);
+    return true;
+  }
+
+  /** Drop elapsed windows lazily so churn does not grow memory forever. */
+  private prune(now: number): void {
+    for (const [key, window] of this.windows) {
+      if (now >= window.resetAt) {
+        this.windows.delete(key);
+      }
+    }
+  }
+
+  private assertValidCost(cost: number): void {
+    if (!Number.isInteger(cost) || cost <= 0 || cost > this.budget) {
+      throw new RangeError(`cost must be an integer in [1, ${this.budget}], got ${cost}`);
+    }
+  }
+}
+
+/** A tiny per-key in-flight guard for non-reentrant expensive operations. */
+export class InFlightKeyLock {
+  private readonly held = new Set<string>();
+
+  /** Acquire `key` if no operation currently holds it. */
+  tryAcquire(key: string): boolean {
+    if (this.held.has(key)) return false;
+    this.held.add(key);
+    return true;
+  }
+
+  /** Release `key`; returns whether a held lock existed. */
+  release(key: string): boolean {
+    return this.held.delete(key);
+  }
+}
+
+/**
  * A global cap on how many sessions may be started within a sliding TTL window.
  * Each `/play/new` triggers a Codex opening generation, so this bounds the total
  * concurrent AI cost regardless of how requests are distributed across IPs. A
@@ -179,8 +364,8 @@ export class FixedWindowRateLimiter {
  * sessions" without needing an explicit per-session completion signal.
  */
 export class SessionSlotLimiter {
-  /** Acquisition timestamps of currently-held slots. */
-  private readonly held: number[] = [];
+  /** Acquisition timestamps of currently-held slots, keyed by session/room id. */
+  private readonly held = new Map<string, number>();
   private readonly max: number;
   private readonly ttlMs: number;
 
@@ -199,41 +384,39 @@ export class SessionSlotLimiter {
    * Try to acquire a session slot. Returns `true` when below the cap (slot is
    * held for `ttlMs`) and `false` when the cap is currently reached.
    */
-  tryAcquire(now: number = Date.now()): boolean {
+  tryAcquire(id: string, now: number = Date.now()): boolean {
     this.pruneExpired(now);
-    if (this.held.length >= this.max) {
+    if (this.held.has(id)) {
+      this.held.set(id, now);
+      return true;
+    }
+    if (this.held.size >= this.max) {
       return false;
     }
-    this.held.push(now);
+    this.held.set(id, now);
     return true;
   }
 
   /** Number of slots currently held (after pruning expired ones). */
   count(now: number = Date.now()): number {
     this.pruneExpired(now);
-    return this.held.length;
+    return this.held.size;
   }
 
   /**
-   * Release one held slot (the oldest), e.g. when a session ends before its TTL
-   * elapses, so finished sessions free capacity for new ones. No-op when none
-   * are held. Returns `true` when a slot was released.
+   * Release the slot for one session id, e.g. when that session ends before its
+   * TTL elapses, so finished sessions free capacity for new ones.
    */
-  release(now: number = Date.now()): boolean {
+  release(id: string, now: number = Date.now()): boolean {
     this.pruneExpired(now);
-    if (this.held.length === 0) return false;
-    this.held.shift();
-    return true;
+    return this.held.delete(id);
   }
 
   /** Remove slots whose TTL has elapsed. */
   private pruneExpired(now: number): void {
     const cutoff = now - this.ttlMs;
-    for (let i = this.held.length - 1; i >= 0; i -= 1) {
-      const acquiredAt = this.held[i];
-      if (acquiredAt !== undefined && acquiredAt <= cutoff) {
-        this.held.splice(i, 1);
-      }
+    for (const [id, acquiredAt] of this.held) {
+      if (acquiredAt <= cutoff) this.held.delete(id);
     }
   }
 }

@@ -37,7 +37,7 @@ import {
   type CharacterCard,
   validateAllocation,
 } from "./sheet-schema.js";
-import type { Character } from "./types.js";
+import type { Character, CharacterSheetData } from "./types.js";
 
 /** The character details a player supplies while setting up (Requirement 4.1). */
 export interface CharacterInput {
@@ -54,6 +54,13 @@ export interface CharacterInput {
    * for non-card sheets.
    */
   selectedCardId?: string;
+  /**
+   * Ruleset-specific original sheet fields (narrative values beyond
+   * name/concept/attributes), preserved verbatim on the recorded character so
+   * they survive persistence and can ground the AI GM. Not validated here —
+   * the sheet schema's client/endpoint owns field-level constraints.
+   */
+  sheetData?: CharacterSheetData;
 }
 
 /**
@@ -326,6 +333,9 @@ export class CharacterService {
       ...(isCardBased && selectedCardId !== undefined
         ? { selectedCardId }
         : {}),
+      // Preserve the ruleset-specific original sheet fields verbatim so they
+      // survive persistence and reach the AI GM context (Living Character Sheet).
+      ...(input.sheetData !== undefined ? { sheetData: cloneSheetData(input.sheetData) } : {}),
     };
 
     this.store.saveCharacter(character);
@@ -526,6 +536,18 @@ function cloneCharacter(character: Character): Character {
     attributes: { ...character.attributes },
     ...(character.selectedCardId !== undefined
       ? { selectedCardId: character.selectedCardId }
+      : {}),
+    ...(character.sheetData !== undefined
+      ? { sheetData: cloneSheetData(character.sheetData) }
+      : {}),
+  };
+}
+
+/** Defensive copy of the immutable original-sheet payload. */
+function cloneSheetData(sheetData: CharacterSheetData): CharacterSheetData {
+  return {
+    ...(sheetData.narrativeFields !== undefined
+      ? { narrativeFields: { ...sheetData.narrativeFields } }
       : {}),
   };
 }

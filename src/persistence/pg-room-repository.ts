@@ -18,22 +18,59 @@ import {
 } from "./mappers.js";
 import type { RoomRepository } from "./types.js";
 
+type TransactionClient = Queryable & { release?: () => void };
+
+interface Connectable {
+  connect(): Promise<TransactionClient>;
+}
+
+function isConnectable(db: Queryable): db is Queryable & Connectable {
+  return typeof (db as unknown as Connectable).connect === "function";
+}
+
 export class PgRoomRepository implements RoomRepository {
   constructor(private readonly db: Queryable) {}
 
+  private async withTransaction<T>(fn: (db: Queryable) => Promise<T>): Promise<T> {
+    const client: TransactionClient = isConnectable(this.db) ? await this.db.connect() : this.db;
+    try {
+      await client.query("BEGIN");
+      const result = await fn(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release?.();
+    }
+  }
+
   async saveRoom(room: Room): Promise<void> {
-    await this.db.query(
-      `INSERT INTO rooms (id, invite_token, host_player_id, scenario_id, state, max_players, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (id) DO UPDATE SET
-         invite_token = EXCLUDED.invite_token,
-         host_player_id = EXCLUDED.host_player_id,
-         scenario_id = EXCLUDED.scenario_id,
-         state = EXCLUDED.state,
-         max_players = EXCLUDED.max_players,
-         created_at = EXCLUDED.created_at`,
-      roomToRow(room),
-    );
+    await this.saveRoomOn(this.db, room);
+  }
+
+  async createRoomWithHost(input: {
+    room: Room;
+    host: Player;
+    initialCharacter?: Character;
+    scenarioId?: string;
+  }): Promise<void> {
+    await this.withTransaction(async (db) => {
+      await this.saveRoomOn(db, input.room);
+      await this.savePlayerOn(db, input.host);
+      if (input.initialCharacter !== undefined) {
+        await this.saveCharacterOn(db, input.initialCharacter);
+      }
+      if (input.scenarioId !== undefined) {
+        await db.query(
+          `INSERT INTO scenario_selections (room_id, scenario_id)
+           VALUES ($1, $2)
+           ON CONFLICT (room_id) DO UPDATE SET scenario_id = EXCLUDED.scenario_id`,
+          [input.room.id, input.scenarioId],
+        );
+      }
+    });
   }
 
   async getRoom(roomId: string): Promise<Room | undefined> {
@@ -52,7 +89,45 @@ export class PgRoomRepository implements RoomRepository {
   }
 
   async savePlayer(player: Player): Promise<void> {
-    await this.db.query(
+    await this.savePlayerOn(this.db, player);
+  }
+
+  async joinPlayerIfRoomHasCapacity(
+    player: Player,
+  ): Promise<"inserted" | "full" | "unavailable"> {
+    let outcome: "inserted" | "full" | "unavailable" = "unavailable";
+    await this.withTransaction(async (db) => {
+      const roomResult = await db.query(
+        `SELECT id, state, max_players
+         FROM rooms
+         WHERE id = $1
+         FOR UPDATE`,
+        [player.roomId],
+      );
+      const room = roomResult.rows[0];
+      if (room === undefined || room.state !== "lobby") {
+        outcome = "unavailable";
+        throw new RollbackOnly();
+      }
+      const countResult = await db.query(`SELECT COUNT(*) AS count FROM players WHERE room_id = $1`, [
+        player.roomId,
+      ]);
+      const count = Number(countResult.rows[0]?.count ?? 0);
+      const maxPlayers = Number(room.max_players);
+      if (count >= maxPlayers) {
+        outcome = "full";
+        throw new RollbackOnly();
+      }
+      await this.savePlayerOn(db, player);
+      outcome = "inserted";
+    }).catch((error: unknown) => {
+      if (!(error instanceof RollbackOnly)) throw error;
+    });
+    return outcome;
+  }
+
+  private async savePlayerOn(db: Queryable, player: Player): Promise<void> {
+    await db.query(
       `INSERT INTO players (id, room_id, display_name, is_host, character_id, connection_status)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (id) DO UPDATE SET
@@ -60,7 +135,8 @@ export class PgRoomRepository implements RoomRepository {
          display_name = EXCLUDED.display_name,
          is_host = EXCLUDED.is_host,
          character_id = EXCLUDED.character_id,
-         connection_status = EXCLUDED.connection_status`,
+         connection_status = EXCLUDED.connection_status,
+         updated_at = now()`,
       playerToRow(player),
     );
   }
@@ -81,16 +157,45 @@ export class PgRoomRepository implements RoomRepository {
   }
 
   async saveCharacter(character: Character): Promise<void> {
-    await this.db.query(
-      `INSERT INTO characters (id, player_id, room_id, name, concept, attributes, confirmed)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+    await this.saveCharacterOn(this.db, character);
+  }
+
+  async saveCharacterForPlayer(character: Character, player: Player): Promise<void> {
+    await this.withTransaction(async (db) => {
+      await this.saveCharacterOn(db, character);
+      await this.savePlayerOn(db, player);
+    });
+  }
+
+  private async saveRoomOn(db: Queryable, room: Room): Promise<void> {
+    await db.query(
+      `INSERT INTO rooms (id, invite_token, host_player_id, scenario_id, state, max_players, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO UPDATE SET
+         invite_token = EXCLUDED.invite_token,
+         host_player_id = EXCLUDED.host_player_id,
+         scenario_id = EXCLUDED.scenario_id,
+         state = EXCLUDED.state,
+         max_players = EXCLUDED.max_players,
+         updated_at = now()`,
+      roomToRow(room),
+    );
+  }
+
+  private async saveCharacterOn(db: Queryable, character: Character): Promise<void> {
+    await db.query(
+      `INSERT INTO characters (id, player_id, room_id, name, concept, attributes, confirmed, selected_card_id, sheet_data)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb)
        ON CONFLICT (id) DO UPDATE SET
          player_id = EXCLUDED.player_id,
          room_id = EXCLUDED.room_id,
          name = EXCLUDED.name,
          concept = EXCLUDED.concept,
          attributes = EXCLUDED.attributes,
-         confirmed = EXCLUDED.confirmed`,
+         confirmed = EXCLUDED.confirmed,
+         selected_card_id = EXCLUDED.selected_card_id,
+         sheet_data = EXCLUDED.sheet_data,
+         updated_at = now()`,
       characterToRow(character),
     );
   }
@@ -109,4 +214,28 @@ export class PgRoomRepository implements RoomRepository {
     const { rows } = await this.db.query(`SELECT * FROM characters`);
     return rows.map(rowToCharacter);
   }
+
+  async markRoomInSessionIfLobby(roomId: string): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `UPDATE rooms
+       SET state = 'in_session', updated_at = now()
+       WHERE id = $1 AND state = 'lobby'
+       RETURNING id`,
+      [roomId],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  async markRoomEndedIfInSession(roomId: string): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `UPDATE rooms
+       SET state = 'ended', updated_at = now()
+       WHERE id = $1 AND state = 'in_session'
+       RETURNING id`,
+      [roomId],
+    );
+    return (rowCount ?? 0) > 0;
+  }
 }
+
+class RollbackOnly extends Error {}

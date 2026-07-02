@@ -57,6 +57,25 @@ describe("PgRoomRepository", () => {
     ]);
   });
 
+  it("createRoomWithHost persists room, host, initial character, and scenario selection in one transaction", async () => {
+    const db = new FakePgClient();
+    await new PgRoomRepository(db).createRoomWithHost({
+      room,
+      host: player,
+      initialCharacter: character,
+      scenarioId: "the-sunless-crypt",
+    });
+
+    expect(db.calls.map((call) => call.text)).toEqual([
+      "BEGIN",
+      expect.stringContaining("INSERT INTO rooms"),
+      expect.stringContaining("INSERT INTO players"),
+      expect.stringContaining("INSERT INTO characters"),
+      expect.stringContaining("INSERT INTO scenario_selections"),
+      "COMMIT",
+    ]);
+  });
+
   it("getRoom maps a returned row", async () => {
     const db = new FakePgClient().enqueueRows([
       {
@@ -93,6 +112,33 @@ describe("PgRoomRepository", () => {
     expect(db.lastCall!.values).toEqual(["player-1", "room-1", "Aria", true, null, "connected"]);
   });
 
+  it("joinPlayerIfRoomHasCapacity locks the room row and inserts only below capacity", async () => {
+    const db = new FakePgClient()
+      .enqueueRows([{ id: "room-1", state: "lobby", max_players: 2 }])
+      .enqueueRows([{ count: "1" }]);
+    const result = await new PgRoomRepository(db).joinPlayerIfRoomHasCapacity(player);
+
+    expect(result).toBe("inserted");
+    expect(db.calls.map((call) => call.text)).toEqual([
+      "BEGIN",
+      expect.stringContaining("FOR UPDATE"),
+      expect.stringContaining("SELECT COUNT(*)"),
+      expect.stringContaining("INSERT INTO players"),
+      "COMMIT",
+    ]);
+  });
+
+  it("joinPlayerIfRoomHasCapacity rolls back and reports full when capacity is reached", async () => {
+    const db = new FakePgClient()
+      .enqueueRows([{ id: "room-1", state: "lobby", max_players: 1 }])
+      .enqueueRows([{ count: "1" }]);
+    const result = await new PgRoomRepository(db).joinPlayerIfRoomHasCapacity(player);
+
+    expect(result).toBe("full");
+    expect(db.calls.map((call) => call.text)).toContain("ROLLBACK");
+    expect(db.calls.some((call) => call.text.includes("INSERT INTO players"))).toBe(false);
+  });
+
   it("listPlayers filters by room_id", async () => {
     const db = new FakePgClient();
     await new PgRoomRepository(db).listPlayers("room-1");
@@ -105,6 +151,21 @@ describe("PgRoomRepository", () => {
     await new PgRoomRepository(db).saveCharacter(character);
     expect(db.lastCall!.text).toContain("$6::jsonb");
     expect(db.lastCall!.values?.[5]).toBe(JSON.stringify(character.attributes));
+  });
+
+  it("saveCharacterForPlayer persists the character and linked player in one transaction", async () => {
+    const db = new FakePgClient();
+    await new PgRoomRepository(db).saveCharacterForPlayer(character, {
+      ...player,
+      characterId: character.id,
+    });
+
+    expect(db.calls.map((call) => call.text)).toEqual([
+      "BEGIN",
+      expect.stringContaining("INSERT INTO characters"),
+      expect.stringContaining("INSERT INTO players"),
+      "COMMIT",
+    ]);
   });
 
   it("listCharactersByRoom filters by room_id and maps rows", async () => {
@@ -122,6 +183,21 @@ describe("PgRoomRepository", () => {
     const chars = await new PgRoomRepository(db).listCharactersByRoom("room-1");
     expect(chars).toEqual([character]);
     expect(db.lastCall!.values).toEqual(["room-1"]);
+  });
+
+  it("markRoomInSessionIfLobby uses a compare-and-set update", async () => {
+    const db = new FakePgClient().enqueueRows([{ id: "room-1" }]);
+    await expect(new PgRoomRepository(db).markRoomInSessionIfLobby("room-1")).resolves.toBe(true);
+    expect(db.lastCall!.text).toContain("UPDATE rooms");
+    expect(db.lastCall!.text).toContain("WHERE id = $1 AND state = 'lobby'");
+    expect(db.lastCall!.text).toContain("RETURNING id");
+  });
+
+  it("markRoomEndedIfInSession uses a compare-and-set update", async () => {
+    const db = new FakePgClient();
+    await expect(new PgRoomRepository(db).markRoomEndedIfInSession("room-1")).resolves.toBe(false);
+    expect(db.lastCall!.text).toContain("WHERE id = $1 AND state = 'in_session'");
+    expect(db.lastCall!.text).toContain("RETURNING id");
   });
 });
 

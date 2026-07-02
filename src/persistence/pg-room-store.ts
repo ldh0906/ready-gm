@@ -110,4 +110,22 @@ export class PgRoomStore implements RoomStore {
       await Promise.all([...this.pending]);
     }
   }
+
+  async markRoomInSessionIfLobby(roomId: string): Promise<boolean> {
+    const changed = await this.repository.markRoomInSessionIfLobby(roomId);
+    if (changed) {
+      const room = this.cache.getRoom(roomId);
+      if (room !== undefined) this.cache.saveRoom({ ...room, state: "in_session" });
+    }
+    return changed;
+  }
+
+  async markRoomEndedIfInSession(roomId: string): Promise<boolean> {
+    const changed = await this.repository.markRoomEndedIfInSession(roomId);
+    if (changed) {
+      const room = this.cache.getRoom(roomId);
+      if (room !== undefined) this.cache.saveRoom({ ...room, state: "ended" });
+    }
+    return changed;
+  }
 }

@@ -45,6 +45,16 @@ class FakeRoomRepository implements RoomRepository {
     this.reject();
     this.rooms.push(r);
   }
+  async createRoomWithHost(input: {
+    room: Room;
+    host: Player;
+    initialCharacter?: Character;
+  }): Promise<void> {
+    this.reject();
+    this.rooms.push(input.room);
+    this.players.push(input.host);
+    if (input.initialCharacter !== undefined) this.characters.push(input.initialCharacter);
+  }
   async getRoom(): Promise<Room | undefined> {
     return undefined;
   }
@@ -57,6 +67,11 @@ class FakeRoomRepository implements RoomRepository {
   async savePlayer(p: Player): Promise<void> {
     this.reject();
     this.players.push(p);
+  }
+  async joinPlayerIfRoomHasCapacity(p: Player): Promise<"inserted" | "full" | "unavailable"> {
+    this.reject();
+    this.players.push(p);
+    return "inserted";
   }
   async getPlayer(): Promise<Player | undefined> {
     return undefined;
@@ -71,6 +86,11 @@ class FakeRoomRepository implements RoomRepository {
     this.reject();
     this.characters.push(c);
   }
+  async saveCharacterForPlayer(c: Character, p: Player): Promise<void> {
+    this.reject();
+    this.characters.push(c);
+    this.players.push(p);
+  }
   async getCharacter(): Promise<Character | undefined> {
     return undefined;
   }
@@ -79,6 +99,12 @@ class FakeRoomRepository implements RoomRepository {
   }
   async listAllCharacters(): Promise<Character[]> {
     return [...this.characters];
+  }
+  async markRoomInSessionIfLobby(): Promise<boolean> {
+    return true;
+  }
+  async markRoomEndedIfInSession(): Promise<boolean> {
+    return true;
   }
   private reject(): void {
     if (this.shouldReject) throw new Error("db down");

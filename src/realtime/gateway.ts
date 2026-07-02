@@ -213,6 +213,22 @@ export class RealtimeGateway {
     return this.rooms.get(roomId)?.size ?? 0;
   }
 
+  /** Close every connection in a room and drop buffered room records. */
+  closeRoom(roomId: string, code?: number, reason?: string): void {
+    const room = this.rooms.get(roomId);
+    if (room !== undefined) {
+      for (const record of [...room.values()]) {
+        try {
+          record.connection.close(code, reason);
+        } catch {
+          // Closing a broken transport is best-effort.
+        }
+      }
+      this.rooms.delete(roomId);
+    }
+    this.narrationBuffer.delete(roomId);
+  }
+
   /**
    * Schedule the periodic {@link heartbeat} sweep on an interval and return a
    * disposer that stops it (S4). The composition root / server entrypoint owns

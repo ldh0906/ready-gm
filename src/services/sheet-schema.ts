@@ -210,6 +210,67 @@ export function normalizeAllocationRule(
 }
 
 /**
+ * A parsed dice formula for `DICE_ROLL` allocation: `NdM(+/-K)` or `NdF(+/-K)`
+ * (Fudge dice, each die -1/0/+1). Server-authored schemas carry the formula;
+ * the server rolls it — the client never produces a random value.
+ */
+export interface DiceFormulaSpec {
+  count: number;
+  sides: number | "F";
+  modifier: number;
+}
+
+/**
+ * Parse a dice formula string (`"2d6"`, `"4dF"`, `"1d8+1"`, `"3d6-2"`,
+ * case-insensitive, surrounding whitespace ignored). Returns `null` for
+ * anything else (fail-closed: an unparseable formula never rolls).
+ */
+export function parseDiceFormula(formula: string): DiceFormulaSpec | null {
+  const match = /^\s*(\d{1,2})[dD](F|f|\d{1,3})\s*(?:([+-])\s*(\d{1,3}))?\s*$/.exec(formula);
+  if (match === null) return null;
+  const count = Number.parseInt(match[1]!, 10);
+  const sides = match[2] === "F" || match[2] === "f" ? "F" : Number.parseInt(match[2]!, 10);
+  if (count < 1 || count > 20) return null;
+  if (sides !== "F" && (sides < 2 || sides > 100)) return null;
+  const modifier =
+    match[3] === undefined ? 0 : (match[3] === "-" ? -1 : 1) * Number.parseInt(match[4]!, 10);
+  return { count, sides, modifier };
+}
+
+/** Roll a parsed formula once with the injected uniform RNG (`[0, 1)`). */
+export function rollDiceFormula(spec: DiceFormulaSpec, random: () => number): number {
+  let total = spec.modifier;
+  for (let i = 0; i < spec.count; i++) {
+    total +=
+      spec.sides === "F"
+        ? Math.floor(random() * 3) - 1
+        : Math.floor(random() * spec.sides) + 1;
+  }
+  return total;
+}
+
+/**
+ * Server-side `DICE_ROLL` allocation: roll the schema's `diceFormula` once per
+ * rated trait and clamp each result into that trait's ladder, so the returned
+ * set always passes {@link validateAllocation}. Returns `null` when the schema
+ * does not carry a valid `DICE_ROLL` rule (fail-closed).
+ */
+export function rollAllocationValues(
+  schema: SheetSchema,
+  random: () => number = Math.random,
+): Record<string, number> | null {
+  if (schema.allocation.mode !== "DICE_ROLL") return null;
+  const spec = parseDiceFormula(schema.allocation.diceFormula);
+  if (spec === null) return null;
+  const values: Record<string, number> = {};
+  for (const trait of schema.traits) {
+    const rolled = rollDiceFormula(spec, random);
+    values[trait.key] = Math.min(trait.ladder.max, Math.max(trait.ladder.min, rolled));
+  }
+  return values;
+}
+
+/**
  * Outcome of {@link validateAllocation}. A ladder-bounds violation is
  * `INVALID_ATTRIBUTES`; an allocation-constraint violation (and every
  * `FIXED_VALUE` violation) is `INVALID_ALLOCATION`

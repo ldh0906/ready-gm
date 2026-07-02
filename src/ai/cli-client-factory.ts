@@ -9,6 +9,7 @@
  * rest of the engine is unaffected (design.md "AI GM", Requirement 16.2).
  */
 import type { AiGmClient } from "./ai-gm-client.js";
+import type { ModelTier } from "../core/types.js";
 import { CodexCliAiGmClient } from "./codex-cli-client.js";
 import { ClaudeCliAiGmClient } from "./claude-cli-client.js";
 
@@ -48,17 +49,42 @@ export function resolveCodexEffort(env: Record<string, string | undefined>): Cod
 }
 
 /**
+ * Resolve optional per-tier model overrides from the environment
+ * (`AI_MODEL_FAST` / `AI_MODEL_STANDARD` / `AI_MODEL_PREMIUM`), realizing the
+ * multi-model routing the {@link import("./ai-gm-router.js").AiGmRouter} tiers
+ * were designed for. Returns `undefined` when no override is set, so clients
+ * keep their single-model default.
+ */
+export function resolveTierModels(
+  env: Record<string, string | undefined>,
+): ((tier: ModelTier) => string) | undefined {
+  const overrides: Partial<Record<ModelTier, string>> = {};
+  for (const tier of ["fast", "standard", "premium"] as const) {
+    const raw = env[`AI_MODEL_${tier.toUpperCase()}`]?.trim();
+    if (raw !== undefined && raw.length > 0) overrides[tier] = raw;
+  }
+  if (Object.keys(overrides).length === 0) return undefined;
+  return (tier) => overrides[tier] ?? overrides.standard ?? overrides.premium ?? overrides.fast!;
+}
+
+/**
  * Build the local-CLI {@link AiGmClient} selected by `AI_GM_CLI`. Codex uses
  * `gpt-5.5` at `CODEX_REASONING_EFFORT` (default `low`); Claude uses `sonnet`.
+ * `AI_MODEL_FAST`/`AI_MODEL_STANDARD`/`AI_MODEL_PREMIUM` route tiers to
+ * different models on either provider.
  */
 export function createCliAiGmClient(
   env: Record<string, string | undefined> = {},
 ): AiGmClient {
+  const modelForTier = resolveTierModels(env);
   switch (resolveCliProvider(env)) {
     case "claude":
-      return new ClaudeCliAiGmClient();
+      return new ClaudeCliAiGmClient(modelForTier !== undefined ? { modelForTier } : {});
     case "codex":
     default:
-      return new CodexCliAiGmClient({ reasoningEffort: resolveCodexEffort(env) });
+      return new CodexCliAiGmClient({
+        reasoningEffort: resolveCodexEffort(env),
+        ...(modelForTier !== undefined ? { modelForTier } : {}),
+      });
   }
 }

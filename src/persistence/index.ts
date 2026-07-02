@@ -17,6 +17,8 @@ export * from "./pg-session-summary-repository.js";
 export * from "./pg-event-sink.js";
 export * from "./pg-room-store.js";
 export * from "./pg-turn-state-store.js";
+export * from "./pg-blackboard-repository.js";
+export * from "./pg-blackboard-store.js";
 export * from "./factory.js";
 export {
   runMigrations,

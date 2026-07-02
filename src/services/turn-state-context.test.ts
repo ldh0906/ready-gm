@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { TurnState } from "../core/turn-state.js";
 import type { AttributeKey, AttributeLevel } from "../core/types.js";
+import { makeCharacterState } from "../core/character-state.js";
 import type { Character } from "./types.js";
 import {
   appendNarrative,
@@ -101,14 +102,59 @@ describe("toContext (R10.2, R12.4)", () => {
     expect(ctx.scenario).not.toHaveProperty("id");
   });
 
-  it("projects characters to name/concept/attributes without engine ids", () => {
+  it("projects characters with ids, sheet fields, and no player ids", () => {
     const ctx = toContext(makeTurnState(), SCENARIO, [makeCharacter()]);
 
     expect(ctx.characters).toEqual([
-      { name: "Borin", concept: "A grizzled dwarf blacksmith", attributes: ATTRS },
+      { id: "c1", name: "Borin", concept: "A grizzled dwarf blacksmith", attributes: ATTRS },
     ]);
-    expect(ctx.characters[0]).not.toHaveProperty("id");
     expect(ctx.characters[0]).not.toHaveProperty("playerId");
+  });
+
+  it("includes ruleset sheet fields (non-empty, concept excluded) when the character carries sheetData", () => {
+    const character = makeCharacter({
+      sheetData: {
+        narrativeFields: {
+          concept: "duplicate of the top-level concept",
+          disposition: "심술궂음",
+          goal: "정원 정복",
+          empty: "   ",
+        },
+      },
+    });
+
+    const ctx = toContext(makeTurnState(), SCENARIO, [character]);
+
+    expect(ctx.characters[0]?.sheet).toEqual({ disposition: "심술궂음", goal: "정원 정복" });
+    // concept stays a dedicated field, not duplicated into sheet.
+    expect(ctx.characters[0]?.sheet).not.toHaveProperty("concept");
+  });
+
+  it("omits the sheet key entirely when the character has no sheetData", () => {
+    const ctx = toContext(makeTurnState(), SCENARIO, [makeCharacter()]);
+    expect("sheet" in (ctx.characters[0] ?? {})).toBe(false);
+  });
+
+  it("attaches mutable character state when supplied", () => {
+    const characterState = makeCharacterState({
+      characterId: "c1",
+      conditions: [{ name: "wounded", severity: 1, reason: "trap" }],
+      resources: { focus: 2 },
+      memories: [{ text: "The crypt door burned cold.", salience: 3, reason: "round 2" }],
+    });
+
+    const ctx = toContext(makeTurnState(), SCENARIO, [makeCharacter()], undefined, [characterState]);
+
+    expect(ctx.characters[0]?.state).toEqual(characterState);
+  });
+
+  it("does not share mutable character state references with the source", () => {
+    const characterState = makeCharacterState({ characterId: "c1", resources: { focus: 2 } });
+    const ctx = toContext(makeTurnState(), SCENARIO, [makeCharacter()], undefined, [characterState]);
+
+    ctx.characters[0]!.state!.resources.focus = 99;
+
+    expect(characterState.resources.focus).toBe(2);
   });
 
   it("derives this round's actions from readiness, one entry per active player", () => {

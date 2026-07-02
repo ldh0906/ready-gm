@@ -20,6 +20,8 @@
  */
 import process from "node:process";
 import { DEFAULT_ENGINE_CONFIG } from "../core/config.js";
+import { toVisibleCharacterState } from "../core/character-state.js";
+import { toVisibleBlackboard } from "../core/scenario-blackboard.js";
 import { createDiceServiceFromSpec, type DiceService, type UniformIntSource } from "../core/dice.js";
 import type { EngineConfig } from "../core/types.js";
 import { AiGmCoordinator } from "../ai/ai-gm-coordinator.js";
@@ -110,18 +112,24 @@ export function createEngine(deps: CreateEngineDeps): Engine {
 
   const gateway = new RealtimeGateway({
     getTurnState: (roomId) => persistence.turnStateStore.get(roomId),
-    // Enrich the readiness roster with display-only character/join names so the
-    // game header shows "CharacterName(JoinName)" instead of raw player ids. This
-    // is applied only at fan-out; the persisted Turn_State stays name-free.
+    // Enrich the fan-out state with display-only data (never persisted):
+    //  - readiness roster character/join names so the game header shows
+    //    "CharacterName(JoinName)" instead of raw player ids, and
+    //  - the player-visible character states (conditions/inventory/resources/
+    //    personal clocks) so the game UI and reconnect resync can render the
+    //    Living Character Sheet. GM-only material (memories/flags/relationships)
+    //    is projected away by toVisibleCharacterState.
     decorateState: (roomId, state) => {
       const readiness = Array.isArray(state.readiness) ? state.readiness : [];
-      if (readiness.length === 0) return state;
+      const characterStates = persistence.characterStateStore.get(roomId);
+      const blackboard = persistence.blackboardStore.get(roomId);
+      if (readiness.length === 0 && characterStates.length === 0 && blackboard === undefined) return state;
       const displayById = new Map(
         persistence.roomStore.listPlayers(roomId).map((p) => [p.id, p.displayName]),
       );
-      const charById = new Map(
-        persistence.roomStore.listCharactersByRoom(roomId).map((c) => [c.playerId, c.name]),
-      );
+      const characters = persistence.roomStore.listCharactersByRoom(roomId);
+      const charById = new Map(characters.map((c) => [c.playerId, c.name]));
+      const charNameById = new Map(characters.map((c) => [c.id, c.name]));
       return {
         ...state,
         readiness: readiness.map((entry) => {
@@ -135,6 +143,17 @@ export function createEngine(deps: CreateEngineDeps): Engine {
             ...(displayName !== undefined && displayName.length > 0 ? { displayName } : {}),
           };
         }),
+        ...(characterStates.length > 0
+          ? {
+              characterStates: characterStates.map((characterState) =>
+                toVisibleCharacterState(
+                  characterState,
+                  charNameById.get(characterState.characterId) ?? "",
+                ),
+              ),
+            }
+          : {}),
+        ...(blackboard !== undefined ? { blackboard: toVisibleBlackboard(blackboard) } : {}),
       };
     },
   });
@@ -169,6 +188,9 @@ export function createEngine(deps: CreateEngineDeps): Engine {
     sessionSummaryRepository: persistence.sessionSummaryRepository,
     clockStore: persistence.clockStore,
     sceneStore: persistence.sceneStore,
+    characterStateStore: persistence.characterStateStore,
+    blackboardStore: persistence.blackboardStore,
+    memoryStore: persistence.memoryStore,
     eventSink,
     config,
     ...(deps.now ? { now: deps.now } : {}),

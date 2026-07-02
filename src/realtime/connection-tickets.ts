@@ -13,8 +13,8 @@
  *
  * Tickets carry high entropy (24 random bytes, base64url) — the same convention
  * the invite tokens use — so they are not enumerable. The store is in-memory
- * (single-process playtest scope); a ticket lives for the process lifetime and
- * can be explicitly revoked.
+ * (single-process playtest scope); tickets are short-lived, can be explicitly
+ * revoked, and reissuing a player ticket invalidates that player's older ticket.
  */
 import { randomBytes } from "node:crypto";
 
@@ -28,6 +28,20 @@ export interface ConnectionIdentity {
 export interface ConnectionTicketStoreOptions {
   /** Token generator; defaults to 24 random bytes as base64url. */
   generateToken?: () => string;
+  /** Clock for tests; defaults to `Date.now`. */
+  now?: () => number;
+  /** Ticket TTL in milliseconds. Defaults to {@link DEFAULT_CONNECTION_TICKET_TTL_MS}. */
+  ttlMs?: number;
+  /** Whether issuing a new ticket for the same room/player revokes the old one. */
+  rotatePerPlayer?: boolean;
+}
+
+/** Default connection-ticket lifetime: enough for playtests, not process-long. */
+export const DEFAULT_CONNECTION_TICKET_TTL_MS = 2 * 60 * 60_000;
+
+interface TicketRecord {
+  readonly identity: ConnectionIdentity;
+  readonly expiresAt: number;
 }
 
 /**
@@ -36,7 +50,7 @@ export interface ConnectionTicketStoreOptions {
  * upgrade.
  */
 export class ConnectionTicketStore {
-  private readonly tickets = new Map<string, ConnectionIdentity>();
+  private readonly tickets = new Map<string, TicketRecord>();
   /**
    * Reverse index from `roomId` to the set of tokens issued for that room. Kept
    * in lock-step with {@link tickets} so a room's tickets can be revoked en
@@ -46,42 +60,73 @@ export class ConnectionTicketStore {
    * `tickets` appears exactly once under its identity's `roomId` in `byRoom`.
    */
   private readonly byRoom = new Map<string, Set<string>>();
+  private readonly byPlayer = new Map<string, string>();
   private readonly generateToken: () => string;
+  private readonly now: () => number;
+  private readonly ttlMs: number;
+  private readonly rotatePerPlayer: boolean;
 
   constructor(options: ConnectionTicketStoreOptions = {}) {
     this.generateToken =
       options.generateToken ?? (() => randomBytes(24).toString("base64url"));
+    this.now = options.now ?? Date.now;
+    this.ttlMs = options.ttlMs ?? DEFAULT_CONNECTION_TICKET_TTL_MS;
+    if (!Number.isFinite(this.ttlMs) || this.ttlMs <= 0) {
+      throw new RangeError(`ttlMs must be a positive number, got ${this.ttlMs}`);
+    }
+    this.rotatePerPlayer = options.rotatePerPlayer ?? true;
   }
 
   /** Issue a fresh ticket for the given identity and return its opaque token. */
   issue(identity: ConnectionIdentity): string {
+    if (this.rotatePerPlayer) {
+      const prior = this.byPlayer.get(this.playerKey(identity));
+      if (prior !== undefined) this.remove(prior);
+    }
     const token = this.generateToken();
-    this.tickets.set(token, { roomId: identity.roomId, playerId: identity.playerId });
+    this.tickets.set(token, {
+      identity: { roomId: identity.roomId, playerId: identity.playerId },
+      expiresAt: this.now() + this.ttlMs,
+    });
     let roomTokens = this.byRoom.get(identity.roomId);
     if (roomTokens === undefined) {
       roomTokens = new Set<string>();
       this.byRoom.set(identity.roomId, roomTokens);
     }
     roomTokens.add(token);
+    this.byPlayer.set(this.playerKey(identity), token);
     return token;
   }
 
   /** Resolve a token to its identity, or `undefined` when unknown/blank. */
   resolve(token: string | null | undefined): ConnectionIdentity | undefined {
     if (typeof token !== "string" || token.length === 0) return undefined;
-    return this.tickets.get(token);
+    const record = this.tickets.get(token);
+    if (record === undefined) return undefined;
+    if (this.now() >= record.expiresAt) {
+      this.remove(token);
+      return undefined;
+    }
+    return record.identity;
   }
 
   /** Invalidate a ticket (e.g. when a session ends). Idempotent for unknown tokens. */
   revoke(token: string): void {
-    const identity = this.tickets.get(token);
-    if (identity === undefined) return;
+    this.remove(token);
+  }
+
+  private remove(token: string): void {
+    const record = this.tickets.get(token);
+    if (record === undefined) return;
+    const { identity } = record;
     this.tickets.delete(token);
     const roomTokens = this.byRoom.get(identity.roomId);
     if (roomTokens !== undefined) {
       roomTokens.delete(token);
       if (roomTokens.size === 0) this.byRoom.delete(identity.roomId);
     }
+    const key = this.playerKey(identity);
+    if (this.byPlayer.get(key) === token) this.byPlayer.delete(key);
   }
 
   /**
@@ -93,22 +138,38 @@ export class ConnectionTicketStore {
     const roomTokens = this.byRoom.get(roomId);
     if (roomTokens === undefined) return 0;
     const revoked = roomTokens.size;
-    for (const token of roomTokens) {
-      this.tickets.delete(token);
+    for (const token of [...roomTokens]) {
+      this.remove(token);
     }
-    this.byRoom.delete(roomId);
     return revoked;
   }
 
   /** Number of live tickets (for tests / introspection). */
   get size(): number {
+    this.pruneExpired();
     return this.tickets.size;
+  }
+
+  private pruneExpired(): void {
+    const now = this.now();
+    for (const [token, record] of this.tickets) {
+      if (now >= record.expiresAt) this.remove(token);
+    }
+  }
+
+  private playerKey(identity: ConnectionIdentity): string {
+    return `${identity.roomId}\u0000${identity.playerId}`;
   }
 }
 
 /** Minimal membership lookup the authorizer needs (RoomStore satisfies it). */
 export interface RoomMembershipReader {
   getPlayer(playerId: string): { readonly roomId: string } | undefined;
+}
+
+/** Room lookup needed by host-only read authorizers. */
+export interface RoomAccessReader extends RoomMembershipReader {
+  getRoom(roomId: string): { readonly id: string; readonly hostPlayerId: string } | undefined;
 }
 
 /** Outcome of authorizing a `/ws` connection. */
@@ -184,4 +245,47 @@ export function authorizeAction(
     return { ok: false, reason: "identity_mismatch" };
   }
   return { ok: true, identity };
+}
+
+export type RoomReadAuthResult =
+  | { readonly ok: true; readonly identity: ConnectionIdentity }
+  | {
+      readonly ok: false;
+      readonly reason: "no_ticket" | "not_a_member" | "identity_mismatch" | "unknown_room" | "not_host";
+    };
+
+/** Authorize a room-specific read for any member of the target room. */
+export function authorizeRoomMember(
+  tickets: ConnectionTicketStore,
+  members: RoomMembershipReader,
+  token: string | null | undefined,
+  roomId: string,
+): RoomReadAuthResult {
+  const connection = authorizeConnection(tickets, members, token);
+  if (!connection.ok) {
+    const reason =
+      tickets.resolve(token) === undefined ? "no_ticket" : "not_a_member";
+    return { ok: false, reason };
+  }
+  if (connection.identity.roomId !== roomId) {
+    return { ok: false, reason: "identity_mismatch" };
+  }
+  return { ok: true, identity: connection.identity };
+}
+
+/** Authorize a room-specific read that only the room host may perform. */
+export function authorizeRoomHost(
+  tickets: ConnectionTicketStore,
+  rooms: RoomAccessReader,
+  token: string | null | undefined,
+  roomId: string,
+): RoomReadAuthResult {
+  const member = authorizeRoomMember(tickets, rooms, token, roomId);
+  if (!member.ok) return member;
+  const room = rooms.getRoom(roomId);
+  if (room === undefined) return { ok: false, reason: "unknown_room" };
+  if (member.identity.playerId !== room.hostPlayerId) {
+    return { ok: false, reason: "not_host" };
+  }
+  return member;
 }

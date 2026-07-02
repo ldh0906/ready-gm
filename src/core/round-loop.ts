@@ -38,6 +38,7 @@ import type { ActionKind, ReadinessStatus } from "./types.js";
 import type {
   CheckRecord,
   ChatEntry,
+  PendingCheck,
   ReadinessEntry,
   TurnState,
 } from "./turn-state.js";
@@ -172,6 +173,20 @@ export interface ResolutionReadyCommand {
   endingReached: boolean;
 }
 
+/** AI has selected the public checks, but no player roll values are known yet. */
+export interface DeclareChecksCommand {
+  type: "DECLARE_CHECKS";
+  checks: PendingCheck[];
+}
+
+/** One pending check has been rolled by the authoritative server dice service. */
+export interface CheckRolledCommand {
+  type: "CHECK_ROLLED";
+  checkId: string;
+  check: CheckRecord;
+  autoRolled?: boolean;
+}
+
 /** The discriminated union of every command the round-loop reducer accepts. */
 export type Command =
   | StartSessionCommand
@@ -181,6 +196,8 @@ export type Command =
   | ReviseCommand
   | TimeoutExpiredCommand
   | ForceProceedCommand
+  | DeclareChecksCommand
+  | CheckRolledCommand
   | ResolutionReadyCommand;
 
 /** Default ready-check timeout in ms (Requirement 8.4). */
@@ -202,6 +219,7 @@ export function createInitialTurnState(
     readiness: [],
     chatLog: [],
     checks: [],
+    rollingChecks: [],
     narrativeContext: [],
     readyCheckDeadline: null,
     readyCheckTimeoutMs: DEFAULT_READY_CHECK_TIMEOUT_MS,
@@ -285,6 +303,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
         readiness,
         chatLog: [],
         checks: [],
+        rollingChecks: [],
         narrativeContext: [],
         readyCheckDeadline: null,
         resolutionRequested: false,
@@ -311,7 +330,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
 
     case "CONFIRM_ACTION": {
       if (state.phase === "ended") return state; // terminal
-      if (state.phase === "resolving") return state; // controls locked (R7.8)
+      if (state.phase === "resolving" || state.phase === "rolling") return state; // controls locked (R7.8)
       if (!isMember(state, command.from)) return state;
       let next = state;
       // First submission of the round opens the ready-check gate and arms the
@@ -326,7 +345,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
 
     case "PASS": {
       if (state.phase === "ended") return state; // terminal
-      if (state.phase === "resolving") return state; // controls locked (R7.8)
+      if (state.phase === "resolving" || state.phase === "rolling") return state; // controls locked (R7.8)
       if (!isMember(state, command.from)) return state;
       let next = state;
       if (next.phase === "free_chat") {
@@ -343,14 +362,20 @@ export function reduce(state: TurnState, command: Command): TurnState {
       // Nothing has been submitted yet in free-chat, so there is nothing to revise.
       if (state.phase === "free_chat") return state;
 
-      if (state.phase === "resolving") {
+      if (state.phase === "resolving" || state.phase === "rolling") {
         // Editing an action is locked once resolution begins (R7.8).
         if (command.action !== null) return state;
         // A readiness revert halts the in-progress resolution: discard the
         // pending narration (held externally), clear the guard, and return to
         // ready-check (R7.9).
         const reverted = patchReadiness(state, command.from, "not_ready", null, null);
-        return { ...reverted, phase: "ready_check", resolutionRequested: false };
+        return {
+          ...reverted,
+          phase: "ready_check",
+          checks: [],
+          rollingChecks: [],
+          resolutionRequested: false,
+        };
       }
 
       // ready_check: revise the submission until resolution begins (R7.6).
@@ -402,10 +427,48 @@ export function reduce(state: TurnState, command: Command): TurnState {
       };
     }
 
+    case "DECLARE_CHECKS": {
+      if (state.phase !== "resolving" || !state.resolutionRequested) return state;
+      return {
+        ...state,
+        phase: "rolling",
+        checks: [],
+        rollingChecks: command.checks.map((check) => ({ ...check, status: "pending" })),
+      };
+    }
+
+    case "CHECK_ROLLED": {
+      if (state.phase !== "rolling" || !state.resolutionRequested) return state;
+      const rollingChecks = state.rollingChecks ?? [];
+      const existing = rollingChecks.find((check) => check.checkId === command.checkId);
+      if (existing === undefined) return state;
+      if (existing.status === "rolled") return state;
+      const rolled: PendingCheck = {
+        ...existing,
+        status: "rolled",
+        roll: command.check.roll,
+        rolls: [...command.check.rolls],
+        outcome: command.check.outcome,
+        ...(command.autoRolled !== undefined ? { autoRolled: command.autoRolled } : {}),
+      };
+      return {
+        ...state,
+        checks: [...state.checks, { ...command.check }],
+        rollingChecks: rollingChecks.map((check) =>
+          check.checkId === command.checkId ? rolled : check,
+        ),
+      };
+    }
+
     case "RESOLUTION_READY": {
       // Only a resolution that is still in flight is honored; a stale delivery
       // (e.g. after a mid-resolution revert/halt) is ignored (R7.9, R10.3).
-      if (state.phase !== "resolving" || !state.resolutionRequested) return state;
+      if (
+        (state.phase !== "resolving" && state.phase !== "rolling") ||
+        !state.resolutionRequested
+      ) {
+        return state;
+      }
       const checks: CheckRecord[] = command.checks.map((check) => ({ ...check }));
       const narrativeContext = [
         ...state.narrativeContext,
@@ -418,6 +481,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
           ...state,
           phase: "ended",
           checks,
+          rollingChecks: [],
           narrativeContext,
           resolutionRequested: false,
           readyCheckDeadline: null,
@@ -442,6 +506,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
         readiness,
         chatLog: [],
         checks: [],
+        rollingChecks: [],
         narrativeContext,
         readyCheckDeadline: null,
         resolutionRequested: false,

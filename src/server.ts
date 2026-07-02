@@ -21,11 +21,12 @@
 import { createServer } from "node:http";
 import process from "node:process";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath, URL } from "node:url";
+import { fileURLToPath, URL, URLSearchParams } from "node:url";
 import { dirname, join } from "node:path";
-import express from "express";
+import express, { type Response } from "express";
 import { WebSocketServer } from "ws";
 import { createEngine } from "./realtime/engine.js";
+import { hydratePersistence, resolvePersistenceMode } from "./persistence/factory.js";
 import { createSessionLogger } from "./observability/session-log.js";
 import { WsConnection } from "./realtime/ws-connection.js";
 import type { OrchestratorCommand } from "./realtime/room-orchestrator.js";
@@ -33,7 +34,9 @@ import { createCliAiGmClient } from "./ai/cli-client-factory.js";
 import { MVP_SCENARIO, DEMO_SCENARIO_CATALOG } from "./services/scenario-service.js";
 import { CharacterService } from "./services/character-service.js";
 import { RoomService } from "./services/room-service.js";
+import { normalizeName } from "./services/names.js";
 import {
+  rollAllocationValues,
   sheetSchemaForScenario,
   expectedTraitSpecForScenario,
   cardsForScenario,
@@ -46,16 +49,34 @@ import {
   makeSoloCharacter,
   runSoloAct,
 } from "./http/solo-play.js";
-import type { AttributeKey, AttributeLevel } from "./core/types.js";
+import { AiCostGuard, type AiCostGuardAcquireResult } from "./http/ai-cost-guard.js";
 import {
+  isStartFailureHttpError,
+  startMultiplayerSession,
+} from "./http/session-start-boundary.js";
+import type { AttributeKey, AttributeLevel } from "./core/types.js";
+import type { Character, Player, Room } from "./services/types.js";
+import {
+  FixedWindowBudgetLimiter,
   FixedWindowRateLimiter,
+  InFlightKeyLock,
   SessionSlotLimiter,
+  buildPublicInviteLink,
   checkStartupSafety,
+  isStateChangingRequestCsrfSafe,
   playtestToken,
+  readBoundedText,
   resolveBinding,
+  resolveTrustProxy,
   tokenMatches,
 } from "./server-security.js";
-import { ConnectionTicketStore, authorizeConnection, authorizeAction } from "./realtime/connection-tickets.js";
+import {
+  ConnectionTicketStore,
+  authorizeConnection,
+  authorizeAction,
+  authorizeRoomHost,
+  authorizeRoomMember,
+} from "./realtime/connection-tickets.js";
 import type { ConnectionIdentity } from "./realtime/connection-tickets.js";
 
 // Resolve + validate the bind address before doing anything else: a public bind
@@ -75,6 +96,26 @@ const TOKEN = playtestToken(process.env);
 // Defence-in-depth limits for the AI-cost surface (`/play/new`).
 const NEW_SESSION_WINDOW_MS = 60_000;
 const NEW_SESSION_PER_IP = 5; // at most 5 new sessions per IP per minute
+const LOBBY_MUTATION_WINDOW_MS = 60_000;
+const ROOM_CREATES_PER_IP = 30;
+const ROOM_JOINS_PER_IP = 60;
+const ROOM_JOINS_PER_ROOM = 30;
+const AI_ACTION_WINDOW_MS = 60_000;
+const SOLO_ACTIONS_PER_SESSION = 12;
+const PROPOSALS_PER_PLAYER = 6;
+const AI_BUDGET_WINDOW_MS = readPositiveIntegerEnv("AI_BUDGET_WINDOW_MS", 60_000);
+const GLOBAL_AI_CALLS_PER_WINDOW = readPositiveIntegerEnv("GLOBAL_AI_CALLS_PER_WINDOW", 60);
+const ROOM_AI_CALLS_PER_WINDOW = readPositiveIntegerEnv("ROOM_AI_CALLS_PER_WINDOW", 12);
+const PLAYER_AI_CALLS_PER_WINDOW = readPositiveIntegerEnv("PLAYER_AI_CALLS_PER_WINDOW", 6);
+const WS_MESSAGE_WINDOW_MS = 10_000;
+const WS_MESSAGES_PER_CONNECTION = 40;
+const WS_MAX_PAYLOAD_BYTES = 4096;
+const MAX_DISPLAY_NAME_LENGTH = 80;
+const MAX_CONCEPT_LENGTH = 1_200;
+const MAX_ACTION_LENGTH = 1_200;
+const MAX_CHAT_LENGTH = 1_000;
+const MAX_SCENARIO_ID_LENGTH = 128;
+const MAX_CHECK_ID_LENGTH = 128;
 // Global cap on concurrently-active sessions (bounds total AI generation cost).
 // Configurable via MAX_CONCURRENT_SESSIONS so a self-hosted group can raise it;
 // defaults to 8. Invalid/absent values fall back to the default.
@@ -88,7 +129,69 @@ const newSessionRateLimiter = new FixedWindowRateLimiter(
   NEW_SESSION_PER_IP,
   NEW_SESSION_WINDOW_MS,
 );
+const soloActionRateLimiter = new FixedWindowRateLimiter(
+  SOLO_ACTIONS_PER_SESSION,
+  AI_ACTION_WINDOW_MS,
+);
+const proposalRateLimiter = new FixedWindowRateLimiter(
+  PROPOSALS_PER_PLAYER,
+  AI_ACTION_WINDOW_MS,
+);
+const roomCreateRateLimiter = new FixedWindowRateLimiter(
+  ROOM_CREATES_PER_IP,
+  LOBBY_MUTATION_WINDOW_MS,
+);
+const roomJoinIpRateLimiter = new FixedWindowRateLimiter(
+  ROOM_JOINS_PER_IP,
+  LOBBY_MUTATION_WINDOW_MS,
+);
+const roomJoinRoomRateLimiter = new FixedWindowRateLimiter(
+  ROOM_JOINS_PER_ROOM,
+  LOBBY_MUTATION_WINDOW_MS,
+);
+const wsMessageRateLimiter = new FixedWindowRateLimiter(
+  WS_MESSAGES_PER_CONNECTION,
+  WS_MESSAGE_WINDOW_MS,
+);
 const sessionSlots = new SessionSlotLimiter(MAX_CONCURRENT_SESSIONS, SESSION_SLOT_TTL_MS);
+const globalAiBudget = new FixedWindowBudgetLimiter(GLOBAL_AI_CALLS_PER_WINDOW, AI_BUDGET_WINDOW_MS);
+const roomAiBudget = new FixedWindowBudgetLimiter(ROOM_AI_CALLS_PER_WINDOW, AI_BUDGET_WINDOW_MS);
+const playerAiBudget = new FixedWindowBudgetLimiter(PLAYER_AI_CALLS_PER_WINDOW, AI_BUDGET_WINDOW_MS);
+const playNewAiGuard = new AiCostGuard({
+  endpointLimiter: newSessionRateLimiter,
+  sessionSlots,
+  globalBudget: globalAiBudget,
+  roomBudget: roomAiBudget,
+  playerBudget: playerAiBudget,
+});
+const soloNewAiGuard = new AiCostGuard({
+  endpointLimiter: newSessionRateLimiter,
+  sessionSlots,
+  globalBudget: globalAiBudget,
+  roomBudget: roomAiBudget,
+  playerBudget: playerAiBudget,
+});
+const soloActAiGuard = new AiCostGuard({
+  endpointLimiter: soloActionRateLimiter,
+  endpointRateReason: "SOLO_ACTION_RATE",
+  globalBudget: globalAiBudget,
+  roomBudget: roomAiBudget,
+  playerBudget: playerAiBudget,
+});
+const proposalAiGuard = new AiCostGuard({
+  endpointLimiter: proposalRateLimiter,
+  endpointRateReason: "PROPOSAL_RATE",
+  globalBudget: globalAiBudget,
+  roomBudget: roomAiBudget,
+  playerBudget: playerAiBudget,
+});
+const multiplayerStartAiGuard = new AiCostGuard({
+  sessionSlots,
+  globalBudget: globalAiBudget,
+  roomBudget: roomAiBudget,
+  playerBudget: playerAiBudget,
+});
+const soloActionLocks = new InFlightKeyLock();
 
 // Server-issued tickets that authenticate a `/ws` socket as a specific player
 // (issue #2): the WebSocket identity is derived from the ticket, never from
@@ -102,20 +205,57 @@ function tokenFromRequest(headerValue: unknown, queryValue: string | null): stri
   return undefined;
 }
 
-// Force in-memory persistence for a friction-free local playtest (no DB writes),
-// regardless of any DATABASE_URL in the environment. The AI GM brain is chosen
-// by `AI_GM_CLI` (`codex` default, or `claude` for the Claude Code CLI).
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function writeAiCostFailure(
+  res: Response,
+  result: Exclude<AiCostGuardAcquireResult, { ok: true }>,
+): void {
+  res.status(result.status).json({ error: result.error, reason: result.reason });
+}
+
+function writePersistenceFailure(res: Response, error: unknown): void {
+  process.stderr.write(`\n[playtest] Durable persistence write failed: ${String(error)}\n`);
+  res.status(500).json({ error: "Durable persistence write failed." });
+}
+
+// Default memory mode keeps local playtests friction-free even when DATABASE_URL
+// is present. Set PERSISTENCE_MODE=durable in production to use Postgres.
+const persistenceMode = resolvePersistenceMode(process.env);
 const engine = createEngine({
   aiClient: createCliAiGmClient(process.env),
-  env: {},
+  env: persistenceMode === "durable" ? process.env : {},
   scenarioCatalog: DEMO_SCENARIO_CATALOG,
-  // Best-effort local session trace for debugging (default on; SESSION_LOG=0 to
-  // disable, SESSION_LOG_FILE to relocate). Captures inbound commands, the AI
-  // raw output + parse result, round flow, and narration delivery.
+  // Best-effort local session trace for debugging (default off; SESSION_LOG=1 to
+  // enable, SESSION_LOG_FILE to relocate). Logged payloads are redacted/truncated.
   sessionLogger: createSessionLogger(process.env, join(process.cwd(), "logs", "session.jsonl")),
 });
 const { orchestrator, gateway, persistence, sessionLogger } = engine;
+if (persistenceMode === "durable") {
+  if (persistence.backend !== "postgres") {
+    process.stderr.write(
+      "\n[playtest] PERSISTENCE_MODE=durable requires DATABASE_URL or SUPABASE_DB_URL.\n",
+    );
+    process.exit(1);
+  }
+  try {
+    await hydratePersistence(persistence);
+  } catch (error) {
+    process.stderr.write(`\n[playtest] Failed to hydrate durable persistence: ${String(error)}\n`);
+    process.exit(1);
+  }
+}
+const durableRoomRepository = persistenceMode === "durable" ? persistence.roomRepository : undefined;
 if (sessionLogger.enabled) sessionLogger.log("server_start", { host: HOST, port: PORT });
+
+// Lobby socket registry: room id -> set of open lobby WebSockets in that room.
+// Used to broadcast roster / scenario / character_setup events to every lobby
+// member (not just the connecting socket), and to close lobby sockets when a
+// room ends.
+const lobbySockets = new Map<string, Set<import("ws").WebSocket>>();
 
 // Revoke a room's connection tickets when its session ends so those tickets can
 // no longer authorize any player-acting REST request or `/ws` connection (#2,
@@ -134,7 +274,15 @@ persistence.roomStore.saveRoom = (room) => {
     connectionTickets.revokeRoom(room.id);
     // A started session held one AI-cost slot; free it when the session ends so
     // finished sessions do not keep capacity reserved for their full TTL.
-    if (priorState === "in_session") sessionSlots.release();
+    if (priorState === "in_session") sessionSlots.release(room.id);
+    gateway.closeRoom(room.id, 4000, "room ended");
+    const sockets = lobbySockets.get(room.id);
+    if (sockets !== undefined) {
+      for (const ws of sockets) {
+        if (ws.readyState === ws.OPEN) ws.close(4000, "room ended");
+      }
+      lobbySockets.delete(room.id);
+    }
   }
 };
 
@@ -148,11 +296,6 @@ const characterService = new CharacterService({ store: persistence.roomStore });
 // the RoomService over the same store, so the join endpoint reuses those rules
 // rather than re-implementing them.
 const roomService = new RoomService({ store: persistence.roomStore });
-
-// Lobby socket registry: room id -> set of open lobby WebSockets in that room.
-// Used to broadcast roster / scenario / character_setup events to every lobby
-// member (not just the connecting socket).
-const lobbySockets = new Map<string, Set<import("ws").WebSocket>>();
 
 /** Broadcast a JSON payload to every open lobby socket registered for a room. */
 function broadcastToRoom(roomId: string, payload: unknown): void {
@@ -182,50 +325,81 @@ const DEFAULT_ATTRS: Record<AttributeKey, AttributeLevel> = {
 };
 
 const app = express();
-// Behind a tunnel/reverse proxy (cloudflared, ngrok) every request reaches the
-// loopback origin from 127.0.0.1, which would (a) collapse the per-IP rate limit
-// into ONE shared bucket for all players and (b) make req.protocol "http" so
-// generated invite links use http. Trusting the proxy makes req.ip the real
-// client IP (from X-Forwarded-For) and req.protocol honor X-Forwarded-Proto, so
-// links come out https. Safe here: the server binds to loopback by default, so
-// only the local tunnel connects to it; a direct LAN client (HOST=0.0.0.0) sends
-// no X-Forwarded-* and is unaffected.
-app.set("trust proxy", true);
+app.set("trust proxy", resolveTrustProxy(process.env));
+app.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+    next();
+    return;
+  }
+  const host = req.get("host");
+  if (host === undefined || host.length === 0) {
+    res.status(400).json({ error: "Host header is required." });
+    return;
+  }
+  const targetOrigin = `${req.protocol}://${host}`;
+  if (
+    !isStateChangingRequestCsrfSafe(
+      { origin: req.get("origin"), secFetchSite: req.get("sec-fetch-site") },
+      targetOrigin,
+    )
+  ) {
+    res.status(403).json({ error: "Cross-origin state-changing requests are not allowed." });
+    return;
+  }
+  next();
+});
 // Cap request bodies: `/play/new` only needs a tiny JSON payload, so a small
 // limit removes a cheap memory-pressure lever.
 app.use(express.json({ limit: "16kb" }));
 app.use(express.static(join(dirname(fileURLToPath(import.meta.url)), "..", "public")));
 
 /** Seed a solo room and start the session. Returns ids for the WebSocket. */
-app.post("/play/new", (req, res) => {
+app.post("/play/new", async (req, res) => {
   // Shared-secret gate (no-op when no token is configured).
   if (!tokenMatches(TOKEN, tokenFromRequest(req.header("x-playtest-token"), null))) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
-  // Per-IP rate limit to bound burst abuse of the AI-cost surface.
   const clientIp = req.ip ?? req.socket.remoteAddress ?? "unknown";
-  if (!newSessionRateLimiter.tryAcquire(clientIp)) {
-    res.status(429).json({ error: "Too many requests; slow down." });
-    return;
-  }
-
-  // Global cap on concurrent session starts to bound total AI generation cost.
-  if (!sessionSlots.tryAcquire()) {
-    res.status(503).json({ error: "Server is at capacity; try again shortly." });
-    return;
-  }
 
   const body = (req.body ?? {}) as { displayName?: string; concept?: string };
-  const displayName = (body.displayName ?? "모험가").trim() || "모험가";
-  const concept = (body.concept ?? "용감한 모험가").trim() || "용감한 모험가";
+  const displayNameInput = readBoundedText(body.displayName, {
+    field: "Display name",
+    maxLength: MAX_DISPLAY_NAME_LENGTH,
+  });
+  if (!displayNameInput.ok) {
+    res.status(displayNameInput.status).json({ error: displayNameInput.error });
+    return;
+  }
+  const conceptInput = readBoundedText(body.concept, {
+    field: "Concept",
+    maxLength: MAX_CONCEPT_LENGTH,
+  });
+  if (!conceptInput.ok) {
+    res.status(conceptInput.status).json({ error: conceptInput.error });
+    return;
+  }
+  const displayName = displayNameInput.value || "모험가";
+  const concept = conceptInput.value || "용감한 모험가";
 
   const roomId = randomUUID();
   const playerId = randomUUID();
   const characterId = randomUUID();
 
-  persistence.roomStore.saveRoom({
+  // Global cap + AI budgets are acquired only after validation, so rejected
+  // input does not hold scarce capacity.
+  const aiGuard = playNewAiGuard.acquire({
+    roomId,
+    playerId,
+    endpointKey: clientIp,
+  });
+  if (!aiGuard.ok) {
+    writeAiCostFailure(res, aiGuard);
+    return;
+  }
+
+  const room: Room = {
     id: roomId,
     inviteToken: randomUUID(),
     hostPlayerId: playerId,
@@ -233,16 +407,16 @@ app.post("/play/new", (req, res) => {
     state: "in_session",
     maxPlayers: 6,
     createdAt: new Date().toISOString(),
-  });
-  persistence.roomStore.savePlayer({
+  };
+  const player: Player = {
     id: playerId,
     roomId,
     displayName,
     isHost: true,
     characterId,
     connectionStatus: "connected",
-  });
-  persistence.roomStore.saveCharacter({
+  };
+  const character: Character = {
     id: characterId,
     playerId,
     roomId,
@@ -250,7 +424,24 @@ app.post("/play/new", (req, res) => {
     concept,
     attributes: { ...DEFAULT_ATTRS },
     confirmed: true,
-  });
+  };
+  if (durableRoomRepository !== undefined) {
+    try {
+      await durableRoomRepository.createRoomWithHost({
+        room,
+        host: player,
+        initialCharacter: character,
+        scenarioId: MVP_SCENARIO.id,
+      });
+    } catch (error) {
+      aiGuard.release();
+      writePersistenceFailure(res, error);
+      return;
+    }
+  }
+  persistence.roomStore.saveRoom(room);
+  persistence.roomStore.savePlayer(player);
+  persistence.roomStore.saveCharacter(character);
   persistence.scenarioStore.setSelection(roomId, MVP_SCENARIO.id);
 
   // Start the session (host-only) — generates + delivers the opening narration.
@@ -279,23 +470,40 @@ app.post("/solo/new", async (req, res) => {
     return;
   }
 
-  // Per-IP rate limit + global concurrent-session cap on the AI-cost surface.
   const clientIp = req.ip ?? req.socket.remoteAddress ?? "unknown";
-  if (!newSessionRateLimiter.tryAcquire(clientIp)) {
-    res.status(429).json({ error: "Too many requests; slow down." });
-    return;
-  }
-  if (!sessionSlots.tryAcquire()) {
-    res.status(503).json({ error: "Server is at capacity; try again shortly." });
-    return;
-  }
 
   const body = (req.body ?? {}) as { displayName?: string; concept?: string };
+  const displayNameInput = readBoundedText(body.displayName, {
+    field: "Display name",
+    maxLength: MAX_DISPLAY_NAME_LENGTH,
+  });
+  if (!displayNameInput.ok) {
+    res.status(displayNameInput.status).json({ error: displayNameInput.error });
+    return;
+  }
+  const conceptInput = readBoundedText(body.concept, {
+    field: "Concept",
+    maxLength: MAX_CONCEPT_LENGTH,
+  });
+  if (!conceptInput.ok) {
+    res.status(conceptInput.status).json({ error: conceptInput.error });
+    return;
+  }
   const sessionId = randomUUID();
   const character = makeSoloCharacter(
-    { displayName: body.displayName, concept: body.concept },
+    { displayName: displayNameInput.value, concept: conceptInput.value },
     { playerId: randomUUID(), characterId: randomUUID(), roomId: sessionId },
   );
+
+  const aiGuard = soloNewAiGuard.acquire({
+    sessionId,
+    playerId: character.playerId,
+    endpointKey: clientIp,
+  });
+  if (!aiGuard.ok) {
+    writeAiCostFailure(res, aiGuard);
+    return;
+  }
   const session = soloSessions.create(character, MVP_SCENARIO);
 
   // Build a free_chat context and ask the real LLM for the opening narration.
@@ -341,9 +549,13 @@ app.post("/solo/act", async (req, res) => {
   }
 
   const body = (req.body ?? {}) as { sessionId?: string; action?: string };
-  const action = (body.action ?? "").trim();
-  if (action.length === 0) {
-    res.status(400).json({ error: "Action is required." });
+  const actionInput = readBoundedText(body.action, {
+    field: "Action",
+    maxLength: MAX_ACTION_LENGTH,
+    required: true,
+  });
+  if (!actionInput.ok) {
+    res.status(actionInput.status).json({ error: actionInput.error });
     return;
   }
   const session = typeof body.sessionId === "string" ? soloSessions.get(body.sessionId) : undefined;
@@ -355,10 +567,27 @@ app.post("/solo/act", async (req, res) => {
     res.status(409).json({ error: "Session has ended." });
     return;
   }
-
-  const response = await runSoloAct(session, action, engine.coordinator, engine.config);
-  soloSessions.set(session.id, session);
-  res.status(200).json(response);
+  if (!soloActionLocks.tryAcquire(session.id)) {
+    res.status(409).json({ error: "Action already in progress." });
+    return;
+  }
+  try {
+    const aiGuard = soloActAiGuard.acquire({
+      sessionId: session.id,
+      playerId: session.character.playerId,
+      endpointKey: session.id,
+    });
+    if (!aiGuard.ok) {
+      writeAiCostFailure(res, aiGuard);
+      return;
+    }
+    const response = await runSoloAct(session, actionInput.value, engine.coordinator, engine.config);
+    soloSessions.set(session.id, session);
+    if (session.ended) sessionSlots.release(session.id);
+    res.status(200).json(response);
+  } finally {
+    soloActionLocks.release(session.id);
+  }
 });
 
 const server = createServer(app);
@@ -371,17 +600,10 @@ const server = createServer(app);
 // /solo/*.
 const LOBBY_MAX_PLAYERS = 6;
 
-/** Build a public invite link whose LAST path segment is the invite token
- * (the lobby extracts that segment to resolve the room). When a PLAYTEST_TOKEN
- * shared secret is configured, append it as `?token=` so the link works on a
- * token-gated public/tunnel deploy: the join page reads `?token=` and sends it
- * as `x-playtest-token`, so without it an invited friend's join would 401. The
- * token is a per-link shared secret (handed out with the link by design), not a
- * per-user credential, so embedding it here is intended. */
+/** Build a public invite link whose LAST path segment is the invite token. */
 function inviteLinkFor(req: express.Request, inviteToken: string): string {
   const host = req.get("host") ?? `${HOST}:${PORT}`;
-  const base = `${req.protocol}://${host}/join/${encodeURIComponent(inviteToken)}`;
-  return TOKEN ? `${base}?token=${encodeURIComponent(TOKEN)}` : base;
+  return buildPublicInviteLink(req.protocol, host, inviteToken, TOKEN);
 }
 
 /** True when the shared-secret gate passes for this request (no-op when unset). */
@@ -422,24 +644,123 @@ function authorizePlayerAction(
   return null;
 }
 
+function writeRoomReadAuthFailure(res: express.Response, reason: "no_ticket" | "not_a_member" | "identity_mismatch" | "unknown_room" | "not_host"): void {
+  if (reason === "no_ticket") {
+    res.status(401).json({ error: "Unauthorized" });
+  } else if (reason === "unknown_room") {
+    res.status(404).json({ error: "Unknown room." });
+  } else {
+    res.status(403).json({ error: "Forbidden" });
+  }
+}
+
+function authorizeRoomMemberRead(
+  req: express.Request,
+  res: express.Response,
+  roomId: string,
+): ConnectionIdentity | null {
+  const auth = authorizeRoomMember(connectionTickets, persistence.roomStore, ticketFromRequest(req), roomId);
+  if (auth.ok) return auth.identity;
+  writeRoomReadAuthFailure(res, auth.reason);
+  return null;
+}
+
+function authorizeRoomHostRead(
+  req: express.Request,
+  res: express.Response,
+  roomId: string,
+): ConnectionIdentity | null {
+  const auth = authorizeRoomHost(connectionTickets, persistence.roomStore, ticketFromRequest(req), roomId);
+  if (auth.ok) return auth.identity;
+  writeRoomReadAuthFailure(res, auth.reason);
+  return null;
+}
+
+function requireLobbyForCharacterMutation(res: express.Response, roomId: string): Room | null {
+  const room = persistence.roomStore.getRoom(roomId);
+  if (room === undefined) {
+    res.status(404).json({ error: "Unknown room." });
+    return null;
+  }
+  if (room.state !== "lobby") {
+    res.status(409).json({ error: "Character setup is closed." });
+    return null;
+  }
+  return room;
+}
+
+function writeStartGuardFailure(
+  res: express.Response,
+  outcome: { started: boolean; reason?: string },
+): boolean {
+  if (outcome.started) return false;
+  if (outcome.reason === "AT_CAPACITY") {
+    res.status(503).json({
+      ok: false,
+      started: false,
+      reason: outcome.reason,
+      error: "Server is at capacity; try again shortly.",
+    });
+    return true;
+  }
+  if (outcome.reason === "GLOBAL_AI_BUDGET") {
+    res.status(503).json({
+      ok: false,
+      started: false,
+      reason: outcome.reason,
+      error: "Server AI budget is exhausted; try again shortly.",
+    });
+    return true;
+  }
+  if (outcome.reason === "ROOM_AI_BUDGET" || outcome.reason === "PLAYER_AI_BUDGET") {
+    res.status(429).json({
+      ok: false,
+      started: false,
+      reason: outcome.reason,
+      error:
+        outcome.reason === "ROOM_AI_BUDGET"
+          ? "Room AI budget is exhausted; slow down."
+          : "Player AI budget is exhausted; slow down.",
+    });
+    return true;
+  }
+  return false;
+}
+
 /** Create a lobby room with a host player + confirmed character (no AI yet). */
-app.post("/rooms", (req, res) => {
+app.post("/rooms", async (req, res) => {
   if (!restAuthorized(req)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
   const clientIp = req.ip ?? req.socket.remoteAddress ?? "unknown";
-  if (!newSessionRateLimiter.tryAcquire(clientIp)) {
+  if (!roomCreateRateLimiter.tryAcquire(clientIp)) {
     res.status(429).json({ error: "Too many requests; slow down." });
     return;
   }
 
   const body = (req.body ?? {}) as { displayName?: string; scenarioId?: string };
-  const displayName = (body.displayName ?? "").trim() || "호스트";
+  const displayNameInput = readBoundedText(body.displayName, {
+    field: "Display name",
+    maxLength: MAX_DISPLAY_NAME_LENGTH,
+  });
+  if (!displayNameInput.ok) {
+    res.status(displayNameInput.status).json({ error: displayNameInput.error });
+    return;
+  }
+  const scenarioIdInput = readBoundedText(body.scenarioId, {
+    field: "Scenario ID",
+    maxLength: MAX_SCENARIO_ID_LENGTH,
+  });
+  if (!scenarioIdInput.ok) {
+    res.status(scenarioIdInput.status).json({ error: scenarioIdInput.error });
+    return;
+  }
+  const displayName = displayNameInput.value || "호스트";
   // Pick the requested scenario when it exists in the catalog, else default MVP.
   const requested =
-    typeof body.scenarioId === "string"
-      ? persistence.scenarioStore.getScenario(body.scenarioId)
+    scenarioIdInput.value.length > 0
+      ? persistence.scenarioStore.getScenario(scenarioIdInput.value)
       : undefined;
   const scenarioId = requested?.id ?? MVP_SCENARIO.id;
   const roomId = randomUUID();
@@ -447,7 +768,7 @@ app.post("/rooms", (req, res) => {
   const characterId = randomUUID();
   const inviteToken = randomUUID();
 
-  persistence.roomStore.saveRoom({
+  const room: Room = {
     id: roomId,
     inviteToken,
     hostPlayerId: playerId,
@@ -455,16 +776,16 @@ app.post("/rooms", (req, res) => {
     state: "lobby",
     maxPlayers: LOBBY_MAX_PLAYERS,
     createdAt: new Date().toISOString(),
-  });
-  persistence.roomStore.savePlayer({
+  };
+  const player: Player = {
     id: playerId,
     roomId,
     displayName,
     isHost: true,
     characterId,
     connectionStatus: "connected",
-  });
-  persistence.roomStore.saveCharacter({
+  };
+  const character: Character = {
     id: characterId,
     playerId,
     roomId,
@@ -472,7 +793,23 @@ app.post("/rooms", (req, res) => {
     concept: "용감한 모험가",
     attributes: { ...DEFAULT_ATTRS },
     confirmed: false,
-  });
+  };
+  if (durableRoomRepository !== undefined) {
+    try {
+      await durableRoomRepository.createRoomWithHost({
+        room,
+        host: player,
+        initialCharacter: character,
+        scenarioId,
+      });
+    } catch (error) {
+      writePersistenceFailure(res, error);
+      return;
+    }
+  }
+  persistence.roomStore.saveRoom(room);
+  persistence.roomStore.savePlayer(player);
+  persistence.roomStore.saveCharacter(character);
   persistence.scenarioStore.setSelection(roomId, scenarioId);
 
   // Issue a connection ticket for the host so the browser can authenticate its
@@ -493,27 +830,22 @@ app.post("/rooms", (req, res) => {
 
 /** Return a room's invite link (the host shares it). */
 app.get("/rooms/:id/invite", (req, res) => {
-  if (!restAuthorized(req)) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
   const room = persistence.roomStore.getRoom(req.params.id);
   if (room === undefined) {
     res.status(404).json({ error: "Unknown room." });
     return;
   }
+  if (authorizeRoomHostRead(req, res, room.id) === null) return;
   res.status(200).json({ inviteLink: inviteLinkFor(req, room.inviteToken) });
 });
 
-/** Resolve a room by its invite token (or id): capacity + selected scenario. */
+/** Resolve a room by its invite token: capacity + selected scenario. */
 app.get("/rooms/:token", (req, res) => {
   if (!restAuthorized(req)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-  const room =
-    persistence.roomStore.getRoomByToken(req.params.token) ??
-    persistence.roomStore.getRoom(req.params.token);
+  const room = persistence.roomStore.getRoomByToken(req.params.token);
   if (room === undefined) {
     res.status(404).json({ error: "Unknown room." });
     return;
@@ -630,33 +962,88 @@ function readAttributes(raw: unknown): Record<string, AttributeLevel> {
   return out;
 }
 
+function assignUniqueDisplayName(requested: string, taken: readonly string[]): string {
+  const existing = new Set(taken.map(normalizeName));
+  if (!existing.has(normalizeName(requested))) return requested;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${requested} (${suffix})`;
+    if (!existing.has(normalizeName(candidate))) return candidate;
+  }
+}
+
 /**
  * `POST /rooms/:token/join` — add an unconfirmed player to a lobby room so the
  * character-sheet screen has a real (roomId, playerId) handoff to author against.
- * Resolves the room by invite token OR id. Returns the new player's id.
+ * Resolves the room by invite token only. Returns the new player's id.
  */
-app.post("/rooms/:token/join", (req, res) => {
-  if (!restAuthorized(req)) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
+app.post("/rooms/:token/join", async (req, res) => {
   const clientIp = req.ip ?? req.socket.remoteAddress ?? "unknown";
-  if (!newSessionRateLimiter.tryAcquire(clientIp)) {
+  if (!roomJoinIpRateLimiter.tryAcquire(clientIp)) {
     res.status(429).json({ error: "Too many requests; slow down." });
     return;
   }
   const room =
-    persistence.roomStore.getRoomByToken(req.params.token) ??
-    persistence.roomStore.getRoom(req.params.token);
+    persistence.roomStore.getRoomByToken(req.params.token);
   if (room === undefined) {
     res.status(404).json({ error: "Unknown room." });
     return;
   }
+  if (!roomJoinRoomRateLimiter.tryAcquire(room.id)) {
+    res.status(429).json({ error: "Too many join attempts; slow down." });
+    return;
+  }
   const body = (req.body ?? {}) as { displayName?: string };
-  const displayName = (body.displayName ?? "").trim() || "플레이어";
+  const displayNameInput = readBoundedText(body.displayName, {
+    field: "Display name",
+    maxLength: MAX_DISPLAY_NAME_LENGTH,
+  });
+  if (!displayNameInput.ok) {
+    res.status(displayNameInput.status).json({ error: displayNameInput.error });
+    return;
+  }
+  const displayName = displayNameInput.value || "플레이어";
+  if (durableRoomRepository !== undefined) {
+    const existing = persistence.roomStore.listPlayers(room.id);
+    const assignedName = assignUniqueDisplayName(
+      displayName,
+      existing.map((p) => p.displayName),
+    );
+    const joined: Player = {
+      id: randomUUID(),
+      roomId: room.id,
+      displayName: assignedName,
+      isHost: false,
+      characterId: null,
+      connectionStatus: "connected",
+    };
+    let outcome: "inserted" | "full" | "unavailable";
+    try {
+      outcome = await durableRoomRepository.joinPlayerIfRoomHasCapacity(joined);
+    } catch (error) {
+      writePersistenceFailure(res, error);
+      return;
+    }
+    if (outcome !== "inserted") {
+      res.status(outcome === "full" ? 409 : 404).json({
+        error: outcome === "full" ? "This room is full." : "This room link is invalid or the session no longer exists.",
+      });
+      return;
+    }
+    persistence.roomStore.savePlayer(joined);
+    const connectionToken = connectionTickets.issue({
+      roomId: room.id,
+      playerId: joined.id,
+    });
+    res.status(201).json({
+      roomId: room.id,
+      playerId: joined.id,
+      displayName: assignedName,
+      connectionToken,
+    });
+    return;
+  }
   // Delegate to the RoomService so lobby gating, capacity, and in-room name
-  // uniqueness are enforced by the shared domain rules (resolve id→token first
-  // so callers may pass either the invite token or the room id).
+  // uniqueness are enforced by the shared domain rules.
   const result = roomService.joinRoom(room.inviteToken, { displayName });
   if (!result.ok) {
     // ROOM_UNAVAILABLE (left lobby / unknown) → 404; ROOM_FULL → 409.
@@ -704,17 +1091,14 @@ app.get("/rooms/:id/sheet-schema", (req, res) => {
 
 /**
  * `GET /rooms/:roomId/players/:playerId/cards` — the player's deterministic
- * random role-card hand for a Card_Based_Sheet. Loopback-gated only (parallel
- * to `GET /rooms/:id/sheet-schema`; no ticket auth). Non-card scenarios return
- * an empty list. The hand excludes cards already confirmed by OTHER players in
- * the room (so the requester's own confirmed card stays visible to them).
+ * random role-card hand for a Card_Based_Sheet. Requires the matching player's
+ * connection ticket. Non-card scenarios return an empty list. The hand excludes
+ * cards already confirmed by OTHER players in the room (so the requester's own
+ * confirmed card stays visible to them).
  */
 app.get("/rooms/:roomId/players/:playerId/cards", (req, res) => {
-  if (!restAuthorized(req)) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
   const { roomId, playerId } = req.params;
+  if (authorizePlayerAction(req, res, roomId, playerId) === null) return;
   const allCards = cardsForScenario(resolveScenarioForRoom(roomId));
   if (allCards === undefined || allCards.length === 0) {
     res.status(200).json({ cards: [] });
@@ -737,6 +1121,40 @@ app.get("/rooms/:roomId/players/:playerId/cards", (req, res) => {
   res.status(200).json({ cards: dealCardHand(allCards, seed, takenIds, 3) });
 });
 
+/**
+ * `POST /rooms/:roomId/allocation-roll` — server-side stat roll for a
+ * `DICE_ROLL` allocation schema. The server rolls the scenario's dice formula
+ * once per rated trait (clamped into each trait's ladder) and returns
+ * `{ values }`; the client never produces a random value. Character setup is
+ * lobby-only, and non-DICE_ROLL scenarios reject the roll (409).
+ */
+app.post("/rooms/:roomId/allocation-roll", (req, res) => {
+  if (!restAuthorized(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const room = requireLobbyForCharacterMutation(res, req.params.roomId);
+  if (room === null) return;
+  // Body hygiene: when a playerId is supplied it must belong to the room.
+  const body = (req.body ?? {}) as { playerId?: unknown };
+  if (typeof body.playerId === "string" && body.playerId.trim().length > 0) {
+    const known = persistence.roomStore
+      .listPlayers(room.id)
+      .some((player) => player.id === body.playerId);
+    if (!known) {
+      res.status(404).json({ error: "Unknown player." });
+      return;
+    }
+  }
+  const schema = sheetSchemaForScenario(resolveScenarioForRoom(room.id));
+  const values = rollAllocationValues(schema);
+  if (values === null) {
+    res.status(409).json({ error: "This scenario does not use dice-roll allocation." });
+    return;
+  }
+  res.status(200).json({ values });
+});
+
 /** The EZFudge attribute key set the AI coordinator's proposeAttributes returns. */
 const EZFUDGE_KEYS: readonly string[] = ["Might", "Agility", "Wits", "Spirit"];
 
@@ -756,7 +1174,15 @@ app.post("/rooms/:roomId/players/:playerId/proposal", async (req, res) => {
   const identity = authorizePlayerAction(req, res, req.params.roomId, req.params.playerId);
   if (identity === null) return;
   const body = (req.body ?? {}) as { concept?: string; traitKeys?: unknown };
-  const concept = String(body.concept ?? "");
+  const conceptInput = readBoundedText(body.concept, {
+    field: "Concept",
+    maxLength: MAX_CONCEPT_LENGTH,
+  });
+  if (!conceptInput.ok) {
+    res.status(conceptInput.status).json({ error: conceptInput.error });
+    return;
+  }
+  const concept = conceptInput.value;
   const scenario = resolveScenarioForRoom(req.params.roomId);
   const spec = expectedTraitSpecForScenario(scenario);
   // Honor the requested trait keys (the screen sends the active schema's keys);
@@ -768,9 +1194,18 @@ app.post("/rooms/:roomId/players/:playerId/proposal", async (req, res) => {
   // For universal (EZFudge) scenarios, ask the REAL AI GM for a complete
   // attribute set. The coordinator's proposeAttributes is EZFudge-specific, so
   // custom-stat (geese) and narrative-only (sinks) sheets use the deterministic
-  // heuristic. Any AI failure (CLI unavailable, timeout, malformed output)
-  // falls back to the heuristic so the screen always gets a usable proposal.
+  // heuristic. Budget exhaustion returns an explicit throttle; other AI failures
+  // fall back to the heuristic so the screen still gets a usable proposal.
   if (isEzfudgeKeys(traitKeys)) {
+    const aiGuard = proposalAiGuard.acquire({
+      roomId: identity.roomId,
+      playerId: identity.playerId,
+      endpointKey: `${identity.roomId}:${identity.playerId}`,
+    });
+    if (!aiGuard.ok) {
+      writeAiCostFailure(res, aiGuard);
+      return;
+    }
     try {
       const result = await engine.coordinator.proposeAttributes(concept, scenario);
       if (result.ok) {
@@ -787,7 +1222,7 @@ app.post("/rooms/:roomId/players/:playerId/proposal", async (req, res) => {
 });
 
 /** `POST /rooms/:roomId/players/:playerId/character` — record (save) the character. */
-app.post("/rooms/:roomId/players/:playerId/character", (req, res) => {
+app.post("/rooms/:roomId/players/:playerId/character", async (req, res) => {
   if (!restAuthorized(req)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
@@ -796,27 +1231,98 @@ app.post("/rooms/:roomId/players/:playerId/character", (req, res) => {
   // service call so a forged/cross-player request never records a character.
   const identity = authorizePlayerAction(req, res, req.params.roomId, req.params.playerId);
   if (identity === null) return;
+  if (requireLobbyForCharacterMutation(res, identity.roomId) === null) return;
   const body = (req.body ?? {}) as {
     name?: string;
     narrative?: Record<string, unknown>;
     attributes?: unknown;
+    selectedCardId?: unknown;
   };
-  const name = typeof body.name === "string" ? body.name : "";
-  const concept =
+  const nameInput = readBoundedText(body.name, {
+    field: "Character name",
+    maxLength: MAX_DISPLAY_NAME_LENGTH,
+  });
+  if (!nameInput.ok) {
+    res.status(nameInput.status).json({ error: nameInput.error });
+    return;
+  }
+  const rawConcept =
     body.narrative && typeof body.narrative.concept === "string" ? body.narrative.concept : "";
+  const conceptInput = readBoundedText(rawConcept, {
+    field: "Concept",
+    maxLength: MAX_CONCEPT_LENGTH,
+  });
+  if (!conceptInput.ok) {
+    res.status(conceptInput.status).json({ error: conceptInput.error });
+    return;
+  }
+  const name = nameInput.value;
+  const concept = conceptInput.value;
+  // Preserve ALL string narrative fields the sheet collected (disposition,
+  // goal, card answers, …) — not just concept — so ruleset-specific sheet data
+  // survives the backend round-trip and can ground the AI GM (sheetData).
+  const narrativeFields: Record<string, string> = {};
+  if (body.narrative !== undefined) {
+    for (const [key, value] of Object.entries(body.narrative)) {
+      if (typeof value === "string") {
+        const narrativeInput = readBoundedText(value, {
+          field: "Narrative field",
+          maxLength: MAX_CONCEPT_LENGTH,
+        });
+        if (!narrativeInput.ok) {
+          res.status(narrativeInput.status).json({ error: narrativeInput.error });
+          return;
+        }
+        narrativeFields[key] = narrativeInput.value;
+      }
+    }
+  }
+  const scenario = resolveScenarioForRoom(req.params.roomId);
   // Validate attributes against the room's scenario trait spec (EZFudge keys for
   // universal scenarios, custom keys/ladder for special-rules scenarios, or an
   // empty key set for narrative-only sheets — which skips attribute validation).
-  const spec = expectedTraitSpecForScenario(resolveScenarioForRoom(req.params.roomId));
+  const spec = expectedTraitSpecForScenario(scenario);
+  // Card_Based_Sheet: validate + persist the selected role card server-side so
+  // the selection round-trips (and CARD_TAKEN dedup can work at confirm time).
+  const scenarioCards = cardsForScenario(scenario);
+  const selectedCardId =
+    typeof body.selectedCardId === "string" && body.selectedCardId.trim().length > 0
+      ? body.selectedCardId.trim()
+      : undefined;
   const result = characterService.recordCharacter(
     identity.playerId,
-    { name, concept, attributes: readAttributes(body.attributes) },
-    { traitKeys: spec.keys, ladder: spec.ladder },
+    {
+      name,
+      concept,
+      attributes: readAttributes(body.attributes),
+      ...(Object.keys(narrativeFields).length > 0 ? { sheetData: { narrativeFields } } : {}),
+    },
+    {
+      traitKeys: spec.keys,
+      ladder: spec.ladder,
+      ...(scenarioCards !== undefined && scenarioCards.length > 0
+        ? { characterCards: [...scenarioCards] }
+        : {}),
+      ...(selectedCardId !== undefined ? { selectedCardId } : {}),
+    },
   );
   // Business outcomes (success or known rejection reason) are returned as 200
   // with a discriminated body so the screen classifies on `reason`; auth/server
   // failures use non-2xx (handled by the auth gate / Express defaults).
   if (result.ok) {
+    if (durableRoomRepository !== undefined) {
+      const player = persistence.roomStore.getPlayer(identity.playerId);
+      if (player === undefined) {
+        writePersistenceFailure(res, new Error(`Unknown player id: ${identity.playerId}`));
+        return;
+      }
+      try {
+        await durableRoomRepository.saveCharacterForPlayer(result.character, player);
+      } catch (error) {
+        writePersistenceFailure(res, error);
+        return;
+      }
+    }
     res.status(200).json({ ok: true, character: result.character });
     return;
   }
@@ -824,7 +1330,7 @@ app.post("/rooms/:roomId/players/:playerId/character", (req, res) => {
 });
 
 /** `POST /rooms/:roomId/players/:playerId/character/confirm` — confirm (lock) it. */
-app.post("/rooms/:roomId/players/:playerId/character/confirm", (req, res) => {
+app.post("/rooms/:roomId/players/:playerId/character/confirm", async (req, res) => {
   if (!restAuthorized(req)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
@@ -833,8 +1339,22 @@ app.post("/rooms/:roomId/players/:playerId/character/confirm", (req, res) => {
   // service call so a forged/cross-player request never confirms a character.
   const identity = authorizePlayerAction(req, res, req.params.roomId, req.params.playerId);
   if (identity === null) return;
+  if (requireLobbyForCharacterMutation(res, identity.roomId) === null) return;
   const result = characterService.confirmCharacter(identity.playerId);
   if (result.ok) {
+    if (durableRoomRepository !== undefined) {
+      const player = persistence.roomStore.getPlayer(identity.playerId);
+      if (player === undefined) {
+        writePersistenceFailure(res, new Error(`Unknown player id: ${identity.playerId}`));
+        return;
+      }
+      try {
+        await durableRoomRepository.saveCharacterForPlayer(result.character, player);
+      } catch (error) {
+        writePersistenceFailure(res, error);
+        return;
+      }
+    }
     // The session is no longer auto-started here. Confirming only locks the
     // character; the session starts exclusively via the explicit host start
     // endpoint (`POST /rooms/:roomId/players/:playerId/start`).
@@ -852,16 +1372,13 @@ app.post("/rooms/:roomId/players/:playerId/character/confirm", (req, res) => {
  * the host player id.
  */
 app.get("/rooms/:id/readiness", (req, res) => {
-  if (!restAuthorized(req)) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
   const room = persistence.roomStore.getRoom(req.params.id);
   if (room === undefined) {
     res.status(404).json({ error: "Unknown room." });
     return;
   }
   const roomId = req.params.id;
+  if (authorizeRoomMemberRead(req, res, roomId) === null) return;
   const players = persistence.roomStore.listPlayers(roomId);
   const playerIds = new Set(players.map((p) => p.id));
   // Count distinct players whose recorded character is confirmed AND who are
@@ -890,7 +1407,7 @@ app.get("/rooms/:id/readiness", (req, res) => {
  * outcomes use 200 with a discriminated body (the screen classifies on the
  * body); only the auth gate uses a non-2xx status.
  */
-app.post("/rooms/:roomId/players/:playerId/start", (req, res) => {
+app.post("/rooms/:roomId/players/:playerId/start", async (req, res) => {
   if (!restAuthorized(req)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
@@ -918,11 +1435,27 @@ app.post("/rooms/:roomId/players/:playerId/start", (req, res) => {
   // started too). maybeStartSession guards against double-dispatch and reports
   // whether the session is actually active so the host can be told when a start
   // could not proceed (e.g. the global AI-cost slot cap is reached).
-  const outcome = maybeStartSession(req.params.roomId);
+  let outcome: { started: boolean; reason?: string };
+  try {
+    outcome = await maybeStartSession(req.params.roomId);
+  } catch (error) {
+    writePersistenceFailure(res, error);
+    return;
+  }
   if (outcome.started) {
     res.status(200).json({ ok: true, started: true });
     return;
   }
+  if (isStartFailureHttpError(outcome)) {
+    res.status(503).json({
+      ok: false,
+      started: false,
+      reason: "START_FAILED",
+      error: "Session start failed; try again.",
+    });
+    return;
+  }
+  if (writeStartGuardFailure(res, outcome)) return;
   res.status(200).json({ ok: false, started: false, reason: outcome.reason ?? "START_FAILED" });
 });
 
@@ -970,35 +1503,22 @@ app.post("/rooms/:roomId/players/:playerId/return-to-lobby", (req, res) => {
  * AT_CAPACITY (the confirm still succeeds, the host can retry later). Returns
  * `{ started }` so the explicit start endpoint can report the truthful outcome.
  */
-function maybeStartSession(roomId: string): { started: boolean; reason?: string } {
-  if (!characterService.canStart(roomId)) return { started: false, reason: "NOT_ALL_CONFIRMED" };
-  // Already started (this call or a prior one) — treat as success/idempotent.
-  if (startedRooms.has(roomId)) return { started: true };
-  const room = persistence.roomStore.getRoom(roomId);
-  if (room === undefined) return { started: false, reason: "UNKNOWN_ROOM" };
-  if (room.state !== "lobby") {
-    // An already-running session counts as started; anything else (ended) cannot start.
-    return room.state === "in_session"
-      ? { started: true }
-      : { started: false, reason: "NOT_LOBBY" };
-  }
-  // Bound AI cost with the same global slot cap as /play/new.
-  if (!sessionSlots.tryAcquire()) return { started: false, reason: "AT_CAPACITY" };
-  startedRooms.add(roomId);
-  // Persist the lifecycle transition so the room reflects the started session
-  // and further joins are refused (mirrors /play/new seeding state first).
-  persistence.roomStore.saveRoom({ ...room, state: "in_session" });
-  // Kick the engine: generate + deliver the opening narration and start the
-  // round loop (the gateway streams Turn_State + narration to the game sockets).
-  void orchestrator.dispatch(roomId, { type: "START_SESSION", by: room.hostPlayerId });
-  // Tell every lobby socket the session is active so any client still on the
-  // lobby (rather than the character screen) hands off to the game screen.
-  broadcastToRoom(roomId, { type: "turn_state", state: { roundNumber: 1, roomState: "in_session" } });
-  return { started: true };
+async function maybeStartSession(roomId: string): Promise<{ started: boolean; reason?: string }> {
+  return startMultiplayerSession({
+    roomId,
+    characterGate: characterService,
+    roomStore: persistence.roomStore,
+    ...(durableRoomRepository !== undefined ? { durableRoomRepository } : {}),
+    startedRooms,
+    aiGuard: multiplayerStartAiGuard,
+    orchestrator,
+    broadcastToRoom,
+    logFailure: (message) => process.stderr.write(`\n[playtest] ${message}\n`),
+  });
 }
 
-const wss = new WebSocketServer({ noServer: true }); // game / solo play socket
-const lobbyWss = new WebSocketServer({ noServer: true }); // lobby waiting-room socket
+const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES }); // game / solo play socket
+const lobbyWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES }); // lobby waiting-room socket
 // Route WebSocket upgrades by path so the lobby and the game share one HTTP
 // server. Unknown paths are rejected.
 server.on("upgrade", (request, socket, head) => {
@@ -1035,14 +1555,7 @@ function resolveSocketIdentity(
 wss.on("connection", (socket, request) => {
   const params = new URL(request.url ?? "", `http://localhost:${PORT}`).searchParams;
 
-  // Shared-secret gate on the WebSocket entry point too (no-op when unset).
-  const headerToken = request.headers["x-playtest-token"];
-  if (!tokenMatches(TOKEN, tokenFromRequest(headerToken, params.get("token")))) {
-    socket.close(1008, "unauthorized");
-    return;
-  }
-
-  // Identity from a ticket (#2) or, for lobby-created rooms, from the room store.
+  // Identity from a server-issued connection ticket.
   const identity = resolveSocketIdentity(params);
   if (identity === null) {
     socket.close(1008, "unauthorized");
@@ -1054,9 +1567,14 @@ wss.on("connection", (socket, request) => {
   const connection = new WsConnection({ id: randomUUID(), roomId, playerId }, socket);
   gateway.connect(connection);
   sessionLogger.log("ws_connect", { roomId, playerId });
+  const messageRateKey = `ws:${roomId}:${playerId}:${connection.id}`;
 
   // Map inbound client messages to orchestrator commands.
   socket.on("message", (raw: unknown) => {
+    if (!wsMessageRateLimiter.tryAcquire(messageRateKey)) {
+      socket.close(1008, "rate-limit");
+      return;
+    }
     let msg: { type?: string; text?: string; action?: string };
     try {
       msg = JSON.parse(String(raw)) as typeof msg;
@@ -1069,8 +1587,10 @@ wss.on("connection", (socket, request) => {
         roomId,
         playerId,
         type: command.type,
-        ...(typeof msg.text === "string" ? { text: msg.text } : {}),
-        ...(typeof msg.action === "string" ? { action: msg.action } : {}),
+        ...(command.type === "SEND_CHAT" ? { text: command.text } : {}),
+        ...(command.type === "CONFIRM_ACTION" ? { action: command.action } : {}),
+        ...(command.type === "REVISE" && command.action !== null ? { action: command.action } : {}),
+        ...(command.type === "ROLL_CHECK" ? { checkId: command.checkId } : {}),
       });
       void orchestrator.dispatch(roomId, command);
     }
@@ -1084,25 +1604,23 @@ wss.on("connection", (socket, request) => {
 // off to the game screen.
 lobbyWss.on("connection", (socket, request) => {
   const params = new URL(request.url ?? "", `http://localhost:${PORT}`).searchParams;
-  const headerToken = request.headers["x-playtest-token"];
-  if (!tokenMatches(TOKEN, tokenFromRequest(headerToken, params.get("token")))) {
+  // Identity is derived STRICTLY from the server-issued connection ticket
+  // (auth-hardening, backend-server-qa P1-1): the same rule the game `/ws`
+  // uses. No client-supplied `playerId` is trusted and there is NO host
+  // fallback, so a joined non-host can no longer impersonate the host to send
+  // SET_SCENARIO / START_SESSION. A missing/invalid ticket closes the socket.
+  const identity = resolveSocketIdentity(params);
+  if (identity === null) {
     socket.close(1008, "unauthorized");
     return;
   }
-  const roomId = params.get("roomId");
-  const room = roomId !== null ? persistence.roomStore.getRoom(roomId) : undefined;
+  const room = persistence.roomStore.getRoom(identity.roomId);
   if (room === undefined) {
     socket.close(1008, "unknown-room");
     return;
   }
-
-  // The connecting viewer identity: an explicit `playerId` query param (a joined
-  // player arriving with their own identity), else the host (back-compat for a
-  // host arriving without an explicit playerId).
-  const queryPlayerId = params.get("playerId");
-  const viewerId = queryPlayerId !== null && queryPlayerId.length > 0
-    ? queryPlayerId
-    : room.hostPlayerId;
+  const viewerId = identity.playerId;
+  const lobbyMessageRateKey = `lobby:${room.id}:${viewerId}:${randomUUID()}`;
 
   // Register this socket into the room's broadcast set.
   let roomSet = lobbySockets.get(room.id);
@@ -1143,6 +1661,10 @@ lobbyWss.on("connection", (socket, request) => {
   );
 
   socket.on("message", (raw: unknown) => {
+    if (!wsMessageRateLimiter.tryAcquire(lobbyMessageRateKey)) {
+      socket.close(1008, "rate-limit");
+      return;
+    }
     let msg: { type?: string; scenarioId?: string };
     try {
       msg = JSON.parse(String(raw)) as typeof msg;
@@ -1153,10 +1675,14 @@ lobbyWss.on("connection", (socket, request) => {
     // host may change the selection; ignore SET_SCENARIO from any other identity.
     if (msg.type === "SET_SCENARIO") {
       if (viewerId !== room.hostPlayerId) return;
+      const scenarioId = readBoundedText(msg.scenarioId, {
+        field: "Scenario ID",
+        maxLength: MAX_SCENARIO_ID_LENGTH,
+        required: true,
+      });
+      if (!scenarioId.ok) return;
       const picked =
-        typeof msg.scenarioId === "string"
-          ? persistence.scenarioStore.getScenario(msg.scenarioId)
-          : undefined;
+        persistence.scenarioStore.getScenario(scenarioId.value);
       if (picked !== undefined) {
         persistence.scenarioStore.setSelection(room.id, picked.id);
         // Persist the choice on the room so START_SESSION resolves it.
@@ -1199,21 +1725,50 @@ lobbyWss.on("connection", (socket, request) => {
 /** Translate a browser message into an {@link OrchestratorCommand}. */
 function toCommand(
   playerId: string,
-  msg: { type?: string; text?: string; action?: string },
+  msg: { type?: string; text?: string; action?: string; checkId?: string },
 ): OrchestratorCommand | null {
   switch (msg.type) {
     case "chat":
-      return typeof msg.text === "string" && msg.text.trim().length > 0
-        ? { type: "SEND_CHAT", from: playerId, text: msg.text }
-        : null;
+      if (typeof msg.text !== "string") return null;
+      {
+        const text = readBoundedText(msg.text, {
+          field: "Chat message",
+          maxLength: MAX_CHAT_LENGTH,
+          required: true,
+        });
+        return text.ok ? { type: "SEND_CHAT", from: playerId, text: text.value } : null;
+      }
     case "confirm":
-      return typeof msg.action === "string" && msg.action.trim().length > 0
-        ? { type: "CONFIRM_ACTION", from: playerId, action: msg.action }
-        : null;
+      if (typeof msg.action !== "string") return null;
+      {
+        const action = readBoundedText(msg.action, {
+          field: "Action",
+          maxLength: MAX_ACTION_LENGTH,
+          required: true,
+        });
+        return action.ok ? { type: "CONFIRM_ACTION", from: playerId, action: action.value } : null;
+      }
     case "pass":
       return { type: "PASS", from: playerId };
     case "revise":
-      return { type: "REVISE", from: playerId, action: msg.action ?? null };
+      if (typeof msg.action !== "string") return { type: "REVISE", from: playerId, action: null };
+      {
+        const action = readBoundedText(msg.action, {
+          field: "Action",
+          maxLength: MAX_ACTION_LENGTH,
+        });
+        return action.ok ? { type: "REVISE", from: playerId, action: action.value || null } : null;
+      }
+    case "roll_check":
+      if (typeof msg.checkId !== "string") return null;
+      {
+        const checkId = readBoundedText(msg.checkId, {
+          field: "Check id",
+          maxLength: MAX_CHECK_ID_LENGTH,
+          required: true,
+        });
+        return checkId.ok ? { type: "ROLL_CHECK", from: playerId, checkId: checkId.value } : null;
+      }
     default:
       return null;
   }

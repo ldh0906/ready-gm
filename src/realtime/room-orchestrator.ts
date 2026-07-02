@@ -48,6 +48,15 @@ import type { ClockStore } from "../services/clock-store.js";
 import { seedClocksForScenario, areClocksVisible } from "../services/scenario-clocks.js";
 import type { SceneStore } from "../services/scene-store.js";
 import { seedSceneForScenario } from "../services/scenario-scenes.js";
+import {
+  seedCharacterStatesForCharacters,
+  type CharacterStateStore,
+} from "../services/character-state-store.js";
+import type { BlackboardStore } from "../services/blackboard-store.js";
+import { seedBlackboardForScenario } from "../services/scenario-blackboard.js";
+import type { MemoryStore } from "../services/memory-store.js";
+import { resolveGameProfileForScenario } from "../core/game-profile.js";
+import { toVisibleBlackboard } from "../core/scenario-blackboard.js";
 import type { Character, Player, Room } from "../services/types.js";
 import type { Scenario } from "../services/scenario-service.js";
 import { sheetSchemaForScenario } from "../services/sheet-schema.js";
@@ -57,7 +66,11 @@ import {
 } from "../services/turn-state-context.js";
 import type {
   GenerationResult,
+  DeclaredCheck,
+  DeclareRoundResult,
   Narration,
+  NarrateDeclaredRoundInput,
+  RoundDeclaration,
   ResolveRoundInput,
   ResolveRoundResult,
   SessionSummary,
@@ -69,9 +82,20 @@ import {
   type EnvelopeGenerators,
 } from "../observability/events.js";
 import type { NarrationPayload } from "./connection.js";
+import type { ServerEvent } from "./connection.js";
 import type { SessionSummaryRepository } from "../persistence/types.js";
+import type { CheckRecord, PendingCheck } from "../core/turn-state.js";
 
-/**
+const MAX_AUTOMATIC_FAILED_RESOLUTION_RETRIES = 1;
+
+interface PendingResolution {
+  declaration: RoundDeclaration;
+  roundNumber: number;
+  allReadyAtIso: string;
+  resolvedByCheckId: Map<string, CheckRecord>;
+}
+
+/** 
  * The client-facing command surface the orchestrator accepts. It mirrors the
  * design's inbound `RoomCommand` MINUS the server-supplied fields (active-player
  * roster, ready-check deadline, host id, chat attribution/timestamp) which the
@@ -84,6 +108,7 @@ export type OrchestratorCommand =
   | { type: "CONFIRM_ACTION"; from: PlayerId; action: string }
   | { type: "PASS"; from: PlayerId }
   | { type: "REVISE"; from: PlayerId; action: string | null }
+  | { type: "ROLL_CHECK"; from: PlayerId; checkId: string }
   | { type: "TIMEOUT_EXPIRED"; player: PlayerId }
   | { type: "FORCE_PROCEED"; by: PlayerId };
 
@@ -96,6 +121,8 @@ export interface OrchestratorGateway {
   broadcastTurnState(roomId: string): void;
   /** Deliver GM narration (buffered when the room is empty) (R10.4, R10.7). */
   deliverNarration(roomId: string, narration: NarrationPayload): void;
+  /** Broadcast a non-state event to every connected room member. */
+  broadcast(roomId: string, event: ServerEvent): void;
 }
 
 /**
@@ -104,6 +131,9 @@ export interface OrchestratorGateway {
  */
 export interface OrchestratorCoordinator {
   resolveRound(input: ResolveRoundInput): Promise<ResolveRoundResult>;
+  declareRound(input: ResolveRoundInput): Promise<DeclareRoundResult>;
+  rollDeclaredCheck(check: DeclaredCheck): GenerationResult<CheckRecord>;
+  narrateDeclaredRound(input: NarrateDeclaredRoundInput): Promise<ResolveRoundResult>;
   generateOpening(
     ctx: TurnStateContext,
     correlation?: CorrelationKey,
@@ -126,6 +156,13 @@ export interface RoomReader {
    * import("../services/room-store.js").RoomStore} provides it.
    */
   saveRoom?(room: Room): void;
+  markRoomEndedIfInSession?(roomId: string): Promise<boolean>;
+}
+
+function hasRoomEndedCas(
+  roomReader: RoomReader,
+): roomReader is RoomReader & { markRoomEndedIfInSession(roomId: string): Promise<boolean> } {
+  return typeof roomReader.markRoomEndedIfInSession === "function";
 }
 
 /** Resolves the effective scenario for a room (explicit selection or default). */
@@ -161,6 +198,17 @@ export interface RoomOrchestratorDeps {
    * clues). When omitted, rounds resolve with no scene grounding.
    */
   sceneStore?: SceneStore;
+  /**
+   * Optional per-room Character State store. When present, the orchestrator
+   * seeds empty mutable state for confirmed characters at session start,
+   * supplies it to each round resolution, and persists the engine-applied
+   * CharacterDelta result.
+   */
+  characterStateStore?: CharacterStateStore;
+  /** Optional per-room ScenarioBlackboard store. */
+  blackboardStore?: BlackboardStore;
+  /** Optional per-room Memory Clerk store (summarized long-term memory). */
+  memoryStore?: MemoryStore;
   /** Best-effort QA event sink; defaults to no emission. */
   eventSink?: EventSink;
   /** Engine config (ready-check timeout, resolution token budget). */
@@ -198,6 +246,9 @@ export class RoomOrchestrator {
   private readonly sessionSummaryRepository: SessionSummaryRepository;
   private readonly clockStore: ClockStore | undefined;
   private readonly sceneStore: SceneStore | undefined;
+  private readonly characterStateStore: CharacterStateStore | undefined;
+  private readonly blackboardStore: BlackboardStore | undefined;
+  private readonly memoryStore: MemoryStore | undefined;
   private readonly eventSink: EventSink | undefined;
   private readonly config: EngineConfig;
   private readonly now: () => Date;
@@ -209,8 +260,14 @@ export class RoomOrchestrator {
   private readonly pending = new Set<Promise<unknown>>();
   /** `${roomId}:${roundNo}` → ISO timestamp the round entered resolving (all-ready). */
   private readonly allReadyAt = new Map<string, string>();
+  /** `${roomId}:${roundNo}` → automatic retries already armed after resolution failures. */
+  private readonly failedResolutionRetries = new Map<string, number>();
   /** roomId → in-flight ready-check countdown handle (auto-pass unready on expiry). */
   private readonly readyCheckTimers = new Map<string, unknown>();
+  /** roomId → pending two-phase dice declaration awaiting player rolls. */
+  private readonly pendingResolutions = new Map<string, PendingResolution>();
+  /** roomId → in-flight roll-check timeout handle (auto-roll unresolved checks). */
+  private readonly rollCheckTimers = new Map<string, unknown>();
   private readonly scheduleTimer: (fn: () => void, ms: number) => unknown;
   private readonly cancelTimer: (handle: unknown) => void;
   /** Best-effort flow logger for session tracing (no-op when not provided). */
@@ -225,6 +282,9 @@ export class RoomOrchestrator {
     this.sessionSummaryRepository = deps.sessionSummaryRepository;
     this.clockStore = deps.clockStore;
     this.sceneStore = deps.sceneStore;
+    this.characterStateStore = deps.characterStateStore;
+    this.blackboardStore = deps.blackboardStore;
+    this.memoryStore = deps.memoryStore;
     this.eventSink = deps.eventSink;
     this.config = deps.config ?? DEFAULT_ENGINE_CONFIG;
     this.now = deps.now ?? (() => new Date());
@@ -316,6 +376,10 @@ export class RoomOrchestrator {
    * this lock so a concurrent revert can still halt an in-flight resolution.
    */
   private applyClientCommand(roomId: string, command: OrchestratorCommand): void {
+    if (command.type === "ROLL_CHECK") {
+      this.applyRollCheckCommand(roomId, command.from, command.checkId);
+      return;
+    }
     const before = this.loadState(roomId);
     const reducerCommand = this.toReducerCommand(roomId, before, command);
     if (reducerCommand === null) return;
@@ -347,6 +411,10 @@ export class RoomOrchestrator {
     const leftReadyCheck = before.phase === "ready_check" && after.phase !== "ready_check";
     if (leftReadyCheck) this.clearReadyCheckTimer(roomId);
     if (enteredReadyCheck) this.armReadyCheckTimer(roomId, after.readyCheckTimeoutMs);
+    if (before.phase === "rolling" && after.phase !== "rolling") {
+      this.pendingResolutions.delete(roomId);
+      this.clearRollCheckTimer(roomId);
+    }
 
     // Session start: generate + deliver the opening narration (R5.2, R5.3).
     if (
@@ -356,6 +424,8 @@ export class RoomOrchestrator {
     ) {
       this.seedClocks(roomId);
       this.seedScene(roomId);
+      this.seedCharacterStates(roomId);
+      this.seedBlackboard(roomId);
       this.launchOpening(roomId, after);
     }
 
@@ -473,6 +543,8 @@ export class RoomOrchestrator {
         if (hostId === undefined) return null;
         return { type: "FORCE_PROCEED", by: command.by, hostId };
       }
+      case "ROLL_CHECK":
+        return null;
       default:
         return assertNever(command);
     }
@@ -492,7 +564,8 @@ export class RoomOrchestrator {
         const result = await this.coordinator.generateOpening(ctx, correlationFor(startedState));
         if (!result.ok) {
           this.log("opening_failed", { roomId, reason: result.error.reason, message: result.error.message });
-          return; // Withheld on failure; nothing to deliver (R14.4).
+          this.emitNarrationFailure(roomId, "opening", result.error.message);
+          return;
         }
         this.log("narration", { roomId, kind: "opening", round: startedState.roundNumber });
         this.gateway.deliverNarration(roomId, {
@@ -527,15 +600,22 @@ export class RoomOrchestrator {
         }
         const clocks = this.clockStore?.get(roomId);
         const scene = this.sceneStore?.get(roomId);
-        const result = await this.coordinator.resolveRound({
+        const characterStates = this.characterStateStore?.get(roomId);
+        const blackboard = this.blackboardStore?.get(roomId);
+        const memories = this.memoryStore?.list(roomId);
+        const result = await this.coordinator.declareRound({
           state: resolving,
           scenario,
           characters: this.charactersFor(roomId),
           budget: this.config.tokenBudgets.resolution,
+          profile: resolveGameProfileForScenario(scenario.id),
           ...(clocks !== undefined ? { clocks } : {}),
           ...(scene !== undefined ? { scene } : {}),
+          ...(characterStates !== undefined ? { characterStates } : {}),
+          ...(blackboard !== undefined ? { blackboard } : {}),
+          ...(memories !== undefined ? { memories } : {}),
         });
-        this.log("resolution_returned", {
+        this.log("checks_declared", {
           roomId,
           round: resolving.roundNumber,
           ok: result.ok,
@@ -543,18 +623,204 @@ export class RoomOrchestrator {
             ? {}
             : { reason: result.error.reason, message: result.error.message }),
         });
+        await this.enqueue(roomId, () =>
+          this.applyDeclarationResult(
+            roomId,
+            resolving.roundNumber,
+            allReadyAtIso,
+            result,
+          ),
+        );
+      })(),
+    );
+  }
+
+  private applyDeclarationResult(
+    roomId: string,
+    roundNumber: number,
+    allReadyAtIso: string,
+    result: DeclareRoundResult,
+  ): void {
+    const current = this.loadState(roomId);
+    if (!result.ok) {
+      this.revertFailedResolution(roomId, current);
+      return;
+    }
+    if (
+      (current.phase !== "resolving" && current.phase !== "rolling") ||
+      !current.resolutionRequested
+    ) {
+      return;
+    }
+
+    const publicChecks = result.declaration.checks.filter(
+      (check) => check.visibility === "player",
+    );
+    const pendingChecks = publicChecks.map((check) => this.toPendingCheck(check, "pending"));
+    this.pendingResolutions.set(roomId, {
+      declaration: result.declaration,
+      roundNumber,
+      allReadyAtIso,
+      resolvedByCheckId: new Map(),
+    });
+
+    if (pendingChecks.length > 0) {
+      const next = reduce(current, { type: "DECLARE_CHECKS", checks: pendingChecks });
+      if (next === current) {
+        this.pendingResolutions.delete(roomId);
+        return;
+      }
+      this.store.save(next);
+      this.gateway.broadcastTurnState(roomId);
+      this.gateway.broadcast(roomId, { type: "checks_pending", roomId, checks: pendingChecks });
+    }
+
+    // Hidden GM checks and public ownerless checks cannot wait on a player.
+    // Resolve them immediately so disconnected/absent actors never wedge the round.
+    for (const check of result.declaration.checks) {
+      if (check.visibility !== "player" || check.playerId === null) {
+        this.rollDeclaredCheck(roomId, check.checkId, true);
+      }
+    }
+
+    if (this.hasUnrolledChecks(roomId)) {
+      this.armRollCheckTimer(roomId);
+    } else {
+      this.maybeLaunchDeclaredNarration(roomId);
+    }
+  }
+
+  private applyRollCheckCommand(roomId: string, playerId: PlayerId, checkId: string): void {
+    const current = this.loadState(roomId);
+    if (current.phase !== "rolling" || !current.resolutionRequested) return;
+    const pending = (current.rollingChecks ?? []).find((check) => check.checkId === checkId);
+    if (pending === undefined) return;
+    if (pending.status === "rolled") return;
+    if (pending.playerId !== playerId) return;
+    this.rollDeclaredCheck(roomId, checkId, false);
+  }
+
+  private rollDeclaredCheck(roomId: string, checkId: string, autoRolled: boolean): void {
+    const pending = this.pendingResolutions.get(roomId);
+    if (pending === undefined) return;
+    if (pending.resolvedByCheckId.has(checkId)) return;
+    const declared = pending.declaration.checks.find((check) => check.checkId === checkId);
+    if (declared === undefined) return;
+
+    const rolled = this.coordinator.rollDeclaredCheck(declared);
+    if (!rolled.ok) {
+      this.revertFailedResolution(roomId, this.loadState(roomId));
+      return;
+    }
+    pending.resolvedByCheckId.set(checkId, rolled.value);
+
+    if (declared.visibility === "player") {
+      const current = this.loadState(roomId);
+      const next = reduce(current, {
+        type: "CHECK_ROLLED",
+        checkId,
+        check: rolled.value,
+        ...(autoRolled ? { autoRolled: true } : {}),
+      });
+      if (next !== current) {
+        this.store.save(next);
+        this.gateway.broadcastTurnState(roomId);
+      }
+      this.gateway.broadcast(roomId, {
+        type: "check_rolled",
+        roomId,
+        check: {
+          ...this.toPendingCheck(declared, "rolled"),
+          roll: rolled.value.roll,
+          rolls: [...rolled.value.rolls],
+          outcome: rolled.value.outcome,
+          ...(autoRolled ? { autoRolled: true } : {}),
+        },
+      });
+    }
+
+    this.maybeLaunchDeclaredNarration(roomId);
+  }
+
+  private hasUnrolledChecks(roomId: string): boolean {
+    const pending = this.pendingResolutions.get(roomId);
+    if (pending === undefined) return false;
+    return pending.declaration.checks.some((check) => !pending.resolvedByCheckId.has(check.checkId));
+  }
+
+  private maybeLaunchDeclaredNarration(roomId: string): void {
+    const pending = this.pendingResolutions.get(roomId);
+    if (pending === undefined || this.hasUnrolledChecks(roomId)) return;
+    this.pendingResolutions.delete(roomId);
+    this.clearRollCheckTimer(roomId);
+    const resolvedChecks = pending.declaration.checks
+      .map((check) => pending.resolvedByCheckId.get(check.checkId))
+      .filter((check): check is CheckRecord => check !== undefined);
+    this.track(
+      (async () => {
+        const result = await this.coordinator.narrateDeclaredRound({
+          declaration: pending.declaration,
+          resolvedChecks,
+        });
+        this.log("resolution_returned", {
+          roomId,
+          round: pending.roundNumber,
+          ok: result.ok,
+          ...(result.ok ? {} : { reason: result.error.reason, message: result.error.message }),
+        });
         const narrationReturnedAtIso = this.nowIso();
         await this.enqueue(roomId, () =>
           this.applyResolutionResult(
             roomId,
-            resolving.roundNumber,
-            allReadyAtIso,
+            pending.roundNumber,
+            pending.allReadyAtIso,
             narrationReturnedAtIso,
             result,
           ),
         );
       })(),
     );
+  }
+
+  private armRollCheckTimer(roomId: string): void {
+    this.clearRollCheckTimer(roomId);
+    const handle = this.scheduleTimer(() => {
+      this.rollCheckTimers.delete(roomId);
+      void this.enqueue(roomId, () => this.autoRollRemainingChecks(roomId));
+    }, Math.max(0, this.config.rollCheckTimeoutMs));
+    this.rollCheckTimers.set(roomId, handle);
+  }
+
+  private clearRollCheckTimer(roomId: string): void {
+    const handle = this.rollCheckTimers.get(roomId);
+    if (handle !== undefined) {
+      this.cancelTimer(handle);
+      this.rollCheckTimers.delete(roomId);
+    }
+  }
+
+  private autoRollRemainingChecks(roomId: string): void {
+    const pending = this.pendingResolutions.get(roomId);
+    if (pending === undefined) return;
+    for (const check of pending.declaration.checks) {
+      if (!pending.resolvedByCheckId.has(check.checkId)) {
+        this.rollDeclaredCheck(roomId, check.checkId, true);
+      }
+    }
+  }
+
+  private toPendingCheck(check: DeclaredCheck, status: PendingCheck["status"]): PendingCheck {
+    return {
+      checkId: check.checkId,
+      characterId: check.characterId,
+      ...(check.characterName !== undefined ? { characterName: check.characterName } : {}),
+      playerId: check.playerId,
+      attribute: check.attribute,
+      difficulty: check.difficulty,
+      advantage: check.advantage,
+      visibility: check.visibility,
+      status,
+    };
   }
 
   /**
@@ -579,7 +845,12 @@ export class RoomOrchestrator {
 
     // Stale delivery (e.g. a mid-resolution revert already halted this round):
     // discard the narration and do nothing (R7.9, R10.3).
-    if (current.phase !== "resolving" || !current.resolutionRequested) return;
+    if (
+      (current.phase !== "resolving" && current.phase !== "rolling") ||
+      !current.resolutionRequested
+    ) {
+      return;
+    }
 
     const next = reduce(current, {
       type: "RESOLUTION_READY",
@@ -599,6 +870,19 @@ export class RoomOrchestrator {
     // Persist the engine-applied scene (e.g. clues the GM revealed this round).
     if (this.sceneStore !== undefined && result.scene !== undefined) {
       this.sceneStore.save(roomId, result.scene);
+    }
+    // Persist the engine-applied character state. The AI proposes deltas; the
+    // coordinator applies only validated deltas and returns the resulting state.
+    if (this.characterStateStore !== undefined && result.characterStates !== undefined) {
+      this.characterStateStore.save(roomId, result.characterStates);
+    }
+    if (this.blackboardStore !== undefined && result.blackboard !== undefined) {
+      this.blackboardStore.save(roomId, result.blackboard);
+    }
+    // Persist the Memory Clerk records (deterministic derivation + validated
+    // AI writes) so the next round's context can select by salience.
+    if (this.memoryStore !== undefined && result.memories !== undefined) {
+      this.memoryStore.save(roomId, result.memories);
     }
     this.gateway.broadcastTurnState(roomId);
 
@@ -631,12 +915,18 @@ export class RoomOrchestrator {
         roll: c.roll,
         outcome: c.outcome,
       }));
+    // The round's player-visible blackboard projection (discovered clues /
+    // NPC presence / threats) rides the narration payload so the client panel
+    // updates in the same beat; hidden material is projected away server-side.
+    const visibleBlackboard =
+      result.blackboard !== undefined ? toVisibleBlackboard(result.blackboard) : undefined;
     this.gateway.deliverNarration(roomId, {
       kind: "resolution",
       roundNumber,
       text: result.narration,
       ...(visibleClocks !== undefined ? { clocks: visibleClocks } : {}),
       ...(visibleChecks.length > 0 ? { checks: visibleChecks } : {}),
+      ...(visibleBlackboard !== undefined ? { blackboard: visibleBlackboard } : {}),
     });
     this.log("narration", {
       roomId,
@@ -648,7 +938,9 @@ export class RoomOrchestrator {
 
     // Best-effort latency event for the round (all-ready → narration-returned).
     this.emitRoundTiming(roomId, roundNumber, allReadyAtIso, narrationReturnedAtIso);
-    this.allReadyAt.delete(timingKey(roomId, roundNumber));
+    const key = timingKey(roomId, roundNumber);
+    this.allReadyAt.delete(key);
+    this.failedResolutionRetries.delete(key);
 
     // Ending reached during resolution: produce closing + Session_Summary (R15.x).
     if (next.phase === "ended") {
@@ -663,18 +955,40 @@ export class RoomOrchestrator {
    * left `resolving` (e.g. halted by a revert).
    */
   private revertFailedResolution(roomId: string, current: TurnState): void {
-    if (current.phase !== "resolving" || !current.resolutionRequested) return;
+    if (
+      (current.phase !== "resolving" && current.phase !== "rolling") ||
+      !current.resolutionRequested
+    ) {
+      return;
+    }
+    this.pendingResolutions.delete(roomId);
+    this.clearRollCheckTimer(roomId);
     const reverted: TurnState = {
       ...current,
       phase: "ready_check",
+      checks: [],
+      rollingChecks: [],
       resolutionRequested: false,
       readyCheckDeadline: null,
     };
     this.store.save(reverted);
     this.gateway.broadcastTurnState(roomId);
     this.log("resolution_reverted", { roomId, round: reverted.roundNumber });
-    // Re-arm the countdown so a reverted, all-ready round retries the resolution
-    // instead of wedging forever (the timer's all-ready branch forces a retry).
+    // Re-arm the countdown so a reverted, all-ready round can retry once without
+    // wedging forever. Further failures wait for a manual force/proceed path
+    // instead of creating an unbounded AI-cost loop.
+    const key = timingKey(roomId, reverted.roundNumber);
+    this.allReadyAt.delete(key);
+    const retryCount = (this.failedResolutionRetries.get(key) ?? 0) + 1;
+    this.failedResolutionRetries.set(key, retryCount);
+    if (retryCount > MAX_AUTOMATIC_FAILED_RESOLUTION_RETRIES) {
+      this.log("ready_retry_exhausted", { roomId, round: reverted.roundNumber, retries: retryCount });
+      // Automatic retries are exhausted: surface an explicit room-visible
+      // failure instead of silence. Players retry by re-readying (the round's
+      // recorded actions are preserved), so the notice names that affordance.
+      this.emitNarrationFailure(roomId, "resolution", "automatic retries exhausted");
+      return;
+    }
     this.armReadyCheckTimer(roomId, reverted.readyCheckTimeoutMs);
   }
 
@@ -699,7 +1013,12 @@ export class RoomOrchestrator {
         if (scenario === null) return;
         const ctx = toContext(endedState, scenario, this.charactersFor(roomId));
         const result = await this.coordinator.generateEnding(ctx, correlationFor(endedState));
-        if (!result.ok) return; // Withheld on failure (R14.4).
+        if (!result.ok) {
+          this.emitNarrationFailure(roomId, "ending", result.error.message);
+          return;
+        }
+        const markedEnded = await this.markRoomEnded(roomId);
+        if (!markedEnded) return;
 
         await this.sessionSummaryRepository.save({
           roomId,
@@ -707,9 +1026,6 @@ export class RoomOrchestrator {
           summaryText: result.value.summary.text,
           createdAt: this.nowIso(),
         });
-
-        // Mark the durable room ended so it rejects restarts (R15.6, R15.7).
-        this.markRoomEnded(roomId);
 
         this.gateway.deliverNarration(roomId, {
           kind: "closing",
@@ -721,10 +1037,29 @@ export class RoomOrchestrator {
   }
 
   /** Best-effort durable room-ended transition (Requirement 15.6). */
-  private markRoomEnded(roomId: string): void {
+  private async markRoomEnded(roomId: string): Promise<boolean> {
     const room = this.roomReader.getRoom(roomId);
-    if (room === undefined || room.state === "ended") return;
+    if (room === undefined || room.state === "ended") return false;
+    if (hasRoomEndedCas(this.roomReader)) {
+      const changed = await this.roomReader.markRoomEndedIfInSession(roomId);
+      if (!changed) return false;
+    }
     this.roomReader.saveRoom?.({ ...room, state: "ended" });
+    return true;
+  }
+
+  private emitNarrationFailure(
+    roomId: string,
+    phase: "opening" | "ending" | "resolution",
+    reason: string,
+  ): void {
+    this.gateway.broadcast(roomId, {
+      type: "narration_failed",
+      roomId,
+      phase,
+      reason,
+      retryable: true,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -780,6 +1115,20 @@ export class RoomOrchestrator {
     if (scenario === null) return;
     const scene = seedSceneForScenario(scenario.id);
     if (scene !== null) this.sceneStore.save(roomId, scene);
+  }
+
+  /** Seed empty mutable state for confirmed characters at session start. */
+  private seedCharacterStates(roomId: string): void {
+    if (this.characterStateStore === undefined) return;
+    this.characterStateStore.save(roomId, seedCharacterStatesForCharacters(this.charactersFor(roomId)));
+  }
+
+  /** Seed the scenario blackboard at session start, empty for scenarios without authored data. */
+  private seedBlackboard(roomId: string): void {
+    if (this.blackboardStore === undefined) return;
+    const scenario = this.scenarioResolver.getSelectedScenario(roomId);
+    if (scenario === null) return;
+    this.blackboardStore.save(roomId, seedBlackboardForScenario(roomId, scenario.id));
   }
 
   /**

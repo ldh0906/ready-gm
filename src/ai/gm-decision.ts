@@ -18,6 +18,9 @@
  */
 import type { DifficultyGrade } from "../core/types.js";
 import { isGmMove, type GmMove } from "../core/gm-moves.js";
+import type { CharacterDelta } from "../core/character-state.js";
+import type { BlackboardDelta, ThreatState } from "../core/scenario-blackboard.js";
+import { validateMemoryWrite, type MemoryWrite } from "../core/memory-record.js";
 import type { StateChange } from "../observability/events.js";
 
 /** Player-utterance intent categories (ai-architecture.md "Intent Routing"). */
@@ -35,6 +38,18 @@ export const INTENTS = [
 
 /** A single classified player intent. */
 export type Intent = (typeof INTENTS)[number];
+
+/** The scene-level purpose the GM is aiming for in this round. */
+export const SCENE_PURPOSES = [
+  "setup",
+  "pressure",
+  "reveal",
+  "choice",
+  "climax",
+  "aftermath",
+] as const;
+
+export type ScenePurpose = (typeof SCENE_PURPOSES)[number];
 
 /** Valid difficulty grades (runtime list for validation). */
 const DIFFICULTY_GRADES: readonly DifficultyGrade[] = [
@@ -89,6 +104,12 @@ export interface ClockDelta {
   reason?: string;
 }
 
+/** Explicit explanation for a confirmed player action that does not need dice. */
+export interface NoRollRationale {
+  characterName: string;
+  rationale: string;
+}
+
 /**
  * The structured hot-path decision. List/flag fields are always present
  * (defaulting to empty / false) so consumers never branch on `undefined`;
@@ -97,10 +118,19 @@ export interface ClockDelta {
 export interface GmDecision {
   intent?: Intent;
   gmMove?: GmMove;
+  scenePurpose?: ScenePurpose;
+  spotlightTarget?: string;
+  stakes?: string;
   needsRoll: boolean;
   checks: DecisionCheck[];
+  noRollRationales: NoRollRationale[];
   clockDeltas: ClockDelta[];
+  characterDeltas: CharacterDelta[];
+  blackboardDeltas: BlackboardDelta[];
+  /** AI-proposed Memory Clerk writes (validated fail-closed by the server). */
+  memoryWrites: MemoryWrite[];
   stateChanges: StateChange[];
+  procedureNotes: string[];
   /** Clue ids the GM revealed to the players this round (applied to Scene State). */
   revealedClues: string[];
   offFront: boolean;
@@ -166,6 +196,27 @@ function parseChecks(value: unknown): { ok: true; value: DecisionCheck[] } | { o
   return { ok: true, value: checks };
 }
 
+/** Validate explicit no-roll rationales for confirmed actions that skip checks. */
+function parseNoRollRationales(value: unknown): { ok: true; value: NoRollRationale[] } | { ok: false; message: string } {
+  if (value === undefined) return { ok: true, value: [] };
+  if (!Array.isArray(value)) return { ok: false, message: "'noRollRationales' must be an array" };
+  const rationales: NoRollRationale[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) {
+      return { ok: false, message: "each noRollRationale must be an object" };
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e["characterName"] !== "string" || e["characterName"].trim().length === 0) {
+      return { ok: false, message: "noRollRationale 'characterName' must be a non-empty string" };
+    }
+    if (typeof e["rationale"] !== "string" || e["rationale"].trim().length === 0) {
+      return { ok: false, message: "noRollRationale 'rationale' must be a non-empty string" };
+    }
+    rationales.push({ characterName: e["characterName"], rationale: e["rationale"] });
+  }
+  return { ok: true, value: rationales };
+}
+
 /** Validate the optional `clockDeltas` array (each: clockId + finite delta). */
 function parseClockDeltas(value: unknown): { ok: true; value: ClockDelta[] } | { ok: false; message: string } {
   if (value === undefined) return { ok: true, value: [] };
@@ -188,6 +239,183 @@ function parseClockDeltas(value: unknown): { ok: true; value: ClockDelta[] } | {
     deltas.push(delta);
   }
   return { ok: true, value: deltas };
+}
+
+function hasString(e: Record<string, unknown>, key: string): e is Record<string, unknown> & Record<typeof key, string> {
+  return typeof e[key] === "string" && e[key].trim().length > 0;
+}
+
+function parseCharacterDelta(entry: unknown): { ok: true; value: CharacterDelta } | { ok: false; message: string } {
+  if (typeof entry !== "object" || entry === null) {
+    return { ok: false, message: "each characterDelta must be an object" };
+  }
+  const e = entry as Record<string, unknown>;
+  if (!hasString(e, "type")) return { ok: false, message: "characterDelta 'type' must be a string" };
+  if (!hasString(e, "characterId")) return { ok: false, message: "characterDelta 'characterId' must be a string" };
+  if (!hasString(e, "reason")) return { ok: false, message: "characterDelta 'reason' must be a string" };
+
+  switch (e.type) {
+    case "add_condition": {
+      if (!hasString(e, "condition")) return { ok: false, message: "add_condition requires 'condition'" };
+      const delta: CharacterDelta = {
+        type: "add_condition",
+        characterId: e.characterId,
+        condition: e.condition,
+        reason: e.reason,
+      };
+      if (e.severity !== undefined) {
+        if (typeof e.severity !== "number" || !Number.isFinite(e.severity)) {
+          return { ok: false, message: "add_condition 'severity' must be a finite number when present" };
+        }
+        delta.severity = e.severity;
+      }
+      return { ok: true, value: delta };
+    }
+    case "remove_condition":
+      if (!hasString(e, "condition")) return { ok: false, message: "remove_condition requires 'condition'" };
+      return {
+        ok: true,
+        value: { type: "remove_condition", characterId: e.characterId, condition: e.condition, reason: e.reason },
+      };
+    case "add_inventory":
+      if (!hasString(e, "item")) return { ok: false, message: "add_inventory requires 'item'" };
+      if (!Array.isArray(e.tags) || !e.tags.every((tag) => typeof tag === "string")) {
+        return { ok: false, message: "add_inventory 'tags' must be a string array" };
+      }
+      return {
+        ok: true,
+        value: { type: "add_inventory", characterId: e.characterId, item: e.item, tags: e.tags, reason: e.reason },
+      };
+    case "spend_resource":
+      if (!hasString(e, "resource")) return { ok: false, message: "spend_resource requires 'resource'" };
+      if (typeof e.amount !== "number" || !Number.isFinite(e.amount)) {
+        return { ok: false, message: "spend_resource 'amount' must be a finite number" };
+      }
+      return {
+        ok: true,
+        value: { type: "spend_resource", characterId: e.characterId, resource: e.resource, amount: e.amount, reason: e.reason },
+      };
+    case "update_relationship":
+      if (!hasString(e, "targetId")) return { ok: false, message: "update_relationship requires 'targetId'" };
+      if (!hasString(e, "attitude")) return { ok: false, message: "update_relationship requires 'attitude'" };
+      return {
+        ok: true,
+        value: {
+          type: "update_relationship",
+          characterId: e.characterId,
+          targetId: e.targetId,
+          attitude: e.attitude,
+          reason: e.reason,
+        },
+      };
+    case "advance_personal_clock":
+      if (!hasString(e, "clockId")) return { ok: false, message: "advance_personal_clock requires 'clockId'" };
+      if (typeof e.ticks !== "number" || !Number.isFinite(e.ticks)) {
+        return { ok: false, message: "advance_personal_clock 'ticks' must be a finite number" };
+      }
+      return {
+        ok: true,
+        value: { type: "advance_personal_clock", characterId: e.characterId, clockId: e.clockId, ticks: e.ticks, reason: e.reason },
+      };
+    case "add_memory":
+      if (!hasString(e, "text")) return { ok: false, message: "add_memory requires 'text'" };
+      if (typeof e.salience !== "number" || !Number.isFinite(e.salience)) {
+        return { ok: false, message: "add_memory 'salience' must be a finite number" };
+      }
+      return {
+        ok: true,
+        value: { type: "add_memory", characterId: e.characterId, text: e.text, salience: e.salience, reason: e.reason },
+      };
+    default:
+      return { ok: false, message: `unknown characterDelta type '${e.type}'` };
+  }
+}
+
+function parseCharacterDeltas(value: unknown): { ok: true; value: CharacterDelta[] } | { ok: false; message: string } {
+  if (value === undefined) return { ok: true, value: [] };
+  if (!Array.isArray(value)) return { ok: false, message: "'characterDeltas' must be an array" };
+  const deltas: CharacterDelta[] = [];
+  for (const entry of value) {
+    const parsed = parseCharacterDelta(entry);
+    if (!parsed.ok) return parsed;
+    deltas.push(parsed.value);
+  }
+  return { ok: true, value: deltas };
+}
+
+function parseBlackboardDeltas(value: unknown): BlackboardDelta[] {
+  if (!Array.isArray(value)) return [];
+  const deltas: BlackboardDelta[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.type !== "string" || typeof e.reason !== "string") continue;
+    switch (e.type) {
+      case "reveal_clue":
+        if (typeof e.clueId === "string") deltas.push({ type: "reveal_clue", clueId: e.clueId, reason: e.reason });
+        break;
+      case "reveal_secret":
+        if (typeof e.secretId === "string" && (e.reveal === "partial" || e.reveal === "full")) {
+          deltas.push({ type: "reveal_secret", secretId: e.secretId, reveal: e.reveal, reason: e.reason });
+        }
+        break;
+      case "npc_attitude":
+        if (typeof e.npcId === "string" && typeof e.characterId === "string" && typeof e.attitude === "string") {
+          deltas.push({ type: "npc_attitude", npcId: e.npcId, characterId: e.characterId, attitude: e.attitude, reason: e.reason });
+        }
+        break;
+      case "npc_location":
+        if (typeof e.npcId === "string" && typeof e.location === "string") {
+          deltas.push({ type: "npc_location", npcId: e.npcId, location: e.location, reason: e.reason });
+        }
+        break;
+      case "npc_goal_update":
+        if (typeof e.npcId === "string" && Array.isArray(e.goals) && e.goals.every((goal) => typeof goal === "string")) {
+          deltas.push({ type: "npc_goal_update", npcId: e.npcId, goals: e.goals, reason: e.reason });
+        }
+        break;
+      case "add_threat":
+        if (isThreatState(e.threat)) {
+          deltas.push({ type: "add_threat", threat: e.threat, reason: e.reason });
+        }
+        break;
+      case "advance_front":
+        if (typeof e.frontId === "string" && typeof e.stage === "string") {
+          deltas.push({ type: "advance_front", frontId: e.frontId, stage: e.stage, reason: e.reason });
+        }
+        break;
+      case "set_world_flag":
+        if (typeof e.key === "string" && (typeof e.value === "boolean" || typeof e.value === "string" || typeof e.value === "number")) {
+          deltas.push({ type: "set_world_flag", key: e.key, value: e.value, reason: e.reason });
+        }
+        break;
+    }
+  }
+  return deltas;
+}
+
+/**
+ * Parse AI-proposed memory writes defensively (like blackboardDeltas): each
+ * malformed entry is dropped fail-closed rather than failing the decision.
+ */
+function parseMemoryWrites(value: unknown): MemoryWrite[] {
+  if (!Array.isArray(value)) return [];
+  const writes: MemoryWrite[] = [];
+  for (const entry of value) {
+    const validated = validateMemoryWrite(entry);
+    if (validated.ok) writes.push(validated.value);
+  }
+  return writes;
+}
+
+function isThreatState(value: unknown): value is ThreatState {
+  if (typeof value !== "object" || value === null) return false;
+  const threat = value as Record<string, unknown>;
+  return (
+    typeof threat.id === "string" &&
+    typeof threat.name === "string" &&
+    (threat.status === undefined || typeof threat.status === "string")
+  );
 }
 
 /** Coerce an unknown value into a {@link StateChange} array (best-effort). */
@@ -224,18 +452,30 @@ export function parseGmDecision(raw: string): GmDecisionParse {
 
   const checks = parseChecks(obj["checks"]);
   if (!checks.ok) return checks;
+  const noRollRationales = parseNoRollRationales(obj["noRollRationales"]);
+  if (!noRollRationales.ok) return noRollRationales;
   const clockDeltas = parseClockDeltas(obj["clockDeltas"]);
   if (!clockDeltas.ok) return clockDeltas;
+  const characterDeltas = parseCharacterDeltas(obj["characterDeltas"]);
+  if (!characterDeltas.ok) return characterDeltas;
+  const blackboardDeltas = parseBlackboardDeltas(obj["blackboardDeltas"]);
+  const memoryWrites = parseMemoryWrites(obj["memoryWrites"]);
 
   const intent = obj["intent"];
   const gmMove = obj["gmMove"];
+  const scenePurpose = obj["scenePurpose"];
   const needsRoll = obj["needsRoll"] === true || checks.value.length > 0;
 
   const decision: GmDecision = {
     needsRoll,
     checks: checks.value,
+    noRollRationales: noRollRationales.value,
     clockDeltas: clockDeltas.value,
+    characterDeltas: characterDeltas.value,
+    blackboardDeltas,
+    memoryWrites,
     stateChanges: readStateChanges(obj["stateChanges"]),
+    procedureNotes: readStringArray(obj["procedureNotes"]),
     revealedClues: readStringArray(obj["revealedClues"]),
     offFront: obj["offFront"] === true,
     climactic: obj["climactic"] === true,
@@ -246,6 +486,15 @@ export function parseGmDecision(raw: string): GmDecisionParse {
   }
   if (isGmMove(gmMove)) {
     decision.gmMove = gmMove;
+  }
+  if (typeof scenePurpose === "string" && (SCENE_PURPOSES as readonly string[]).includes(scenePurpose)) {
+    decision.scenePurpose = scenePurpose as ScenePurpose;
+  }
+  if (typeof obj["spotlightTarget"] === "string" && obj["spotlightTarget"].trim().length > 0) {
+    decision.spotlightTarget = obj["spotlightTarget"];
+  }
+  if (typeof obj["stakes"] === "string" && obj["stakes"].trim().length > 0) {
+    decision.stakes = obj["stakes"];
   }
   return { ok: true, value: decision };
 }

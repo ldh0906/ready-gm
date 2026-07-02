@@ -45,6 +45,9 @@ export class FakePgClient implements Queryable {
     values?: readonly unknown[],
   ): Promise<QueryResultLike<R>> {
     this.calls.push({ text, values });
+    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text.trim().toUpperCase())) {
+      return { rows: [], rowCount: null };
+    }
     const next = this.queue.shift();
     if (next instanceof Error) {
       throw next;

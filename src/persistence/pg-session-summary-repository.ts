@@ -19,7 +19,7 @@ export class PgSessionSummaryRepository implements SessionSummaryRepository {
        ON CONFLICT (room_id) DO UPDATE SET
          closing_narration = EXCLUDED.closing_narration,
          summary_text = EXCLUDED.summary_text,
-         created_at = EXCLUDED.created_at`,
+         updated_at = now()`,
       sessionSummaryToRow(summary),
     );
   }

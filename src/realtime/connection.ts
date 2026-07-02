@@ -17,7 +17,7 @@
  *
  * Requirements: 6.5, 10.7, 13.1, 13.2, 13.3, 13.4, 13.5.
  */
-import type { ChatEntry, ReadinessEntry, TurnState } from "../core/turn-state.js";
+import type { ChatEntry, PendingCheck, ReadinessEntry, TurnState } from "../core/turn-state.js";
 
 /** Which narration a {@link NarrationPayload} carries. */
 export type NarrationKind = "opening" | "resolution" | "closing";
@@ -79,6 +79,13 @@ export interface NarrationPayload {
    * are never included. Optional + additive.
    */
   checks?: VisibleCheck[];
+  /**
+   * The player-visible ScenarioBlackboard projection (discovered clues,
+   * visible NPC presence, active threats). Hidden secrets and undiscovered
+   * clue conclusions are projected away server-side and never ride along.
+   * Optional + additive.
+   */
+  blackboard?: import("../core/scenario-blackboard.js").VisibleBlackboard;
 }
 
 /** A minimal player summary broadcast on roster changes (Requirement 2.5). */
@@ -101,12 +108,25 @@ export type ServerEvent =
   | { type: "narration"; roomId: string; narration: NarrationPayload }
   /** Per-player readiness snapshot after a readiness change (Requirement 7.3). */
   | { type: "readiness_updated"; roomId: string; readiness: readonly ReadinessEntry[] }
+  /** Player-visible checks selected by the GM, before any roll values exist. */
+  | { type: "checks_pending"; roomId: string; checks: readonly PendingCheck[] }
+  /** One selected check has been rolled by the authoritative server dice service. */
+  | { type: "check_rolled"; roomId: string; check: PendingCheck }
   /** The scenario selected for the room (Requirement 3.3). */
   | { type: "scenario_set"; roomId: string; scenarioId: string; title: string; summary: string }
   /** The room roster after a join/leave (Requirement 2.5). */
   | { type: "player_list_updated"; roomId: string; players: readonly RealtimePlayerSummary[] }
   /** Notice to a player that a message failed to reach them before retry (R6.5). */
-  | { type: "delivery_failed"; roomId: string; failedType: ServerEvent["type"]; detail: string };
+  | { type: "delivery_failed"; roomId: string; failedType: ServerEvent["type"]; detail: string }
+  /** Explicit notice that narration generation failed (opening/ending, or a
+   *  round resolution whose automatic retries are exhausted) and can be retried. */
+  | {
+      type: "narration_failed";
+      roomId: string;
+      phase: "opening" | "ending" | "resolution";
+      reason: string;
+      retryable: boolean;
+    };
 
 /**
  * A transport-agnostic, single-player connection to a room.
@@ -132,7 +152,7 @@ export interface Connection {
   /** Send a liveness probe; the peer is expected to answer (Requirement 13.4). */
   ping(): void;
   /** Close the underlying transport (forces client-side re-establishment). */
-  close(): void;
+  close(code?: number, reason?: string): void;
   /**
    * Register a handler invoked for ANY inbound traffic (data or pong). The
    * gateway uses this purely as a liveness signal for the heartbeat sweep.

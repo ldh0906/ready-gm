@@ -15,6 +15,9 @@ import type { Scenario } from "../services/scenario-service.js";
 import type { TurnState } from "../core/turn-state.js";
 import type { ProgressClock } from "../core/progress-clock.js";
 import type { SceneState } from "../core/scene-state.js";
+import type { CharacterState } from "../core/character-state.js";
+import type { ScenarioBlackboard } from "../core/scenario-blackboard.js";
+import type { MemoryRecord } from "../core/memory-record.js";
 import type { EventSink } from "../observability/event-sink.js";
 import type { QaEvent } from "../observability/events.js";
 
@@ -42,17 +45,27 @@ export interface SessionSummaryRecord {
  */
 export interface RoomRepository {
   saveRoom(room: Room): Promise<void>;
+  createRoomWithHost(input: {
+    room: Room;
+    host: Player;
+    initialCharacter?: Character;
+    scenarioId?: string;
+  }): Promise<void>;
   getRoom(roomId: string): Promise<Room | undefined>;
   getRoomByToken(token: string): Promise<Room | undefined>;
   listRooms(): Promise<Room[]>;
   savePlayer(player: Player): Promise<void>;
+  joinPlayerIfRoomHasCapacity(player: Player): Promise<"inserted" | "full" | "unavailable">;
   getPlayer(playerId: string): Promise<Player | undefined>;
   listPlayers(roomId: string): Promise<Player[]>;
   listAllPlayers(): Promise<Player[]>;
   saveCharacter(character: Character): Promise<void>;
+  saveCharacterForPlayer(character: Character, player: Player): Promise<void>;
   getCharacter(characterId: string): Promise<Character | undefined>;
   listCharactersByRoom(roomId: string): Promise<Character[]>;
   listAllCharacters(): Promise<Character[]>;
+  markRoomInSessionIfLobby(roomId: string): Promise<boolean>;
+  markRoomEndedIfInSession(roomId: string): Promise<boolean>;
 }
 
 /**
@@ -120,6 +133,50 @@ export interface ClockRepository {
 export interface SceneRecord {
   roomId: string;
   scene: SceneState;
+}
+
+/** A persisted per-room mutable Character State set, keyed by room. */
+export interface CharacterStateRecord {
+  roomId: string;
+  states: CharacterState[];
+}
+
+/**
+ * Async durable repository for the per-room mutable Character States (the
+ * Living Character Sheet loop's applied state). The whole state array is stored
+ * as one jsonb document, upserted by `roomId` — mirroring {@link ClockRepository}.
+ * `listAll` supports hydrating the live cache on startup.
+ */
+export interface CharacterStateRepository {
+  get(roomId: string): Promise<CharacterState[]>;
+  save(roomId: string, states: readonly CharacterState[]): Promise<void>;
+  listAll(): Promise<CharacterStateRecord[]>;
+}
+
+/** A persisted per-room ScenarioBlackboard, keyed by room. */
+export interface BlackboardRecord {
+  roomId: string;
+  blackboard: ScenarioBlackboard;
+}
+
+/** Async durable repository for the per-room ScenarioBlackboard. */
+export interface BlackboardRepository {
+  get(roomId: string): Promise<ScenarioBlackboard | undefined>;
+  save(roomId: string, blackboard: ScenarioBlackboard): Promise<void>;
+  listAll(): Promise<BlackboardRecord[]>;
+}
+
+/** A persisted per-room Memory Clerk record list, keyed by room. */
+export interface MemoryRecordsRecord {
+  roomId: string;
+  records: MemoryRecord[];
+}
+
+/** Async durable repository for the per-room Memory Clerk records. */
+export interface MemoryRepository {
+  list(roomId: string): Promise<MemoryRecord[]>;
+  save(roomId: string, records: readonly MemoryRecord[]): Promise<void>;
+  listAll(): Promise<MemoryRecordsRecord[]>;
 }
 
 /**

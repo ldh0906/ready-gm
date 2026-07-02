@@ -100,6 +100,13 @@ export function rowToPlayer(row: QueryResultRow): Player {
 
 /* -------------------------------- Character -------------------------------- */
 
+/**
+ * Column order: 0 id, 1 player_id, 2 room_id, 3 name, 4 concept,
+ * 5 attributes (jsonb), 6 confirmed, 7 selected_card_id, 8 sheet_data (jsonb).
+ * The two optional original-sheet columns (migration 0007) are appended at the
+ * tail; absence maps to `null` and {@link rowToCharacter} omits the keys again
+ * so a round-trip yields a structurally-equal character.
+ */
 export function characterToRow(character: Character): unknown[] {
   return [
     character.id,
@@ -109,11 +116,13 @@ export function characterToRow(character: Character): unknown[] {
     character.concept,
     toJsonParam(character.attributes),
     character.confirmed,
+    character.selectedCardId ?? null,
+    character.sheetData !== undefined ? toJsonParam(character.sheetData) : null,
   ];
 }
 
 export function rowToCharacter(row: QueryResultRow): Character {
-  return {
+  const character: Character = {
     id: row.id as string,
     playerId: row.player_id as string,
     roomId: row.room_id as string,
@@ -122,6 +131,13 @@ export function rowToCharacter(row: QueryResultRow): Character {
     attributes: parseJsonColumn(row.attributes),
     confirmed: Boolean(row.confirmed),
   };
+  if (typeof row.selected_card_id === "string" && row.selected_card_id.length > 0) {
+    character.selectedCardId = row.selected_card_id;
+  }
+  if (row.sheet_data !== null && row.sheet_data !== undefined) {
+    character.sheetData = parseJsonColumn(row.sheet_data);
+  }
+  return character;
 }
 
 /* -------------------------------- Scenario --------------------------------- */
@@ -188,7 +204,7 @@ export function rowToScenario(row: QueryResultRow): Scenario {
     scenario.allocation = parseJsonColumn(row.allocation);
   }
   // Optional Attribute_Proposal_Disabled: only set when truthy; otherwise omit.
-  if (Boolean(row.attribute_proposal_disabled)) {
+  if (row.attribute_proposal_disabled) {
     scenario.attributeProposalDisabled = true;
   }
   return scenario;

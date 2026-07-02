@@ -29,7 +29,7 @@ export type DifficultyGrade = "Trivial" | "Easy" | "Average" | "Hard" | "Formida
 export type OutcomeGrade = "Failure" | "Partial Success" | "Success" | "Critical Success";
 
 /** Round-loop phase tracked by the Turn_State (Requirement 5.4, round loop). */
-export type Phase = "free_chat" | "ready_check" | "resolving" | "ended";
+export type Phase = "free_chat" | "ready_check" | "resolving" | "rolling" | "ended";
 
 /** Per-player readiness during a ready-check (Requirements 7.1, 7.2). */
 export type ReadinessStatus = "not_ready" | "ready";
@@ -57,6 +57,8 @@ export type ModelTier = "fast" | "standard" | "premium";
 export interface EngineConfig {
   /** Ready-check timeout before Auto_Pass; default 90000 ms (Requirement 8.4). */
   readyCheckTimeoutMs: number;
+  /** Pending player dice-roll timeout before server Auto_Roll; default 20000 ms. */
+  rollCheckTimeoutMs: number;
   /** Maximum players per room; 6 (Requirement 1.4). */
   maxPlayers: number;
   /** Additional AI retries beyond the first attempt; 2 => 3 total (Requirement 17.1). */

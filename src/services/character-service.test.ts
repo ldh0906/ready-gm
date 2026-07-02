@@ -97,6 +97,47 @@ describe("CharacterService", () => {
       const result = service.recordCharacter("ghost", { name: "X", concept: "", attributes: ATTRS });
       expect(result).toMatchObject({ ok: false, reason: "UNKNOWN_PLAYER" });
     });
+
+    it("preserves ruleset sheetData through record, confirm, and re-read", () => {
+      store.saveRoom(makeRoom("r1"));
+      store.savePlayer(makePlayer("p1", "r1"));
+      const sheetData = {
+        narrativeFields: { disposition: "심술궂음", goal: "정원 정복", bond: "농부와 앙숙" },
+      };
+
+      const recorded = service.recordCharacter("p1", {
+        name: "Goose",
+        concept: "끔찍한 거위",
+        attributes: ATTRS,
+        sheetData,
+      });
+      expect(recorded.ok).toBe(true);
+      if (!recorded.ok) return;
+      expect(recorded.character.sheetData).toEqual(sheetData);
+
+      const confirmed = service.confirmCharacter("p1");
+      expect(confirmed.ok).toBe(true);
+      if (!confirmed.ok) return;
+      expect(confirmed.character.sheetData).toEqual(sheetData);
+
+      // Re-read via the service: the original sheet survives verbatim, and the
+      // returned copy is defensive (mutating it does not affect the store).
+      const reread = service.getCharacterForPlayer("p1");
+      expect(reread?.sheetData).toEqual(sheetData);
+      if (reread?.sheetData?.narrativeFields !== undefined) {
+        reread.sheetData.narrativeFields["disposition"] = "mutated";
+      }
+      expect(service.getCharacterForPlayer("p1")?.sheetData).toEqual(sheetData);
+    });
+
+    it("records no sheetData key when the input carries none", () => {
+      store.saveRoom(makeRoom("r1"));
+      store.savePlayer(makePlayer("p1", "r1"));
+      const result = service.recordCharacter("p1", { name: "Plain", concept: "c", attributes: ATTRS });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect("sheetData" in result.character).toBe(false);
+    });
   });
 
   describe("confirmation locking (R4.4)", () => {

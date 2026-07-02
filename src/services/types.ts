@@ -46,6 +46,23 @@ export interface Player {
   connectionStatus: "connected" | "disconnected";
 }
 
+/**
+ * Ruleset-specific original sheet data captured at character creation and
+ * preserved verbatim (the Living Character Sheet's immutable half). This holds
+ * what the character screen collected beyond name/concept/attributes — e.g.
+ * Terrible Geese's disposition/goal, Until It Sinks's narrative card answers —
+ * so those fields survive the backend/persistence round-trip and can ground
+ * the AI GM's narration. Mutable in-session facts live in the separate
+ * CharacterState object, never here.
+ */
+export interface CharacterSheetData {
+  /**
+   * Narrative field values keyed by the sheet schema's field id (e.g.
+   * `disposition`, `goal`). Stored verbatim (trimmed by the client).
+   */
+  narrativeFields?: Record<string, string>;
+}
+
 /** A Player's in-game persona with EZFudge attributes (Requirement 4.2). */
 export interface Character {
   id: string;
@@ -63,6 +80,12 @@ export interface Character {
    * (scenario-character-cards Requirements 6.1, 8.3). Absent on non-card sheets.
    */
   selectedCardId?: string;
+  /**
+   * Ruleset-specific original sheet fields, preserved from record through
+   * confirm and persistence. Absent when the sheet collected nothing beyond
+   * the core fields.
+   */
+  sheetData?: CharacterSheetData;
 }
 
 /**

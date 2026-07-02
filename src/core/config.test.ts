@@ -8,6 +8,7 @@ const REQUEST_TYPES: RequestType[] = ["opening", "attributes", "resolution", "en
 describe("DEFAULT_ENGINE_CONFIG", () => {
   it("uses the spec-mandated defaults", () => {
     expect(DEFAULT_ENGINE_CONFIG.readyCheckTimeoutMs).toBe(90000); // R8.4
+    expect(DEFAULT_ENGINE_CONFIG.rollCheckTimeoutMs).toBe(20000);
     expect(DEFAULT_ENGINE_CONFIG.maxPlayers).toBe(6); // R1.4
     expect(DEFAULT_ENGINE_CONFIG.aiMaxRetries).toBe(2); // R17.1 (=> 3 total)
   });

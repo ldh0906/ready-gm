@@ -35,6 +35,7 @@ export const DEFAULT_DICE_RANGE: { min: number; max: number } = {
  */
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   readyCheckTimeoutMs: 90000,
+  rollCheckTimeoutMs: 20000,
   maxPlayers: 6,
   aiMaxRetries: 2,
   modelTiers: {

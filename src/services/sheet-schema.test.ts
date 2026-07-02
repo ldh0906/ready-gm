@@ -10,6 +10,9 @@ import {
   SINKS_SHEET,
   UNIVERSAL_SHEET,
   expectedTraitSpecForScenario,
+  parseDiceFormula,
+  rollAllocationValues,
+  rollDiceFormula,
   sheetSchemaForScenario,
   type SheetSchema,
 } from "./sheet-schema.js";
@@ -124,5 +127,50 @@ describe("expectedTraitSpecForScenario", () => {
     const spec = expectedTraitSpecForScenario(UNTIL_IT_SINKS);
     expect(spec.keys).toEqual([]);
     expect(spec.ladder).toEqual(DEFAULT_ATTRIBUTE_LADDER);
+  });
+});
+
+describe("DICE_ROLL server-side allocation roll", () => {
+  it("parses NdM / NdF formulas with optional modifiers and rejects junk", () => {
+    expect(parseDiceFormula("2d6")).toEqual({ count: 2, sides: 6, modifier: 0 });
+    expect(parseDiceFormula(" 4dF ")).toEqual({ count: 4, sides: "F", modifier: 0 });
+    expect(parseDiceFormula("1d8+1")).toEqual({ count: 1, sides: 8, modifier: 1 });
+    expect(parseDiceFormula("3d6-2")).toEqual({ count: 3, sides: 6, modifier: -2 });
+    for (const junk of ["", "d6", "2d", "0d6", "2d1", "2d101", "21d6", "banana", "2d6+"]) {
+      expect(parseDiceFormula(junk)).toBeNull();
+    }
+  });
+
+  it("rolls within the formula bounds using the injected RNG", () => {
+    const spec = parseDiceFormula("2d6+1")!;
+    expect(rollDiceFormula(spec, () => 0)).toBe(3); // two 1s + 1
+    expect(rollDiceFormula(spec, () => 0.999999)).toBe(13); // two 6s + 1
+    const fudge = parseDiceFormula("4dF")!;
+    expect(rollDiceFormula(fudge, () => 0)).toBe(-4);
+    expect(rollDiceFormula(fudge, () => 0.999999)).toBe(4);
+  });
+
+  it("rolls one clamped value per rated trait for a DICE_ROLL schema", () => {
+    const schema: SheetSchema = {
+      ...UNIVERSAL_SHEET,
+      traits: UNIVERSAL_SHEET.traits.map((t) => ({ ...t })),
+      allocation: { mode: "DICE_ROLL", diceFormula: "2d6", forcedRandom: true },
+    };
+    const values = rollAllocationValues(schema, () => 0.999999);
+    expect(values).not.toBeNull();
+    for (const trait of schema.traits) {
+      // 2d6 max (12) clamps to the trait ladder max.
+      expect(values![trait.key]).toBe(trait.ladder.max);
+      expect(Number.isInteger(values![trait.key])).toBe(true);
+    }
+  });
+
+  it("fail-closed: non-DICE_ROLL schemas and invalid formulas roll nothing", () => {
+    expect(rollAllocationValues(UNIVERSAL_SHEET)).toBeNull();
+    const broken: SheetSchema = {
+      ...UNIVERSAL_SHEET,
+      allocation: { mode: "DICE_ROLL", diceFormula: "banana", forcedRandom: false },
+    };
+    expect(rollAllocationValues(broken)).toBeNull();
   });
 });

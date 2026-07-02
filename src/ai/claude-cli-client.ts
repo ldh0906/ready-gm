@@ -22,6 +22,7 @@
  * The actual process spawn is injected as {@link ClaudeRunner} so the adapter is
  * unit-testable without invoking the real CLI.
  */
+/* global AbortSignal */
 import { spawn } from "node:child_process";
 import type { ModelTier } from "../core/types.js";
 import type { TokenUsage } from "../observability/events.js";
@@ -32,6 +33,7 @@ import {
   type CompleteRequest,
 } from "./ai-gm-client.js";
 import { extractJsonBlock } from "./codex-cli-client.js";
+import { withTimeout, DEFAULT_CLI_TIMEOUT_MS } from "./cli-timeout.js";
 
 /** Result of one `claude -p` invocation. */
 export interface ClaudeRunResult {
@@ -43,6 +45,8 @@ export interface ClaudeRunResult {
 export type ClaudeRunner = (input: {
   readonly args: readonly string[];
   readonly prompt: string;
+  /** Aborted when the call exceeds its timeout so the runner can kill its child. */
+  readonly signal?: AbortSignal;
 }) => Promise<ClaudeRunResult>;
 
 /** Options controlling {@link ClaudeCliAiGmClient}. */
@@ -54,6 +58,12 @@ export interface ClaudeCliClientOptions {
   modelForTier?: (tier: ModelTier) => string;
   /** The single model/alias used for all tiers. Default `"sonnet"`. */
   model?: string;
+  /**
+   * Per-call timeout in ms; a hung/slow CLI is aborted (its child killed) and the
+   * call rejects with {@link CliTimeoutError}. Default {@link DEFAULT_CLI_TIMEOUT_MS};
+   * `0`/negative disables the timeout.
+   */
+  timeoutMs?: number;
   /** Injectable runner (defaults to the real `claude -p` spawn). */
   run?: ClaudeRunner;
 }
@@ -97,12 +107,17 @@ export function parseClaudeOutput(stdout: string): { text: string; usage: TokenU
   }
 
   const u = parsed.usage ?? {};
-  const usage = makeTokenUsage({
-    inputTokens: u.input_tokens ?? 0,
-    outputTokens: u.output_tokens ?? 0,
-    cacheReadTokens: u.cache_read_input_tokens ?? 0,
-    cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
-  });
+  // Claude reports full verbatim usage (input/output/cache) — mark it so cost
+  // dashboards can distinguish it from providers with partial coverage.
+  const usage: TokenUsage = {
+    ...makeTokenUsage({
+      inputTokens: u.input_tokens ?? 0,
+      outputTokens: u.output_tokens ?? 0,
+      cacheReadTokens: u.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
+    }),
+    coverage: "full",
+  };
   return { text: parsed.result, usage };
 }
 
@@ -111,11 +126,13 @@ export function parseClaudeOutput(stdout: string): { text: string; usage: TokenU
  */
 export class ClaudeCliAiGmClient implements AiGmClient {
   private readonly modelForTier: (tier: ModelTier) => string;
+  private readonly timeoutMs: number;
   private readonly run: ClaudeRunner;
 
   constructor(options: ClaudeCliClientOptions = {}) {
     const model = options.model ?? DEFAULT_MODEL;
     this.modelForTier = options.modelForTier ?? (() => model);
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
     this.run = options.run ?? defaultClaudeRunner;
   }
 
@@ -134,7 +151,11 @@ export class ClaudeCliAiGmClient implements AiGmClient {
       model,
     ];
 
-    const result = await this.run({ args, prompt });
+    const result = await withTimeout(
+      (signal) => this.run({ args, prompt, signal }),
+      this.timeoutMs,
+      "claude -p",
+    );
     const { text: rawText, usage } = parseClaudeOutput(result.stdout);
     const text = extractJsonBlock(rawText);
     return { model, text, usage };
@@ -145,17 +166,34 @@ export class ClaudeCliAiGmClient implements AiGmClient {
  * Default {@link ClaudeRunner}: spawn the real `claude` CLI in print mode and
  * feed the prompt on stdin. The structured JSON result is printed to stdout.
  */
-const defaultClaudeRunner: ClaudeRunner = async ({ args, prompt }) => {
+const defaultClaudeRunner: ClaudeRunner = async ({ args, prompt, signal }) => {
   const stdout = await new Promise<string>((resolve, reject) => {
     // `shell: true` so the Windows `claude.cmd`/`claude.ps1` shim resolves on PATH.
     const child = spawn("claude", args, { shell: true });
     let buffer = "";
+    // Kill a hung/slow child when the caller's timeout aborts the signal.
+    const onAbort = (): void => {
+      child.kill();
+    };
+    if (signal !== undefined) {
+      if (signal.aborted) child.kill();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanup = (): void => {
+      if (signal !== undefined) signal.removeEventListener("abort", onAbort);
+    };
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => (buffer += chunk));
     child.stderr.on("data", (chunk: string) => (buffer += chunk));
-    child.on("error", reject);
-    child.on("close", () => resolve(buffer));
+    child.on("error", (err) => {
+      cleanup();
+      reject(err);
+    });
+    child.on("close", () => {
+      cleanup();
+      resolve(buffer);
+    });
     child.stdin.write(prompt);
     child.stdin.end();
   });

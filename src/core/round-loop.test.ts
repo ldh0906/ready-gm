@@ -5,7 +5,7 @@ import {
   reduceMany,
   type Command,
 } from "./round-loop.js";
-import type { CheckRecord, TurnState } from "./turn-state.js";
+import type { CheckRecord, PendingCheck, TurnState } from "./turn-state.js";
 
 const ROOM = "room-1";
 const HOST = "p-host";
@@ -36,6 +36,17 @@ const sampleCheck: CheckRecord = {
   advantage: "none",
   rolls: [1],
   visibility: "player",
+};
+
+const samplePendingCheck: PendingCheck = {
+  checkId: "round-1-check-1",
+  characterId: "char-host",
+  playerId: HOST,
+  attribute: "Might",
+  difficulty: "Average",
+  advantage: "none",
+  visibility: "player",
+  status: "pending",
 };
 
 describe("START_SESSION (Task 7.1, R5.4)", () => {
@@ -346,6 +357,51 @@ describe("at-most-once resolution and round advancement (Task 9.6, R10.3/10.5/11
       endingReached: false,
     });
     expect(next).toEqual(state);
+  });
+});
+
+describe("two-phase check rolling", () => {
+  it("DECLARE_CHECKS moves resolving state into rolling with roll values withheld", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "go", deadline: null });
+    expect(state.phase).toBe("resolving");
+
+    const rolling = reduce(state, { type: "DECLARE_CHECKS", checks: [samplePendingCheck] });
+
+    expect(rolling.phase).toBe("rolling");
+    expect(rolling.resolutionRequested).toBe(true);
+    expect(rolling.rollingChecks).toEqual([samplePendingCheck]);
+    expect(rolling.rollingChecks?.[0]).not.toHaveProperty("roll");
+    expect(rolling.checks).toEqual([]);
+  });
+
+  it("CHECK_ROLLED records one resolved check and is idempotent for duplicates", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "go", deadline: null });
+    state = reduce(state, { type: "DECLARE_CHECKS", checks: [samplePendingCheck] });
+
+    const rolled = reduce(state, {
+      type: "CHECK_ROLLED",
+      checkId: samplePendingCheck.checkId,
+      check: sampleCheck,
+    });
+    const duplicate = reduce(rolled, {
+      type: "CHECK_ROLLED",
+      checkId: samplePendingCheck.checkId,
+      check: { ...sampleCheck, roll: -4, rolls: [-4], outcome: "Failure" },
+    });
+
+    expect(rolled.rollingChecks).toEqual([
+      {
+        ...samplePendingCheck,
+        status: "rolled",
+        roll: 1,
+        rolls: [1],
+        outcome: "Success",
+      },
+    ]);
+    expect(rolled.checks).toEqual([sampleCheck]);
+    expect(duplicate).toEqual(rolled);
   });
 });
 

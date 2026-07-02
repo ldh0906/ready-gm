@@ -10,6 +10,19 @@ describe("parseGmDecision", () => {
       checks: [{ characterName: "보린", attribute: "Wits", difficulty: "Average" }],
       clockDeltas: [{ clockId: "crypt_alert", delta: 1, condition: "on_partial_or_failure", reason: "조사 시간" }],
       stateChanges: [{ target: "clue", to: "footprints" }],
+      characterDeltas: [
+        {
+          type: "add_condition",
+          characterId: "char-p2",
+          condition: "겁에 질림",
+          severity: 1,
+          reason: "무덤의 속삭임",
+        },
+      ],
+      scenePurpose: "reveal",
+      spotlightTarget: "세라",
+      stakes: "아이들이 끌려간 방향을 알아낼 수 있는가",
+      procedureNotes: ["clue_reveal hint followed"],
       offFront: false,
       climactic: false,
       safetyFlags: [],
@@ -20,6 +33,19 @@ describe("parseGmDecision", () => {
     if (!result.ok) return;
     expect(result.value.intent).toBe("inspect");
     expect(result.value.gmMove).toBe("reveal_clue_with_cost");
+    expect(result.value.scenePurpose).toBe("reveal");
+    expect(result.value.spotlightTarget).toBe("세라");
+    expect(result.value.stakes).toBe("아이들이 끌려간 방향을 알아낼 수 있는가");
+    expect(result.value.procedureNotes).toEqual(["clue_reveal hint followed"]);
+    expect(result.value.characterDeltas).toEqual([
+      {
+        type: "add_condition",
+        characterId: "char-p2",
+        condition: "겁에 질림",
+        severity: 1,
+        reason: "무덤의 속삭임",
+      },
+    ]);
     expect(result.value.needsRoll).toBe(true);
     expect(result.value.checks).toHaveLength(1);
     expect(result.value.clockDeltas[0]).toEqual({
@@ -39,7 +65,9 @@ describe("parseGmDecision", () => {
     expect(result.value.needsRoll).toBe(true);
     expect(result.value.clockDeltas).toEqual([]);
     expect(result.value.stateChanges).toEqual([]);
+    expect(result.value.characterDeltas).toEqual([]);
     expect(result.value.revealedClues).toEqual([]);
+    expect(result.value.procedureNotes).toEqual([]);
     expect(result.value.safetyFlags).toEqual([]);
     expect(result.value.offFront).toBe(false);
     expect(result.value.climactic).toBe(false);
@@ -62,6 +90,24 @@ describe("parseGmDecision", () => {
     if (!result.ok) return;
     expect(result.value.intent).toBeUndefined();
     expect(result.value.gmMove).toBeUndefined();
+  });
+
+  it("drops an unknown scenePurpose but keeps optional string guidance fields", () => {
+    const result = parseGmDecision(
+      JSON.stringify({
+        checks: [],
+        scenePurpose: "vibes",
+        spotlightTarget: "보린",
+        stakes: "문을 열 수 있는가",
+        procedureNotes: ["pressure clock considered", 42],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.scenePurpose).toBeUndefined();
+    expect(result.value.spotlightTarget).toBe("보린");
+    expect(result.value.stakes).toBe("문을 열 수 있는가");
+    expect(result.value.procedureNotes).toEqual(["pressure clock considered"]);
   });
 
   it("accepts any non-empty attribute key (scenario-driven; e.g. custom stats)", () => {
@@ -89,6 +135,13 @@ describe("parseGmDecision", () => {
   it("rejects a clockDelta with a non-numeric delta", () => {
     const result = parseGmDecision(
       JSON.stringify({ clockDeltas: [{ clockId: "c", delta: "lots" }] }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects malformed characterDeltas instead of accepting arbitrary state mutation", () => {
+    const result = parseGmDecision(
+      JSON.stringify({ characterDeltas: [{ type: "spend_resource", characterId: "char-1", resource: "focus", amount: "all" }] }),
     );
     expect(result.ok).toBe(false);
   });

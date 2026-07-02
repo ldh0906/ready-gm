@@ -22,6 +22,7 @@
  * The actual process spawn is injected as {@link CodexRunner} so the adapter is
  * unit-testable without invoking the real CLI.
  */
+/* global AbortSignal */
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
@@ -35,6 +36,7 @@ import {
   type AiResponse,
   type CompleteRequest,
 } from "./ai-gm-client.js";
+import { withTimeout, DEFAULT_CLI_TIMEOUT_MS } from "./cli-timeout.js";
 
 /** Result of one `codex exec` invocation. */
 export interface CodexRunResult {
@@ -48,6 +50,8 @@ export interface CodexRunResult {
 export type CodexRunner = (input: {
   readonly args: readonly string[];
   readonly prompt: string;
+  /** Aborted when the call exceeds its timeout so the runner can kill its child. */
+  readonly signal?: AbortSignal;
 }) => Promise<CodexRunResult>;
 
 /** Options controlling {@link CodexCliAiGmClient}. */
@@ -62,6 +66,12 @@ export interface CodexCliClientOptions {
   model?: string;
   /** `model_reasoning_effort` override. Default `"low"` (the cost-effective lever). */
   reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  /**
+   * Per-call timeout in ms; a hung/slow CLI is aborted (its child killed) and the
+   * call rejects with {@link CliTimeoutError}. Default {@link DEFAULT_CLI_TIMEOUT_MS};
+   * `0`/negative disables the timeout.
+   */
+  timeoutMs?: number;
   /** Injectable runner (defaults to the real `codex exec` spawn). */
   run?: CodexRunner;
 }
@@ -104,12 +114,14 @@ export function parseTokensUsed(stdout: string): number {
 export class CodexCliAiGmClient implements AiGmClient {
   private readonly modelForTier: (tier: ModelTier) => string;
   private readonly reasoningEffort: string;
+  private readonly timeoutMs: number;
   private readonly run: CodexRunner;
 
   constructor(options: CodexCliClientOptions = {}) {
     const model = options.model ?? DEFAULT_MODEL;
     this.modelForTier = options.modelForTier ?? (() => model);
     this.reasoningEffort = options.reasoningEffort ?? DEFAULT_EFFORT;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
     this.run = options.run ?? defaultCodexRunner;
   }
 
@@ -138,9 +150,18 @@ export class CodexCliAiGmClient implements AiGmClient {
       "never",
     ];
 
-    const result = await this.run({ args, prompt });
+    const result = await withTimeout(
+      (signal) => this.run({ args, prompt, signal }),
+      this.timeoutMs,
+      "codex exec",
+    );
     const text = extractJsonBlock(result.lastMessage);
-    const usage: TokenUsage = makeTokenUsage({ outputTokens: parseTokensUsed(result.stdout) });
+    // Codex only exposes a scraped output total — input/cache stay 0. Mark the
+    // usage as partial so cost dashboards do not read the zeros as "free".
+    const usage: TokenUsage = {
+      ...makeTokenUsage({ outputTokens: parseTokensUsed(result.stdout) }),
+      coverage: "output_only",
+    };
     return { model, text, usage };
   }
 }
@@ -149,7 +170,7 @@ export class CodexCliAiGmClient implements AiGmClient {
  * Default {@link CodexRunner}: spawn the real `codex` CLI, feed the prompt on
  * stdin, and read the agent's final message from a temp `-o` file.
  */
-const defaultCodexRunner: CodexRunner = async ({ args, prompt }) => {
+const defaultCodexRunner: CodexRunner = async ({ args, prompt, signal }) => {
   const outFile = join(tmpdir(), `codex-gm-${randomUUID()}.txt`);
   // `-o <file>` captures the final message; trailing `-` reads the prompt from stdin.
   const fullArgs = [...args, "-o", outFile, "-"];
@@ -158,12 +179,30 @@ const defaultCodexRunner: CodexRunner = async ({ args, prompt }) => {
     // `shell: true` so the Windows `codex.cmd`/`codex.ps1` shim resolves on PATH.
     const child = spawn("codex", fullArgs, { shell: true });
     let buffer = "";
+    // Kill a hung/slow child when the caller's timeout aborts the signal so the
+    // process (and its ChatGPT-account token spend) does not linger.
+    const onAbort = (): void => {
+      child.kill();
+    };
+    if (signal !== undefined) {
+      if (signal.aborted) child.kill();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanup = (): void => {
+      if (signal !== undefined) signal.removeEventListener("abort", onAbort);
+    };
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => (buffer += chunk));
     child.stderr.on("data", (chunk: string) => (buffer += chunk));
-    child.on("error", reject);
-    child.on("close", () => resolve(buffer));
+    child.on("error", (err) => {
+      cleanup();
+      reject(err);
+    });
+    child.on("close", () => {
+      cleanup();
+      resolve(buffer);
+    });
     child.stdin.write(prompt);
     child.stdin.end();
   });

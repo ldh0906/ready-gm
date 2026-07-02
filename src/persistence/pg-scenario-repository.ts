@@ -73,7 +73,8 @@ export class PgScenarioRepository implements ScenarioRepository {
          system = EXCLUDED.system,
          allocation = EXCLUDED.allocation,
          attribute_proposal_disabled = EXCLUDED.attribute_proposal_disabled,
-         form = EXCLUDED.form`,
+         form = EXCLUDED.form,
+         updated_at = now()`,
       scenarioToRow(scenario),
     );
   }
@@ -90,7 +91,9 @@ export class PgScenarioRepository implements ScenarioRepository {
     await this.db.query(
       `INSERT INTO scenario_selections (room_id, scenario_id)
        VALUES ($1, $2)
-       ON CONFLICT (room_id) DO UPDATE SET scenario_id = EXCLUDED.scenario_id`,
+       ON CONFLICT (room_id) DO UPDATE SET
+         scenario_id = EXCLUDED.scenario_id,
+         updated_at = now()`,
       [roomId, scenarioId],
     );
   }

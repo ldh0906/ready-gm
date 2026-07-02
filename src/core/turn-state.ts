@@ -19,6 +19,8 @@ import type {
   Phase,
   ReadinessStatus,
 } from "./types.js";
+import type { VisibleCharacterState } from "./character-state.js";
+import type { VisibleBlackboard } from "./scenario-blackboard.js";
 
 /**
  * Per active-player readiness during a ready-check (Requirements 7.1, 7.2, 12.2).
@@ -99,6 +101,33 @@ export interface CheckRecord {
   visibility: "player" | "gm";
 }
 
+/**
+ * Public per-check rolling state for the current round. Pending entries omit
+ * roll/outcome values; rolled entries carry only the server-authoritative
+ * resolved values. This is persisted in Turn_State so reconnecting clients can
+ * resume a mid-roll round without exposing unresolved dice.
+ */
+export interface PendingCheck {
+  checkId: string;
+  characterId: string;
+  characterName?: string;
+  /** Owning player who may request the roll; null means server/GM-owned. */
+  playerId: string | null;
+  attribute: string;
+  difficulty: DifficultyGrade;
+  advantage: "none" | "advantage" | "disadvantage";
+  visibility: "player" | "gm";
+  status: "pending" | "rolled";
+  /** Present only after the server rolls this check. */
+  roll?: number;
+  /** Present only after the server rolls this check. */
+  rolls?: number[];
+  /** Present only after the server rolls this check. */
+  outcome?: OutcomeGrade;
+  /** True when the server rolled because the owner was absent or timed out. */
+  autoRolled?: boolean;
+}
+
 /** A recent narrative memory entry (resolution/opening narration), newest last (R12.2, R12.5). */
 export interface NarrativeContextEntry {
   round: number;
@@ -124,6 +153,8 @@ export interface TurnState {
   chatLog: ChatEntry[];
   /** Checks resolved this round (R11.5). */
   checks: CheckRecord[];
+  /** Pending/rolled player-visible checks during the two-phase rolling window. */
+  rollingChecks?: PendingCheck[];
   /** Recent narrative context, newest last (R12.2). */
   narrativeContext: NarrativeContextEntry[];
   /** ISO deadline for the ready-check countdown, or `null` when not running (R8.1, R8.3). */
@@ -132,6 +163,16 @@ export interface TurnState {
   readyCheckTimeoutMs: number;
   /** At-most-once resolution guard (R10.3, R16.1). */
   resolutionRequested: boolean;
+  /**
+   * Player-visible character states (conditions/inventory/resources/personal
+   * clocks) for the game UI. Display-only: injected by the realtime fan-out
+   * (gateway decorator) from the CharacterStateStore and NOT part of the
+   * canonical persisted Turn_State — the serializer strips it, and GM-only
+   * material (memories, flags, relationships, delta reasons) is never included.
+   */
+  characterStates?: VisibleCharacterState[];
+  /** Player-visible ScenarioBlackboard projection, injected at fan-out only. */
+  blackboard?: VisibleBlackboard;
 }
 
 /**
@@ -164,7 +205,7 @@ export function deserializeTurnState(json: string): TurnState {
  * (to guarantee stable output) and deserialize (to strip extraneous keys).
  */
 function toPlain(state: TurnState): TurnState {
-  return {
+  const plain: TurnState = {
     roomId: state.roomId,
     roundNumber: state.roundNumber,
     phase: state.phase,
@@ -208,4 +249,22 @@ function toPlain(state: TurnState): TurnState {
     readyCheckTimeoutMs: state.readyCheckTimeoutMs,
     resolutionRequested: state.resolutionRequested,
   };
+  if (Array.isArray(state.rollingChecks)) {
+    plain.rollingChecks = state.rollingChecks.map((entry) => ({
+      checkId: entry.checkId,
+      characterId: entry.characterId,
+      ...(entry.characterName !== undefined ? { characterName: entry.characterName } : {}),
+      playerId: entry.playerId ?? null,
+      attribute: entry.attribute,
+      difficulty: entry.difficulty,
+      advantage: entry.advantage ?? "none",
+      visibility: entry.visibility ?? "player",
+      status: entry.status === "rolled" ? "rolled" : "pending",
+      ...(entry.roll !== undefined ? { roll: entry.roll } : {}),
+      ...(Array.isArray(entry.rolls) ? { rolls: entry.rolls.map((n) => n) } : {}),
+      ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
+      ...(entry.autoRolled !== undefined ? { autoRolled: entry.autoRolled } : {}),
+    }));
+  }
+  return plain;
 }

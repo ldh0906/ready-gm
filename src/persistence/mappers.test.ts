@@ -178,6 +178,49 @@ describe("character mapping", () => {
     });
     expect(restored.attributes).toEqual(character.attributes);
   });
+
+  it("round-trips selectedCardId and ruleset sheetData; omits both when absent", () => {
+    const withSheet: Character = {
+      ...character,
+      selectedCardId: "goose-boss",
+      sheetData: { narrativeFields: { disposition: "심술궂음", goal: "정원 정복" } },
+    };
+    const params = characterToRow(withSheet);
+    expect(params[7]).toBe("goose-boss");
+    expect(JSON.parse(String(params[8]))).toEqual(withSheet.sheetData);
+
+    const restored = rowToCharacter({
+      id: params[0],
+      player_id: params[1],
+      room_id: params[2],
+      name: params[3],
+      concept: params[4],
+      attributes: withSheet.attributes,
+      confirmed: params[6],
+      selected_card_id: params[7],
+      sheet_data: withSheet.sheetData, // pg returns parsed jsonb
+    });
+    expect(restored).toEqual(withSheet);
+
+    // Absence maps to null columns and the keys are omitted on the way back.
+    const bare = characterToRow(character);
+    expect(bare[7]).toBeNull();
+    expect(bare[8]).toBeNull();
+    const restoredBare = rowToCharacter({
+      id: bare[0],
+      player_id: bare[1],
+      room_id: bare[2],
+      name: bare[3],
+      concept: bare[4],
+      attributes: character.attributes,
+      confirmed: bare[6],
+      selected_card_id: null,
+      sheet_data: null,
+    });
+    expect(restoredBare).toEqual(character);
+    expect("selectedCardId" in restoredBare).toBe(false);
+    expect("sheetData" in restoredBare).toBe(false);
+  });
 });
 
 describe("scenario mapping", () => {
