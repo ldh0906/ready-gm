@@ -82,9 +82,11 @@ function makeClock(startIso = "2024-01-01T00:00:00.000Z") {
 
 function makeManualTimers() {
   const callbacks: Array<(() => void) | undefined> = [];
+  const delays: number[] = [];
   return {
-    scheduleTimer(fn: () => void): number {
+    scheduleTimer(fn: () => void, delayMs?: number): number {
       callbacks.push(fn);
+      delays.push(delayMs ?? 0);
       return callbacks.length - 1;
     },
     cancelTimer(handle: unknown): void {
@@ -105,6 +107,9 @@ function makeManualTimers() {
     },
     pendingCount(): number {
       return callbacks.filter((fn) => fn !== undefined).length;
+    },
+    latestDelayMs(): number | undefined {
+      return delays.at(-1);
     },
   };
 }
@@ -1196,6 +1201,106 @@ describe("RoomOrchestrator", () => {
     expect(p2?.actionKind).toBe("pass");
   });
 
+  it("broadcasts retrying declaration failures and retries all-ready rounds after five seconds", async () => {
+    let declarationAttempts = 0;
+    const timers = makeManualTimers();
+    const coordinator = new FakeCoordinator({
+      declare: (input) => {
+        declarationAttempts += 1;
+        if (declarationAttempts === 1) {
+          return {
+            ok: false,
+            error: { reason: "ai_request_failed", message: "declaration boom" },
+            preservedState: { ...input.state, resolutionRequested: false },
+          };
+        }
+        return {
+          ok: true,
+          declaration: {
+            state: input.state,
+            context: input as unknown as TurnStateContext,
+            decision: {} as RoundDeclaration["decision"],
+            checks: [],
+            procedurePlan: {} as RoundDeclaration["procedurePlan"],
+            correlation: {} as RoundDeclaration["correlation"],
+          },
+        };
+      },
+    });
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, timers);
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.declareCalls).toBe(1);
+    expect(timers.pendingCount()).toBe(1);
+    expect(timers.latestDelayMs()).toBe(5_000);
+    expect(h.connection.narrationFailures()).toContainEqual({
+      type: "narration_failed",
+      roomId: ROOM_ID,
+      phase: "resolution",
+      reason: "declaration boom",
+      retryable: true,
+      retrying: true,
+    });
+
+    timers.runLatest();
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.declareCalls).toBe(2);
+    expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(true);
+  });
+
+  it("broadcasts retrying narration failures and retries declared narration after five seconds", async () => {
+    let narrateAttempts = 0;
+    const timers = makeManualTimers();
+    const coordinator = new FakeCoordinator({
+      narrate: (input) => {
+        narrateAttempts += 1;
+        if (narrateAttempts === 1) {
+          return {
+            ok: false,
+            error: { reason: "ai_request_failed", message: "narration boom" },
+            preservedState: { ...input.declaration.state, resolutionRequested: false },
+          };
+        }
+        return {
+          ok: true,
+          narration: "재시도 결과 내레이션",
+          checks: input.resolvedChecks,
+          endingReached: false,
+          context: input.declaration.context,
+        };
+      },
+    });
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, timers);
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.narrateCalls).toBe(1);
+    expect(timers.pendingCount()).toBe(1);
+    expect(timers.latestDelayMs()).toBe(5_000);
+    expect(h.connection.narrationFailures()).toContainEqual({
+      type: "narration_failed",
+      roomId: ROOM_ID,
+      phase: "resolution",
+      reason: "narration boom",
+      retryable: true,
+      retrying: true,
+    });
+
+    timers.runLatest();
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.narrateCalls).toBe(2);
+    expect(h.connection.narrations().some((n) => n.kind === "resolution" && n.text === "재시도 결과 내레이션")).toBe(true);
+  });
+
   it("caps automatic ready-check retries after repeated AI resolution failures", async () => {
     const coordinator = new FakeCoordinator({
       resolve: (input) => ({
@@ -1214,12 +1319,62 @@ describe("RoomOrchestrator", () => {
 
     expect(coordinator.resolveCalls).toBe(1);
     expect(timers.pendingCount()).toBe(1);
+    expect(h.connection.narrationFailures().at(-1)).toMatchObject({ retrying: true });
 
     timers.runLatest();
     await h.orchestrator.whenSettled();
 
     expect(coordinator.resolveCalls).toBe(2);
     expect(timers.pendingCount()).toBe(0);
+    expect(h.connection.narrationFailures().at(-1)).toEqual({
+      type: "narration_failed",
+      roomId: ROOM_ID,
+      phase: "resolution",
+      reason: "automatic retries exhausted",
+      retryable: true,
+    });
+  });
+
+  it("falls back to the ready-check timeout when reverted players are not all ready", async () => {
+    const timers = makeManualTimers();
+    let h: Harness;
+    const coordinator = new FakeCoordinator({
+      declare: (input) => {
+        const current = h.turnStateStore.get(ROOM_ID) as TurnState;
+        h.turnStateStore.save({
+          ...current,
+          readiness: current.readiness.map((entry) =>
+            entry.playerId === PLAYER_2
+              ? { playerId: entry.playerId, status: "not_ready", actionKind: null, actionText: null }
+              : entry,
+          ),
+        });
+        return {
+          ok: false,
+          error: { reason: "ai_request_failed", message: "declaration boom" },
+          preservedState: { ...input.state, resolutionRequested: false },
+        };
+      },
+    });
+    h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, timers);
+    await start(h);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(h.turnStateStore.get(ROOM_ID)?.phase).toBe("ready_check");
+    expect(h.turnStateStore.get(ROOM_ID)?.readiness.find((entry) => entry.playerId === PLAYER_2)?.status).toBe("not_ready");
+    expect(timers.pendingCount()).toBe(1);
+    expect(timers.latestDelayMs()).toBe(DEFAULT_ENGINE_CONFIG.readyCheckTimeoutMs);
+    expect(h.connection.narrationFailures()).toContainEqual({
+      type: "narration_failed",
+      roomId: ROOM_ID,
+      phase: "resolution",
+      reason: "declaration boom",
+      retryable: true,
+      retrying: true,
+    });
   });
 
   it("attaches the sender's room display name alongside the character name on chat", async () => {

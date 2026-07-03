@@ -464,8 +464,9 @@ export class AiGmCoordinator {
   async generateOpening(
     ctx: TurnStateContext,
     correlation?: CorrelationKey,
+    blackboard?: ScenarioBlackboard,
   ): Promise<GenerationResult<Narration>> {
-    const prompt = buildOpeningPrompt(ctx);
+    const prompt = buildOpeningPrompt(ctx, blackboard);
     const outcome = await this.runRequest(
       "opening",
       prompt,
@@ -1436,16 +1437,24 @@ const GM_SYSTEM =
   "출력 형식: 설명이나 코드펜스 없이 요청된 단일 JSON 객체 하나만 반환하세요.";
 
 /** Opening narration prompt (Requirement 5.2). */
-function buildOpeningPrompt(ctx: TurnStateContext): Prompt {
+function buildOpeningPrompt(ctx: TurnStateContext, blackboard?: ScenarioBlackboard): Prompt {
+  const blackboardBlock =
+    blackboard !== undefined
+      ? "SCENARIO_BLACKBOARD_PROJECTION (GM 전용 진행 의제입니다. fronts는 플레이어에게 비공개이며, stage가 '진행 중'인 front가 오프닝 장면의 첫 목표입니다): " +
+        JSON.stringify(toGmBlackboardProjection(blackboard)) +
+        "\n"
+      : "";
   return {
     system: GM_SYSTEM,
     user:
       "PHASE: opening\n" +
       "이 시나리오와 파티를 위한 도입부 내레이션을 한국어로 작성하세요. " +
       "장소의 분위기와 감각적 디테일, 긴장의 씨앗을 담아 플레이어가 몰입할 장면을 그리세요. " +
-      "각 캐릭터의 이름/컨셉을 자연스럽게 등장시키면 좋습니다.\n" +
+      "각 캐릭터의 이름/컨셉을 자연스럽게 등장시키면 좋습니다. " +
+      "시드된 NPC는 오프닝에서 직접 등장시키지 말고 암시만 하세요. 실제 첫 등장은 라운드 decision의 npc_reveal delta로 공개합니다.\n" +
       'Respond as {"narration": "<korean text>"}.\n' +
       formatScenarioRules(ctx.scenario) +
+      blackboardBlock +
       formatUntrustedJsonBlock("UNTRUSTED_OPENING_CONTEXT", {
         scenario: ctx.scenario,
         characters: ctx.characters,
@@ -1536,6 +1545,7 @@ function formatScenarioRules(scenario: ContextScenario): string {
   return (
     "SCENARIO_RULES (이 시나리오의 특수 규칙·톤 — 보편 판정 규칙 위에 우선 적용): " +
     brief.trim() +
+    "\n능력치 키가 영문으로 주어져도 서술과 판정 안내에서는 한국어 라벨/뜻을 사용하고, 영문 키는 JSON 구조화 필드(attribute/checks/blackboardDeltas 등)에만 사용하세요." +
     "\n"
   );
 }
@@ -1672,6 +1682,7 @@ function buildCheckSelectionPrompt(
     blackboard !== undefined
       ? "SCENARIO_BLACKBOARD_PROJECTION (공개/GM-safe 상태만 포함합니다. 숨겨진 secret truth와 미발견 clue conclusion은 포함되지 않습니다. " +
         "상태 변화가 필요하면 blackboardDeltas로만 제안하세요): " +
+        "fronts는 GM 전용 진행 의제입니다(플레이어에게 비공개). stage가 '진행 중'인 front가 지금 장면의 중심 목표입니다.\n" +
         JSON.stringify(toGmBlackboardProjection(blackboard)) +
         "\n"
       : "";
@@ -1709,6 +1720,9 @@ function buildCheckSelectionPrompt(
       "off-front / climactic flags. Do NOT produce any dice, random values, or clock values — " +
       "only propose deltas.\n" +
       "CHECK GUIDELINES (중요):\n" +
+      "- FRONT 진행: 진행 중인 front를 이번 라운드의 stakes/장면 목표에 엮고, 같은 front를 소재만 바꿔 반복하지 마세요.\n" +
+      "- FRONT 진행: front가 달성되었거나 소재가 소진되면 advance_front로 stage를 \"완료\"로 바꾸고, 동시에 시드된 배열 순서상 다음 \"대기\" front 하나를 \"진행 중\"으로 올리세요. canonical stage 값은 \"대기\" | \"진행 중\" | \"완료\"입니다.\n" +
+      "- FRONT 진행: 모든 front가 \"완료\"에 가까워지면 climactic 전환을 고려하세요.\n" +
       "- 행동 분해: 한 입력에 서로 다른 행동이 여러 개 있으면(예: \"'신체 강화' 마법을 쓰고 검을 휘두른다\") " +
       "각 행동마다 별도의 check를 만들고, 행동마다 가장 알맞은 attribute를 고르세요. 한 행동만 있으면 check도 하나입니다.\n" +
       "- attribute 선택: attribute는 반드시 그 행동을 한 캐릭터가 실제로 가진 능력치 키 중에서만 고르세요 " +
@@ -1728,7 +1742,9 @@ function buildCheckSelectionPrompt(
       "- characterDeltas: 캐릭터의 조건, 자원, 장비, 관계, 개인 clock, 기억 변화가 필요하면 typed delta로 제안하세요. " +
       "자유 문자열 stateChanges로 캐릭터 상태를 바꾸려 하지 마세요. 서버가 검증한 delta만 실제 적용됩니다.\n" +
       "- blackboardDeltas: 시나리오 상태 변화는 typed delta로만 제안하세요. 허용 type: reveal_clue, reveal_secret, " +
-      "npc_attitude, npc_location, npc_goal_update, add_threat, advance_front, set_world_flag. 서버가 검증한 delta만 실제 적용됩니다.\n" +
+      "npc_reveal, npc_attitude, npc_location, npc_goal_update, add_threat, advance_front, set_world_flag. 서버가 검증한 delta만 실제 적용됩니다.\n" +
+      "- NPC 공개: 시드된 NPC를 처음 장면에 등장시킬 때 npc_reveal delta를 함께 내보내세요. 오프닝에 등장시킨 NPC도 반드시 npc_reveal이 필요합니다. 등장하지 않은 NPC는 플레이어 화면에 표시되지 않습니다.\n" +
+      "- 서술/판정 안내에서 능력치를 언급할 때는 한국어 라벨을 사용하고, Sneaky/Fast/Tenacious 같은 영어 키는 checks.attribute 등 구조화 필드에서만 사용하세요.\n" +
       "- memoryWrites: 다음 라운드 이후에도 기억할 가치가 있는 사실(플레이어 선택, NPC 변화, 미해결 훅, 톤 노트)만 " +
       "짧은 요약으로 제안하세요. kind: player_choice|npc_change|unresolved_hook|discovered_clue|safety_preference|tone_note, " +
       "salience: 0~1, visibility: gm_only|player_visible. 서버가 검증한 write만 저장됩니다.\n" +
@@ -1748,7 +1764,7 @@ function buildCheckSelectionPrompt(
       '"condition": "<always|on_failure|on_partial_or_failure|on_success|on_critical>", "reason": "<why>"}], ' +
       '"characterDeltas": [{"type": "<add_condition|remove_condition|add_inventory|spend_resource|update_relationship|advance_personal_clock|add_memory>", ' +
       '"characterId": "<character id>", "reason": "<why>", "...": "<fields required by type>"}], ' +
-      '"blackboardDeltas": [{"type": "<reveal_clue|reveal_secret|npc_attitude|npc_location|npc_goal_update|add_threat|advance_front|set_world_flag>", ' +
+      '"blackboardDeltas": [{"type": "<reveal_clue|reveal_secret|npc_reveal|npc_attitude|npc_location|npc_goal_update|add_threat|advance_front|set_world_flag>", ' +
       '"reason": "<why>", "...": "<fields required by type>"}], ' +
       '"memoryWrites": [{"kind": "<player_choice|npc_change|unresolved_hook|discovered_clue|safety_preference|tone_note>", ' +
       '"summary": "<short korean summary>", "salience": <0..1>, "visibility": "<gm_only|player_visible>"}], ' +

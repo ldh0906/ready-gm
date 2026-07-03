@@ -41,6 +41,13 @@ export interface NarrativeField {
   sectionId: string;
   /** Maximum character count accepted by the input. */
   maxLength: number;
+  /**
+   * Who may read this field's value on another player's sheet. `"private"`
+   * fields (e.g. until-it-sinks 목표·비밀) are shown only to the owning player
+   * (and the GM); absent means `"public"`. Enforced server-side by
+   * {@link projectSheetForViewer} — never rely on the client to hide it.
+   */
+  visibility?: "public" | "private";
 }
 
 /** A numerically-rated trait rendered as a ladder control. */
@@ -486,6 +493,14 @@ export const UNIVERSAL_SHEET: SheetSchema = {
       sectionId: "narrative",
       maxLength: 2000,
     },
+    {
+      id: "bonds",
+      label: "유대",
+      guidance:
+        "다른 플레이어 캐릭터와의 관계를 한두 줄로 적으세요. (예: ○○와는 옛 전우, ○○를 은근히 경계한다)",
+      sectionId: "narrative",
+      maxLength: 1000,
+    },
   ],
   traits: [
     {
@@ -559,6 +574,14 @@ export const GEESE_SHEET: SheetSchema = {
         "춤·매듭·폭발물처럼 이 거위만의 일회성 특기 하나를 정하세요. 점수를 배분할 수는 없지만, 어울리는 상황에서 보너스 주사위를 받습니다.",
       sectionId: "narrative",
       maxLength: 2000,
+    },
+    {
+      id: "bonds",
+      label: "유대",
+      guidance:
+        "다른 플레이어 캐릭터와의 관계를 한두 줄로 적으세요. (예: ○○와는 옛 전우, ○○를 은근히 경계한다)",
+      sectionId: "narrative",
+      maxLength: 1000,
     },
   ],
   traits: [
@@ -756,6 +779,8 @@ export const SINKS_SHEET: SheetSchema = {
       guidance: "이 인물이 품은 목표나 숨기고 있는 비밀을 적으세요. 플레이 중에 드러나도 좋습니다.",
       sectionId: "narrative",
       maxLength: 2000,
+      // Mystery premise: other players must not read this from the sheet view.
+      visibility: "private",
     },
   ],
   traits: [],
@@ -917,5 +942,113 @@ export function expectedTraitSpecForScenario(scenario: Scenario): {
     ladder: { ...schema.traits[0].ladder },
     allocation: schema.allocation,
     ...cards,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Viewer-scoped sheet projection (living character sheet, in-game view).
+
+/**
+ * The minimal recorded-character shape {@link projectSheetForViewer} reads.
+ * Structural (not the full services/types Character) so core/persistence
+ * layers can project without importing the service entity.
+ */
+export interface SheetProjectionSource {
+  name: string;
+  concept: string;
+  attributes: Record<string, number>;
+  selectedCardId?: string;
+  sheetData?: { narrativeFields?: Record<string, string> };
+}
+
+/** One attribute row on a projected sheet view, pre-localized for display. */
+export interface SheetViewAttribute {
+  key: string;
+  label: string;
+  value: number;
+  /** The ladder rung label for `value` when the schema defines one. */
+  rungLabel?: string;
+}
+
+/** One narrative row on a projected sheet view. Private fields are omitted for non-owners. */
+export interface SheetViewNarrative {
+  id: string;
+  label: string;
+  value: string;
+}
+
+/**
+ * A viewer-safe character sheet view. `isSelf` echoes the projection input so
+ * the client can label the drawer ("내 시트" vs 캐릭터명) without re-deriving it.
+ */
+export interface CharacterSheetView {
+  name: string;
+  concept: string;
+  isSelf: boolean;
+  /** The selected role card, resolved to its display label when known. */
+  card?: { id: string; roleLabel: string };
+  attributes: SheetViewAttribute[];
+  narrativeFields: SheetViewNarrative[];
+}
+
+/**
+ * Project a recorded character into what `viewer` may see (QA: living sheet).
+ * The owner sees everything; other players get `visibility: "private"`
+ * narrative fields OMITTED (fail-closed server-side — the value never leaves
+ * the server, so no client bug can leak it). Attributes are localized with the
+ * schema's trait labels/rung labels; narrative values come from
+ * `sheetData.narrativeFields` keyed by field id (name/concept ride on the
+ * character itself and are always public).
+ */
+export function projectSheetForViewer(
+  character: SheetProjectionSource,
+  schema: SheetSchema,
+  isSelf: boolean,
+): CharacterSheetView {
+  const attributes: SheetViewAttribute[] = schema.traits.map((trait) => {
+    const raw = character.attributes[trait.key];
+    const value = typeof raw === "number" && Number.isFinite(raw) ? raw : trait.ladder.min;
+    const rung = trait.rungLabels?.[String(value)];
+    return {
+      key: trait.key,
+      label: trait.label,
+      value,
+      ...(rung !== undefined ? { rungLabel: rung } : {}),
+    };
+  });
+
+  const values = character.sheetData?.narrativeFields ?? {};
+  const narrativeFields: SheetViewNarrative[] = [];
+  for (const field of schema.narrativeFields) {
+    // name/concept are echoed via the dedicated top-level fields, not repeated here.
+    if (field.id === "name" || field.id === "concept") continue;
+    if (!isSelf && field.visibility === "private") continue;
+    const value = values[field.id];
+    if (typeof value !== "string" || value.trim().length === 0) continue;
+    narrativeFields.push({ id: field.id, label: field.label, value });
+  }
+
+  const card =
+    character.selectedCardId !== undefined
+      ? (() => {
+          const match = (schema.characterCards ?? []).find(
+            (c) => c.id === character.selectedCardId,
+          );
+          return {
+            card: {
+              id: character.selectedCardId,
+              roleLabel: match?.roleLabel ?? character.selectedCardId,
+            },
+          };
+        })()
+      : {};
+
+  return {
+    name: character.name,
+    concept: character.concept,
+    isSelf,
+    ...card,
+    attributes,
+    narrativeFields,
   };
 }

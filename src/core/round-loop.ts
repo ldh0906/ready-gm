@@ -36,6 +36,7 @@
  */
 import type { ActionKind, ReadinessStatus } from "./types.js";
 import type {
+  ActionHistoryEntry,
   CheckRecord,
   ChatEntry,
   PendingCheck,
@@ -177,6 +178,12 @@ export interface ResolutionReadyCommand {
 export interface DeclareChecksCommand {
   type: "DECLARE_CHECKS";
   checks: PendingCheck[];
+  /**
+   * ISO deadline after which the server auto-rolls leftover checks. Must match
+   * the orchestrator's roll-check timer so the client countdown and the actual
+   * force-roll agree (QA-3).
+   */
+  rollDeadlineIso?: string;
 }
 
 /** One pending check has been rolled by the authoritative server dice service. */
@@ -217,9 +224,11 @@ export function createInitialTurnState(
     roundNumber: 0,
     phase: "free_chat",
     readiness: [],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     rollingChecks: [],
+    rollCheckDeadline: null,
     narrativeContext: [],
     readyCheckDeadline: null,
     readyCheckTimeoutMs: DEFAULT_READY_CHECK_TIMEOUT_MS,
@@ -301,9 +310,11 @@ export function reduce(state: TurnState, command: Command): TurnState {
         roundNumber: 1,
         phase: "free_chat",
         readiness,
+        actionHistory: [],
         chatLog: [],
         checks: [],
         rollingChecks: [],
+        rollCheckDeadline: null,
         narrativeContext: [],
         readyCheckDeadline: null,
         resolutionRequested: false,
@@ -374,6 +385,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
           phase: "ready_check",
           checks: [],
           rollingChecks: [],
+          rollCheckDeadline: null,
           resolutionRequested: false,
         };
       }
@@ -434,6 +446,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
         phase: "rolling",
         checks: [],
         rollingChecks: command.checks.map((check) => ({ ...check, status: "pending" })),
+        rollCheckDeadline: command.rollDeadlineIso ?? null,
       };
     }
 
@@ -474,6 +487,18 @@ export function reduce(state: TurnState, command: Command): TurnState {
         ...state.narrativeContext,
         { round: state.roundNumber, text: command.narration },
       ];
+      const roundActions: ActionHistoryEntry[] = state.readiness
+        .filter((entry) => entry.actionKind != null)
+        .map((entry) => ({
+          round: state.roundNumber,
+          playerId: entry.playerId,
+          kind: entry.actionKind as ActionHistoryEntry["kind"],
+          text: entry.actionKind === "confirmed_action" ? (entry.actionText ?? null) : null,
+        }));
+      const actionHistory = [
+        ...(Array.isArray(state.actionHistory) ? state.actionHistory : []),
+        ...roundActions,
+      ].slice(-200);
 
       if (command.endingReached) {
         // Ending condition reached during resolution: become terminal (R15.4, R15.6).
@@ -482,6 +507,8 @@ export function reduce(state: TurnState, command: Command): TurnState {
           phase: "ended",
           checks,
           rollingChecks: [],
+          rollCheckDeadline: null,
+          actionHistory,
           narrativeContext,
           resolutionRequested: false,
           readyCheckDeadline: null,
@@ -504,9 +531,11 @@ export function reduce(state: TurnState, command: Command): TurnState {
         roundNumber: state.roundNumber + 1,
         phase: "free_chat",
         readiness,
+        actionHistory,
         chatLog: [],
         checks: [],
         rollingChecks: [],
+        rollCheckDeadline: null,
         narrativeContext,
         readyCheckDeadline: null,
         resolutionRequested: false,

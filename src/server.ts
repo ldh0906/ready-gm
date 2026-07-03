@@ -40,10 +40,15 @@ import {
   sheetSchemaForScenario,
   expectedTraitSpecForScenario,
   cardsForScenario,
+  projectSheetForViewer,
 } from "./services/sheet-schema.js";
 import type { Scenario } from "./services/scenario-service.js";
 import { dealCardHand } from "./services/card-dealing.js";
 import { toContext } from "./services/turn-state-context.js";
+import {
+  buildNarrativeDraftPrompt,
+  parseNarrativeDraftResponse,
+} from "./services/narrative-draft.js";
 import {
   createSoloSessionStore,
   makeSoloCharacter,
@@ -225,8 +230,9 @@ function writePersistenceFailure(res: Response, error: unknown): void {
 // Default memory mode keeps local playtests friction-free even when DATABASE_URL
 // is present. Set PERSISTENCE_MODE=durable in production to use Postgres.
 const persistenceMode = resolvePersistenceMode(process.env);
+const aiClient = createCliAiGmClient(process.env);
 const engine = createEngine({
-  aiClient: createCliAiGmClient(process.env),
+  aiClient,
   env: persistenceMode === "durable" ? process.env : {},
   scenarioCatalog: DEMO_SCENARIO_CATALOG,
   // Best-effort local session trace for debugging (default off; SESSION_LOG=1 to
@@ -513,6 +519,7 @@ app.post("/solo/new", async (req, res) => {
       roundNumber: 1,
       phase: "free_chat",
       readiness: [],
+      actionHistory: [],
       chatLog: [],
       checks: [],
       narrativeContext: [],
@@ -1122,6 +1129,32 @@ app.get("/rooms/:roomId/players/:playerId/cards", (req, res) => {
 });
 
 /**
+ * `GET /rooms/:roomId/sheet-views` — viewer-scoped living character sheets for
+ * the in-game roster. The connection ticket identifies the viewer; private
+ * narrative fields are omitted server-side for every non-owner.
+ */
+app.get("/rooms/:roomId/sheet-views", (req, res) => {
+  const { roomId } = req.params;
+  const identity = authorizeRoomMemberRead(req, res, roomId);
+  if (identity === null) return;
+  const room = persistence.roomStore.getRoom(roomId);
+  if (room === undefined) {
+    res.status(404).json({ error: "Unknown room." });
+    return;
+  }
+  const schema = sheetSchemaForScenario(resolveScenarioForRoom(roomId));
+  const views = persistence.roomStore
+    .listCharactersByRoom(roomId)
+    .filter((character) => character.confirmed === true)
+    .map((character) => ({
+      playerId: character.playerId,
+      characterId: character.id,
+      view: projectSheetForViewer(character, schema, identity.playerId === character.playerId),
+    }));
+  res.status(200).json({ views });
+});
+
+/**
  * `POST /rooms/:roomId/allocation-roll` — server-side stat roll for a
  * `DICE_ROLL` allocation schema. The server rolls the scenario's dice formula
  * once per rated trait (clamped into each trait's ladder) and returns
@@ -1219,6 +1252,59 @@ app.post("/rooms/:roomId/players/:playerId/proposal", async (req, res) => {
 
   const values = proposeAttributes(concept, traitKeys, spec.ladder);
   res.status(200).json({ values });
+});
+
+/** `POST /rooms/:roomId/players/:playerId/narrative-draft` — AI narrative field drafts. */
+app.post("/rooms/:roomId/players/:playerId/narrative-draft", async (req, res) => {
+  if (!restAuthorized(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const identity = authorizePlayerAction(req, res, req.params.roomId, req.params.playerId);
+  if (identity === null) return;
+  const body = (req.body ?? {}) as { concept?: string; selectedCardId?: unknown };
+  const conceptInput = readBoundedText(body.concept, {
+    field: "Concept",
+    maxLength: MAX_CONCEPT_LENGTH,
+  });
+  if (!conceptInput.ok) {
+    res.status(conceptInput.status).json({ error: conceptInput.error });
+    return;
+  }
+  const scenario = resolveScenarioForRoom(identity.roomId);
+  const schema = sheetSchemaForScenario(scenario);
+  const selectedCardId =
+    typeof body.selectedCardId === "string" && body.selectedCardId.trim().length > 0
+      ? body.selectedCardId.trim()
+      : undefined;
+  const prompt = buildNarrativeDraftPrompt({
+    scenario,
+    schema,
+    concept: conceptInput.value,
+    ...(selectedCardId !== undefined ? { selectedCardId } : {}),
+  });
+  const aiGuard = proposalAiGuard.acquire({
+    roomId: identity.roomId,
+    playerId: identity.playerId,
+    endpointKey: `narrative:${identity.roomId}:${identity.playerId}`,
+  });
+  if (!aiGuard.ok) {
+    res.status(aiGuard.status).json({ error: aiGuard.error, reason: aiGuard.reason });
+    return;
+  }
+  try {
+    const response = await aiClient.complete({ tier: "fast", prompt, budget: 700 });
+    const parsed = parseNarrativeDraftResponse(response.text, schema);
+    if (!parsed.ok) {
+      res.status(502).json({ error: "AI narrative draft failed." });
+      return;
+    }
+    res.status(200).json({ drafts: parsed.drafts });
+  } catch {
+    res.status(502).json({ error: "AI narrative draft failed." });
+  } finally {
+    aiGuard.release();
+  }
 });
 
 /** `POST /rooms/:roomId/players/:playerId/character` — record (save) the character. */

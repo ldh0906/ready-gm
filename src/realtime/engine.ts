@@ -122,9 +122,15 @@ export function createEngine(deps: CreateEngineDeps): Engine {
     //    is projected away by toVisibleCharacterState.
     decorateState: (roomId, state) => {
       const readiness = Array.isArray(state.readiness) ? state.readiness : [];
+      const actionHistory = Array.isArray(state.actionHistory) ? state.actionHistory : [];
       const characterStates = persistence.characterStateStore.get(roomId);
       const blackboard = persistence.blackboardStore.get(roomId);
-      if (readiness.length === 0 && characterStates.length === 0 && blackboard === undefined) return state;
+      if (
+        readiness.length === 0 &&
+        actionHistory.length === 0 &&
+        characterStates.length === 0 &&
+        blackboard === undefined
+      ) return state;
       const displayById = new Map(
         persistence.roomStore.listPlayers(roomId).map((p) => [p.id, p.displayName]),
       );
@@ -144,6 +150,21 @@ export function createEngine(deps: CreateEngineDeps): Engine {
             ...(displayName !== undefined && displayName.length > 0 ? { displayName } : {}),
           };
         }),
+        ...(actionHistory.length > 0
+          ? {
+              actionHistory: actionHistory.map((entry) => {
+                const characterName = charById.get(entry.playerId);
+                const displayName = displayById.get(entry.playerId);
+                return {
+                  ...entry,
+                  ...(characterName !== undefined && characterName.length > 0
+                    ? { characterName }
+                    : {}),
+                  ...(displayName !== undefined && displayName.length > 0 ? { displayName } : {}),
+                };
+              }),
+            }
+          : {}),
         ...(characterStates.length > 0
           ? {
               characterStates: characterStates.map((characterState) =>

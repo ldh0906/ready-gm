@@ -57,6 +57,7 @@ function makeTurnState(overrides: Partial<TurnState> = {}): TurnState {
       { round: 1, text: "The crypt yawns open." },
       { round: 2, text: "A cold wind rises from below." },
     ],
+    actionHistory: [],
     readyCheckDeadline: null,
     readyCheckTimeoutMs: 90000,
     resolutionRequested: false,

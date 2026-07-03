@@ -126,6 +126,7 @@ export type ServerEvent =
       phase: "opening" | "ending" | "resolution";
       reason: string;
       retryable: boolean;
+      retrying?: boolean;
     };
 
 /**

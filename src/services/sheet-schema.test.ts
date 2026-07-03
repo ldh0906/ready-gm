@@ -11,6 +11,7 @@ import {
   UNIVERSAL_SHEET,
   expectedTraitSpecForScenario,
   parseDiceFormula,
+  projectSheetForViewer,
   rollAllocationValues,
   rollDiceFormula,
   sheetSchemaForScenario,
@@ -38,7 +39,7 @@ describe("pre-authored sheets", () => {
       expect(trait.ladder).toEqual(DEFAULT_ATTRIBUTE_LADDER);
       expect(trait.rungLabels).toBeUndefined();
     }
-    expect(fieldIds(UNIVERSAL_SHEET)).toEqual(["name", "concept"]);
+    expect(fieldIds(UNIVERSAL_SHEET)).toEqual(["name", "concept", "bonds"]);
     const name = UNIVERSAL_SHEET.narrativeFields.find((f) => f.id === "name");
     const concept = UNIVERSAL_SHEET.narrativeFields.find((f) => f.id === "concept");
     expect(name?.maxLength).toBe(100);
@@ -54,7 +55,7 @@ describe("pre-authored sheets", () => {
       expect(trait.rungLabels).toEqual({ "1": "1", "2": "2", "3": "3", "4": "4" });
       expect(trait.sectionId).toBe("attributes");
     }
-    expect(fieldIds(GEESE_SHEET)).toEqual(["name", "concept", "special"]);
+    expect(fieldIds(GEESE_SHEET)).toEqual(["name", "concept", "special", "bonds"]);
     const special = GEESE_SHEET.narrativeFields.find((f) => f.id === "special");
     expect(special?.sectionId).toBe("narrative");
     expect(special?.maxLength).toBe(2000);
@@ -69,6 +70,104 @@ describe("pre-authored sheets", () => {
       expect(field.sectionId).toBe("narrative");
     }
     expect(SINKS_SHEET.narrativeFields.find((f) => f.id === "name")?.maxLength).toBe(100);
+  });
+});
+
+describe("projectSheetForViewer", () => {
+  const schema: SheetSchema = {
+    genre: "test",
+    category: "test",
+    system: "test",
+    hasSpecialRules: true,
+    sections: [{ id: "narrative", label: "서사" }],
+    narrativeFields: [
+      { id: "name", label: "이름", guidance: "", maxLength: 100, sectionId: "narrative" },
+      { id: "concept", label: "컨셉", guidance: "", maxLength: 100, sectionId: "narrative" },
+      { id: "publicNote", label: "공개", guidance: "", maxLength: 100, sectionId: "narrative" },
+      {
+        id: "secret",
+        label: "비밀",
+        guidance: "",
+        maxLength: 100,
+        sectionId: "narrative",
+        visibility: "private",
+      },
+      { id: "empty", label: "빈 값", guidance: "", maxLength: 100, sectionId: "narrative" },
+    ],
+    traits: [
+      {
+        key: "Sneaky",
+        label: "은밀",
+        ladder: { min: 1, max: 4 },
+        rungLabels: { "1": "초보", "3": "능숙" },
+        sectionId: "attributes",
+      },
+      {
+        key: "Fast",
+        label: "빠름",
+        ladder: { min: 1, max: 4 },
+        rungLabels: { "1": "느림" },
+        sectionId: "attributes",
+      },
+    ],
+    allocation: { mode: "LADDER_SELECT" },
+    attributeProposalSupported: true,
+    characterCards: [{ id: "scout", roleLabel: "정찰병", premise: "앞장선다" }],
+  };
+
+  const character = {
+    name: "나리",
+    concept: "조심스러운 정찰병",
+    attributes: { Sneaky: 3 },
+    selectedCardId: "scout",
+    sheetData: {
+      narrativeFields: {
+        name: "중복 이름",
+        concept: "중복 컨셉",
+        publicNote: "모두 아는 사실",
+        secret: "숨겨야 할 비밀",
+        empty: "   ",
+      },
+    },
+  };
+
+  it("omits private and blank narrative fields from another player's view", () => {
+    const view = projectSheetForViewer(character, schema, false);
+    expect(view.isSelf).toBe(false);
+    expect(view.narrativeFields).toEqual([
+      { id: "publicNote", label: "공개", value: "모두 아는 사실" },
+    ]);
+  });
+
+  it("includes private narrative fields for the owner only", () => {
+    const view = projectSheetForViewer(character, schema, true);
+    expect(view.isSelf).toBe(true);
+    expect(view.narrativeFields).toEqual([
+      { id: "publicNote", label: "공개", value: "모두 아는 사실" },
+      { id: "secret", label: "비밀", value: "숨겨야 할 비밀" },
+    ]);
+  });
+
+  it("keeps name and concept top-level and resolves card and trait labels", () => {
+    const view = projectSheetForViewer(character, schema, true);
+    expect(view.name).toBe("나리");
+    expect(view.concept).toBe("조심스러운 정찰병");
+    expect(view.narrativeFields.map((field) => field.id)).not.toContain("name");
+    expect(view.narrativeFields.map((field) => field.id)).not.toContain("concept");
+    expect(view.card).toEqual({ id: "scout", roleLabel: "정찰병" });
+    expect(view.attributes).toEqual([
+      { key: "Sneaky", label: "은밀", value: 3, rungLabel: "능숙" },
+      { key: "Fast", label: "빠름", value: 1, rungLabel: "느림" },
+    ]);
+  });
+
+  it("falls back to an unknown selected card id as its role label", () => {
+    const view = projectSheetForViewer(
+      { ...character, selectedCardId: "unknown-card" },
+      schema,
+      true,
+    );
+    expect(view.card).toEqual({ id: "unknown-card", roleLabel: "unknown-card" });
   });
 });
 

@@ -46,6 +46,17 @@ export interface ReadinessEntry {
   displayName?: string;
 }
 
+export interface ActionHistoryEntry {
+  round: number;
+  playerId: string;
+  kind: "confirmed_action" | "pass" | "auto_pass";
+  text: string | null;
+  /** Display-only: injected by the realtime fan-out, never persisted canonically. */
+  characterName?: string;
+  /** Display-only: injected by the realtime fan-out, never persisted canonically. */
+  displayName?: string;
+}
+
 /** A single in-round chat message, attributed to the sender's character (R6.3, R6.4). */
 export interface ChatEntry {
   playerId: string;
@@ -149,12 +160,20 @@ export interface TurnState {
   phase: Phase;
   /** One entry per active player (R12.2). */
   readiness: ReadinessEntry[];
+  /** Completed per-round actions retained across round advances. */
+  actionHistory: ActionHistoryEntry[];
   /** Current round's chat in send order (R6.4). */
   chatLog: ChatEntry[];
   /** Checks resolved this round (R11.5). */
   checks: CheckRecord[];
   /** Pending/rolled player-visible checks during the two-phase rolling window. */
   rollingChecks?: PendingCheck[];
+  /**
+   * ISO deadline for the rolling-window countdown (server auto-rolls leftover
+   * checks past it), or `null`/absent when no rolling window is open. Lets the
+   * client show a visible countdown instead of an unannounced force-roll (QA-3).
+   */
+  rollCheckDeadline?: string | null;
   /** Recent narrative context, newest last (R12.2). */
   narrativeContext: NarrativeContextEntry[];
   /** ISO deadline for the ready-check countdown, or `null` when not running (R8.1, R8.3). */
@@ -182,7 +201,11 @@ export interface TurnState {
  * round-trip with {@link deserializeTurnState} is lossless.
  */
 export function serializeTurnState(state: TurnState): string {
-  return JSON.stringify(toPlain(state));
+  const plain = toPlain(state);
+  if (plain.actionHistory.length === 0) {
+    delete (plain as Partial<TurnState>).actionHistory;
+  }
+  return JSON.stringify(plain);
 }
 
 /**
@@ -214,6 +237,12 @@ function toPlain(state: TurnState): TurnState {
       status: entry.status,
       actionKind: entry.actionKind,
       actionText: entry.actionText,
+    })),
+    actionHistory: (Array.isArray(state.actionHistory) ? state.actionHistory : []).map((entry) => ({
+      round: entry.round,
+      playerId: entry.playerId,
+      kind: entry.kind,
+      text: entry.kind === "confirmed_action" ? (entry.text ?? null) : null,
     })),
     chatLog: state.chatLog.map((entry) => ({
       playerId: entry.playerId,
@@ -265,6 +294,11 @@ function toPlain(state: TurnState): TurnState {
       ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
       ...(entry.autoRolled !== undefined ? { autoRolled: entry.autoRolled } : {}),
     }));
+  }
+  // Carried ONLY when present so legacy persisted Turn_State JSON (which
+  // predates the rolling-window countdown) round-trips unchanged.
+  if (state.rollCheckDeadline !== undefined) {
+    plain.rollCheckDeadline = state.rollCheckDeadline;
   }
   return plain;
 }

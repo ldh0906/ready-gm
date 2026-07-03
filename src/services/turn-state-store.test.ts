@@ -11,6 +11,7 @@ function makeTurnState(overrides: Partial<TurnState> = {}): TurnState {
       { playerId: "p1", status: "ready", actionKind: "confirmed_action", actionText: "Open the door" },
       { playerId: "p2", status: "not_ready", actionKind: null, actionText: null },
     ],
+    actionHistory: [],
     chatLog: [{ playerId: "p1", characterName: "Borin", text: "Careful", ts: "2024-01-01T00:00:00.000Z" }],
     checks: [],
     narrativeContext: [{ round: 1, text: "The crypt yawns open." }],

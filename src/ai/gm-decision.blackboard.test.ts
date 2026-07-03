@@ -8,6 +8,7 @@ describe("parseGmDecision blackboardDeltas", () => {
         needsRoll: false,
         blackboardDeltas: [
           { type: "reveal_clue", clueId: "clue-1", reason: "found" },
+          { type: "npc_reveal", npcId: "npc-1", reason: "entered" },
           { type: "reveal_clue", clueId: 7, reason: "bad" },
           { type: "unknown", reason: "bad" },
           "bad",
@@ -19,6 +20,7 @@ describe("parseGmDecision blackboardDeltas", () => {
     if (!result.ok) return;
     expect(result.value.blackboardDeltas).toEqual([
       { type: "reveal_clue", clueId: "clue-1", reason: "found" },
+      { type: "npc_reveal", npcId: "npc-1", reason: "entered" },
     ]);
   });
 });

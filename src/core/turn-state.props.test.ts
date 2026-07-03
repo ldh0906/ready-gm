@@ -47,6 +47,21 @@ const checkRecord = fc.record({
   visibility: fc.constantFrom<"player" | "gm">("player", "gm"),
 });
 
+const actionHistoryEntry = fc.oneof(
+  fc.record({
+    round: fc.integer({ min: 0, max: 9999 }),
+    playerId: fc.string(),
+    kind: fc.constant("confirmed_action" as const),
+    text: fc.option(fc.string(), { nil: null }),
+  }),
+  fc.record({
+    round: fc.integer({ min: 0, max: 9999 }),
+    playerId: fc.string(),
+    kind: fc.constantFrom("pass" as const, "auto_pass" as const),
+    text: fc.constant(null),
+  }),
+);
+
 const pendingCheck = fc.record({
   checkId: fc.string(),
   characterId: fc.string(),
@@ -73,6 +88,7 @@ const turnStateGen: fc.Arbitrary<TurnState> = fc.record({
   roundNumber: fc.integer({ min: 0, max: 9999 }),
   phase,
   readiness: fc.array(readinessEntry, { maxLength: 6 }),
+  actionHistory: fc.array(actionHistoryEntry, { maxLength: 10 }),
   chatLog: fc.array(chatEntry, { maxLength: 10 }),
   checks: fc.array(checkRecord, { maxLength: 10 }),
   rollingChecks: fc.array(pendingCheck, { maxLength: 10 }),

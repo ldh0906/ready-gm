@@ -35,7 +35,9 @@ export const DEFAULT_DICE_RANGE: { min: number; max: number } = {
  */
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   readyCheckTimeoutMs: 90000,
-  rollCheckTimeoutMs: 20000,
+  // 90s: players read the GM narration before noticing their roll button; the
+  // old 20s expired mid-read and the server force-rolled over them (QA-3).
+  rollCheckTimeoutMs: 90000,
   maxPlayers: 6,
   aiMaxRetries: 2,
   modelTiers: {

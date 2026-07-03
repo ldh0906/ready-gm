@@ -145,6 +145,7 @@ export function deriveRoundMemories(input: DeriveRoundMemoriesInput): MemoryReco
         sourceEventIds: [...source],
       });
     } else if (
+      delta.type === "npc_reveal" ||
       delta.type === "npc_attitude" ||
       delta.type === "npc_location" ||
       delta.type === "npc_goal_update"

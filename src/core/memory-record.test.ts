@@ -84,6 +84,7 @@ describe("deriveRoundMemories — deterministic per-round Memory Clerk", () => {
       roundNumber: 3,
       appliedBlackboardDeltas: [
         { type: "reveal_clue", clueId: "small_footprints", reason: "조사 성공" },
+        { type: "npc_reveal", npcId: "npc_priest", reason: "예배당에 등장" },
         { type: "npc_location", npcId: "npc_priest", location: "chapel", reason: "도주" },
       ],
       confirmedActions: [{ characterName: "Ada", actionText: "문양을 조사한다" }],
@@ -92,6 +93,7 @@ describe("deriveRoundMemories — deterministic per-round Memory Clerk", () => {
 
     expect(records.map((r) => r.kind)).toEqual([
       "discovered_clue",
+      "npc_change",
       "npc_change",
       "player_choice",
       "safety_preference",

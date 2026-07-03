@@ -40,6 +40,7 @@ function makeState(playerIds: readonly string[], narrative: { round: number; tex
       actionKind: "confirmed_action",
       actionText: `${playerId}-action`,
     })),
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: narrative,

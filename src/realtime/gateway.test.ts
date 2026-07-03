@@ -73,6 +73,7 @@ function makeTurnState(roomId: string, roundNumber = 1): TurnState {
     roundNumber,
     phase: "free_chat",
     readiness: [],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [],

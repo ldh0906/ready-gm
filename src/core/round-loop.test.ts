@@ -66,6 +66,7 @@ describe("START_SESSION (Task 7.1, R5.4)", () => {
   it("clears any stale per-round fields on start", () => {
     const dirty = createInitialTurnState(ROOM, {
       chatLog: [{ playerId: HOST, characterName: "Old", text: "hi", ts: "t" }],
+      actionHistory: [{ round: 1, playerId: HOST, kind: "pass", text: null }],
       resolutionRequested: true,
       readyCheckDeadline: "2020-01-01T00:00:00Z",
     });
@@ -234,6 +235,7 @@ describe("mid-resolution revert halt (Task 8.5, R7.9)", () => {
       endingReached: false,
     });
     expect(next).toEqual(halted);
+    expect(next.actionHistory).toEqual([]);
   });
 });
 
@@ -348,6 +350,56 @@ describe("at-most-once resolution and round advancement (Task 9.6, R10.3/10.5/11
     expect(state.chatLog).toEqual([]);
   });
 
+  it("RESOLUTION_READY appends confirmed/pass/auto_pass action history before resetting readiness", () => {
+    let state = started([HOST, P2, P3]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다", deadline: null });
+    state = reduce(state, { type: "PASS", from: P2, deadline: null });
+    state = reduce(state, { type: "TIMEOUT_EXPIRED", player: P3 });
+
+    const next = reduce(state, {
+      type: "RESOLUTION_READY",
+      narration: "문이 열린다.",
+      checks: [],
+      endingReached: false,
+    });
+
+    expect(next.actionHistory).toEqual([
+      { round: 1, playerId: HOST, kind: "confirmed_action", text: "문을 연다" },
+      { round: 1, playerId: P2, kind: "pass", text: null },
+      { round: 1, playerId: P3, kind: "auto_pass", text: null },
+    ]);
+    expect(next.readiness.every((entry) => entry.actionKind === null)).toBe(true);
+  });
+
+  it("RESOLUTION_READY keeps only the newest 200 action history entries", () => {
+    const existing = Array.from({ length: 199 }, (_, index) => ({
+      round: index + 1,
+      playerId: `p-${index}`,
+      kind: "pass" as const,
+      text: null,
+    }));
+    let state = createInitialTurnState(ROOM, {
+      roundNumber: 200,
+      phase: "resolving",
+      readiness: [
+        { playerId: HOST, status: "ready", actionKind: "confirmed_action", actionText: "마지막 행동" },
+        { playerId: P2, status: "ready", actionKind: "pass", actionText: null },
+      ],
+      actionHistory: existing,
+      resolutionRequested: true,
+    });
+    state = reduce(state, {
+      type: "RESOLUTION_READY",
+      narration: "해결",
+      checks: [],
+      endingReached: false,
+    });
+
+    expect(state.actionHistory).toHaveLength(200);
+    expect(state.actionHistory[0]).toEqual({ round: 2, playerId: "p-1", kind: "pass", text: null });
+    expect(state.actionHistory.at(-1)).toEqual({ round: 200, playerId: P2, kind: "pass", text: null });
+  });
+
   it("ignores RESOLUTION_READY when not resolving", () => {
     const state = started([HOST, P2]); // free_chat
     const next = reduce(state, {
@@ -373,6 +425,40 @@ describe("two-phase check rolling", () => {
     expect(rolling.rollingChecks).toEqual([samplePendingCheck]);
     expect(rolling.rollingChecks?.[0]).not.toHaveProperty("roll");
     expect(rolling.checks).toEqual([]);
+  });
+
+  it("DECLARE_CHECKS copies the roll deadline into rolling state", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "go", deadline: null });
+
+    const rolling = reduce(state, {
+      type: "DECLARE_CHECKS",
+      checks: [samplePendingCheck],
+      rollDeadlineIso: "2030-01-01T00:00:00.000Z",
+    });
+
+    expect(rolling.phase).toBe("rolling");
+    expect(rolling.rollCheckDeadline).toBe("2030-01-01T00:00:00.000Z");
+  });
+
+  it("RESOLUTION_READY clears the roll deadline after rolling", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "go", deadline: null });
+    state = reduce(state, {
+      type: "DECLARE_CHECKS",
+      checks: [samplePendingCheck],
+      rollDeadlineIso: "2030-01-01T00:00:00.000Z",
+    });
+
+    const next = reduce(state, {
+      type: "RESOLUTION_READY",
+      narration: "The check resolves.",
+      checks: [sampleCheck],
+      endingReached: false,
+    });
+
+    expect(next.phase).toBe("free_chat");
+    expect(next.rollCheckDeadline).toBeNull();
   });
 
   it("CHECK_ROLLED records one resolved check and is idempotent for duplicates", () => {
@@ -466,6 +552,9 @@ describe("ended / terminal state (Task 10.3, R15.4/15.6/15.7)", () => {
     expect(state.phase).toBe("ended");
     expect(state.roundNumber).toBe(1); // no new round
     expect(state.checks).toEqual([sampleCheck]);
+    expect(state.actionHistory).toEqual([
+      { round: 1, playerId: HOST, kind: "confirmed_action", text: "final blow" },
+    ]);
   });
 
   it("rejects START_SESSION (restart) on an ended state", () => {

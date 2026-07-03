@@ -97,6 +97,7 @@ export function buildResolvingState(
         actionText: action,
       },
     ],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: session.narrativeContext,

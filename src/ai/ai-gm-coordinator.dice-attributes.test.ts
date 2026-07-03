@@ -39,6 +39,7 @@ function state(): TurnState {
     roundNumber: 2,
     phase: "resolving",
     readiness: [{ playerId: "p0", status: "ready", actionKind: "confirmed_action", actionText: "행동" }],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [],

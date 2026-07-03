@@ -24,6 +24,7 @@ function makeTurnState(roomId: string): TurnState {
     roundNumber: 1,
     phase: "free_chat",
     readiness: [{ playerId: "p1", status: "not_ready", actionKind: null, actionText: null }],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [],
@@ -129,5 +130,27 @@ describe("createEngine — fan-out state decoration", () => {
     expect(turnStateEvent).toBeDefined();
     const state = (turnStateEvent as { state: TurnState }).state;
     expect("characterStates" in state).toBe(false);
+  });
+
+  it("decorates actionHistory entries with character and display names", () => {
+    const { engine, roomId } = setup();
+    engine.persistence.turnStateStore.save({
+      ...makeTurnState(roomId),
+      readiness: [],
+      actionHistory: [
+        { round: 1, playerId: "p1", kind: "confirmed_action", text: "파이를 엎는다" },
+      ],
+    });
+
+    const { connection, events } = makeConnection(roomId, "p1");
+    engine.gateway.connect(connection);
+
+    const turnStateEvent = events.find((event) => event.type === "turn_state");
+    expect(turnStateEvent).toBeDefined();
+    const state = (turnStateEvent as { state: TurnState }).state;
+    expect(state.actionHistory[0]).toMatchObject({
+      characterName: "고블린 사냥꾼",
+      displayName: "라면",
+    });
   });
 });

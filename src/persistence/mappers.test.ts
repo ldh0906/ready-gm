@@ -316,6 +316,7 @@ describe("turn_state mapping", () => {
     roundNumber: 2,
     phase: "free_chat",
     readiness: [{ playerId: "player-1", status: "ready", actionKind: "pass", actionText: null }],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [{ round: 1, text: "intro" }],

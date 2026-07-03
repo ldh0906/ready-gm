@@ -49,6 +49,7 @@ function makeState(playerIds: readonly string[]): TurnState {
       actionKind: "confirmed_action",
       actionText: `${playerId}의 행동`,
     })),
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [],
@@ -312,5 +313,4 @@ describe("AI GM Router/Coordinator — property tests", async () => {
     );
   });
 });
-
 

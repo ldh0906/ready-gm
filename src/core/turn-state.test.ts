@@ -17,6 +17,7 @@ function sampleTurnState(): TurnState {
       { playerId: "p3", status: "not_ready", actionKind: null, actionText: null },
       { playerId: "p4", status: "ready", actionKind: "auto_pass", actionText: null },
     ],
+    actionHistory: [],
     chatLog: [
       { playerId: "p1", characterName: "Borin", text: "I draw my axe.", ts: "2024-01-01T00:00:01.000Z" },
       { playerId: "p2", characterName: "Aria", text: "Wait!", ts: "2024-01-01T00:00:02.000Z" },
@@ -70,6 +71,7 @@ describe("serializeTurnState / deserializeTurnState", () => {
       roundNumber: 1,
       phase: "free_chat",
       readiness: [],
+      actionHistory: [],
       chatLog: [],
       checks: [],
       narrativeContext: [],
@@ -78,6 +80,33 @@ describe("serializeTurnState / deserializeTurnState", () => {
       resolutionRequested: false,
     };
     expect(deserializeTurnState(serializeTurnState(state))).toEqual(state);
+  });
+
+  it("omits empty actionHistory in serialized JSON but restores legacy JSON with an empty array", () => {
+    const json = serializeTurnState(sampleTurnState());
+    expect(JSON.parse(json)).not.toHaveProperty("actionHistory");
+
+    const restored = deserializeTurnState(json);
+    expect(restored.actionHistory).toEqual([]);
+  });
+
+  it("round-trips non-empty actionHistory without display-only names", () => {
+    const state = sampleTurnState();
+    state.actionHistory = [
+      {
+        round: 2,
+        playerId: "p1",
+        kind: "confirmed_action",
+        text: "Strike the orc",
+        characterName: "Display Only",
+      },
+      { round: 2, playerId: "p2", kind: "auto_pass", text: "ignored" },
+    ];
+    const restored = deserializeTurnState(serializeTurnState(state));
+    expect(restored.actionHistory).toEqual([
+      { round: 2, playerId: "p1", kind: "confirmed_action", text: "Strike the orc" },
+      { round: 2, playerId: "p2", kind: "auto_pass", text: null },
+    ]);
   });
 
   it("strips extraneous keys not part of the Turn_State shape", () => {

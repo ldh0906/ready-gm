@@ -28,6 +28,7 @@ function seededBlackboard(): ScenarioBlackboard {
         relatedClueIds: ["clue-1"],
       },
     ],
+    fronts: [{ id: "pie_prank", name: "파이를 망쳐라", stage: "진행 중" }],
     npcs: [
       {
         npcId: "npc-1",
@@ -114,6 +115,7 @@ describe("blackboard projections", () => {
   it("exposes discovered clues and visible NPC state without NPC known secrets", () => {
     const result = applyBlackboardDeltas(seededBlackboard(), [
       { type: "reveal_clue", clueId: "clue-1", reason: "found" },
+      { type: "npc_reveal", npcId: "npc-1", reason: "met at chapel" },
     ]);
 
     expect(toVisibleBlackboard(result.blackboard)).toEqual({
@@ -128,5 +130,72 @@ describe("blackboard projections", () => {
       activeThreats: [],
       worldFlags: [],
     });
+    expect(toVisibleBlackboard(result.blackboard)).not.toHaveProperty("fronts");
+  });
+
+  it("hides unencountered NPCs from the visible projection", () => {
+    expect(toVisibleBlackboard(seededBlackboard()).npcs).toEqual([]);
+  });
+
+  it("reveals an NPC after npc_reveal", () => {
+    const result = applyBlackboardDeltas(seededBlackboard(), [
+      { type: "npc_reveal", npcId: "npc-1", reason: "entered the scene" },
+    ]);
+
+    expect(toVisibleBlackboard(result.blackboard).npcs).toEqual([
+      {
+        npcId: "npc-1",
+        name: "Mara",
+        role: "Crypt guide",
+        attitudeByCharacter: { "char-1": "wary" },
+        location: "chapel",
+      },
+    ]);
+  });
+
+  it("marks an NPC encountered when npc_attitude is applied", () => {
+    const result = applyBlackboardDeltas(seededBlackboard(), [
+      { type: "npc_attitude", npcId: "npc-1", characterId: "char-1", attitude: "helpful", reason: "talked" },
+    ]);
+
+    expect(result.blackboard.npcs[0].encountered).toBe(true);
+    expect(toVisibleBlackboard(result.blackboard).npcs[0].attitudeByCharacter).toEqual({ "char-1": "helpful" });
+  });
+
+  it("rejects npc_reveal for an unknown npc", () => {
+    const delta = { type: "npc_reveal" as const, npcId: "npc-missing", reason: "bad id" };
+    const result = applyBlackboardDeltas(seededBlackboard(), [delta]);
+
+    expect(result.applied).toEqual([]);
+    expect(result.rejected).toEqual([{ delta, reason: "UNKNOWN_NPC" }]);
+  });
+
+  it("keeps unencountered NPCs in the GM projection", () => {
+    expect(toGmBlackboardProjection(seededBlackboard()).npcs).toEqual([
+      {
+        npcId: "npc-1",
+        name: "Mara",
+        role: "Crypt guide",
+        attitudeByCharacter: { "char-1": "wary" },
+        location: "chapel",
+      },
+    ]);
+  });
+
+  it("includes fronts in the GM projection without leaking them to players", () => {
+    const bb = seededBlackboard();
+
+    expect(toGmBlackboardProjection(bb).fronts).toEqual([
+      { id: "pie_prank", name: "파이를 망쳐라", stage: "진행 중" },
+    ]);
+    expect(toVisibleBlackboard(bb)).not.toHaveProperty("fronts");
+  });
+
+  it("round-trips legacy serialized NPCs without encountered", () => {
+    const legacy = JSON.parse(JSON.stringify(seededBlackboard())) as ScenarioBlackboard;
+
+    expect(legacy.npcs[0]).not.toHaveProperty("encountered");
+    expect(toVisibleBlackboard(legacy).npcs).toEqual([]);
+    expect(toGmBlackboardProjection(legacy).npcs).toHaveLength(1);
   });
 });

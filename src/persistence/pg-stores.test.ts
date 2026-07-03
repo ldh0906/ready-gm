@@ -184,6 +184,7 @@ describe("PgTurnStateStore", () => {
     roundNumber: 1,
     phase: "free_chat",
     readiness: [],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [],

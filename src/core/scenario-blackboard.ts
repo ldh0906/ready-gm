@@ -34,6 +34,15 @@ export interface NpcState {
   knownSecretIds: string[];
   location: string;
   pressureClockId?: string;
+  /**
+   * Whether the party has met this NPC on-screen. Only encountered NPCs are
+   * projected to players (toVisibleBlackboard) — seeded-but-unmet NPCs stay
+   * hidden so the blackboard bar doesn't spoil the cast. Optional so
+   * blackboards persisted before this field existed load as "not encountered"
+   * (fail-closed). Set via the npc_reveal delta, or implicitly by npc_attitude
+   * (an attitude toward a character implies a meeting).
+   */
+  encountered?: boolean;
 }
 
 export interface WorldFlag {
@@ -75,6 +84,7 @@ export interface ScenarioBlackboard {
 export type BlackboardDelta =
   | { type: "reveal_clue"; clueId: string; reason: string }
   | { type: "reveal_secret"; secretId: string; reveal: "partial" | "full"; reason: string }
+  | { type: "npc_reveal"; npcId: string; reason: string }
   | { type: "npc_attitude"; npcId: string; characterId: string; attitude: string; reason: string }
   | { type: "npc_location"; npcId: string; location: string; reason: string }
   | { type: "npc_goal_update"; npcId: string; goals: string[]; reason: string }
@@ -116,7 +126,10 @@ export interface VisibleBlackboard {
 }
 
 export interface GmBlackboardProjection extends VisibleBlackboard {
+  /** Full cast (unmet NPCs included) with the encountered flag for GM context. */
+  npcs: (VisibleBlackboard["npcs"][number] & { encountered?: boolean })[];
   discoveredClues: VisibleBlackboard["clues"];
+  fronts: { id: string; name: string; stage: string }[];
 }
 
 export function createEmptyBlackboard(roomId: string, scenarioId: string): ScenarioBlackboard {
@@ -171,6 +184,16 @@ export function applyBlackboardDeltas(
         applied.push(delta);
         break;
       }
+      case "npc_reveal": {
+        const npc = blackboard.npcs.find((n) => n.npcId === delta.npcId);
+        if (npc === undefined) {
+          rejected.push({ delta, reason: "UNKNOWN_NPC" });
+          break;
+        }
+        npc.encountered = true;
+        applied.push(delta);
+        break;
+      }
       case "npc_attitude": {
         const npc = blackboard.npcs.find((n) => n.npcId === delta.npcId);
         if (npc === undefined) {
@@ -182,6 +205,8 @@ export function applyBlackboardDeltas(
           break;
         }
         npc.attitudeByCharacter = { ...npc.attitudeByCharacter, [delta.characterId]: delta.attitude };
+        // An attitude toward a party character implies the NPC has been met.
+        npc.encountered = true;
         applied.push(delta);
         break;
       }
@@ -244,13 +269,17 @@ export function toVisibleBlackboard(bb: ScenarioBlackboard): VisibleBlackboard {
         conclusion: clue.conclusion,
         ...(clue.redundantPathGroup !== undefined ? { redundantPathGroup: clue.redundantPathGroup } : {}),
       })),
-    npcs: bb.npcs.map((npc) => ({
-      npcId: npc.npcId,
-      name: npc.name,
-      role: npc.role,
-      attitudeByCharacter: { ...npc.attitudeByCharacter },
-      location: npc.location,
-    })),
+    // Only NPCs the party has actually met — seeded-but-unmet NPCs are hidden
+    // from players (fail-closed: absent flag means not encountered).
+    npcs: bb.npcs
+      .filter((npc) => npc.encountered === true)
+      .map((npc) => ({
+        npcId: npc.npcId,
+        name: npc.name,
+        role: npc.role,
+        attitudeByCharacter: { ...npc.attitudeByCharacter },
+        location: npc.location,
+      })),
     activeThreats: bb.activeThreats.map((threat) => ({ ...threat })),
     worldFlags: bb.worldFlags.map((flag) => ({ ...flag })),
   };
@@ -258,7 +287,22 @@ export function toVisibleBlackboard(bb: ScenarioBlackboard): VisibleBlackboard {
 
 export function toGmBlackboardProjection(bb: ScenarioBlackboard): GmBlackboardProjection {
   const visible = toVisibleBlackboard(bb);
-  return { ...visible, discoveredClues: visible.clues };
+  // The GM sees the FULL cast (including unmet NPCs) — it must know who exists
+  // to introduce them. Only the player projection gates on `encountered`.
+  const allNpcs = bb.npcs.map((npc) => ({
+    npcId: npc.npcId,
+    name: npc.name,
+    role: npc.role,
+    attitudeByCharacter: { ...npc.attitudeByCharacter },
+    location: npc.location,
+    ...(npc.encountered === true ? { encountered: true as const } : {}),
+  }));
+  const fronts = bb.fronts.map((front) => ({
+    id: front.id,
+    name: front.name,
+    stage: front.stage ?? "",
+  }));
+  return { ...visible, npcs: allNpcs, discoveredClues: visible.clues, fronts };
 }
 
 export function cloneBlackboard(bb: ScenarioBlackboard): ScenarioBlackboard {
@@ -290,6 +334,8 @@ function isBlackboardDelta(value: unknown): value is BlackboardDelta {
       return typeof e.clueId === "string";
     case "reveal_secret":
       return typeof e.secretId === "string" && (e.reveal === "partial" || e.reveal === "full");
+    case "npc_reveal":
+      return typeof e.npcId === "string";
     case "npc_attitude":
       return typeof e.npcId === "string" && typeof e.characterId === "string" && typeof e.attitude === "string";
     case "npc_location":

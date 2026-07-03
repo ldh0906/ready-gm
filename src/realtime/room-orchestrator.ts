@@ -54,6 +54,7 @@ import {
   type CharacterStateStore,
 } from "../services/character-state-store.js";
 import type { BlackboardStore } from "../services/blackboard-store.js";
+import type { ScenarioBlackboard } from "../core/scenario-blackboard.js";
 import { seedBlackboardForScenario } from "../services/scenario-blackboard.js";
 import type { MemoryStore } from "../services/memory-store.js";
 import { resolveGameProfileForScenario } from "../core/game-profile.js";
@@ -102,6 +103,7 @@ import type { SessionSummaryRepository } from "../persistence/types.js";
 import type { CheckRecord, PendingCheck } from "../core/turn-state.js";
 
 const MAX_AUTOMATIC_FAILED_RESOLUTION_RETRIES = 1;
+const FAILED_RESOLUTION_RETRY_DELAY_MS = 5_000;
 
 interface PendingResolution {
   declaration: RoundDeclaration;
@@ -152,6 +154,7 @@ export interface OrchestratorCoordinator {
   generateOpening(
     ctx: TurnStateContext,
     correlation?: CorrelationKey,
+    blackboard?: ScenarioBlackboard,
   ): Promise<GenerationResult<Narration>>;
   generateEnding(
     ctx: TurnStateContext,
@@ -299,6 +302,8 @@ export class RoomOrchestrator {
   private readonly pendingResolutions = new Map<string, PendingResolution>();
   /** roomId → in-flight roll-check timeout handle (auto-roll unresolved checks). */
   private readonly rollCheckTimers = new Map<string, unknown>();
+  /** roomId → in-flight short retry after a failed all-ready resolution. */
+  private readonly failedResolutionRetryTimers = new Map<string, unknown>();
   private readonly scheduleTimer: (fn: () => void, ms: number) => unknown;
   private readonly cancelTimer: (handle: unknown) => void;
   /** Best-effort flow logger for session tracing (no-op when not provided). */
@@ -616,7 +621,11 @@ export class RoomOrchestrator {
           });
           return;
         }
-        const result = await this.coordinator.generateOpening(ctx, correlationFor(startedState));
+        const result = await this.coordinator.generateOpening(
+          ctx,
+          correlationFor(startedState),
+          this.blackboardStore?.get(roomId),
+        );
         if (!result.ok) {
           this.log("opening_failed", { roomId, reason: result.error.reason, message: result.error.message });
           this.emitNarrationFailure(roomId, "opening", result.error.message);
@@ -775,7 +784,7 @@ export class RoomOrchestrator {
   ): void {
     const current = this.loadState(roomId);
     if (!result.ok) {
-      this.revertFailedResolution(roomId, current);
+      this.revertFailedResolution(roomId, current, result.error.message);
       return;
     }
     if (
@@ -797,7 +806,12 @@ export class RoomOrchestrator {
     });
 
     if (pendingChecks.length > 0) {
-      const next = reduce(current, { type: "DECLARE_CHECKS", checks: pendingChecks });
+      // Same clock + timeout as armRollCheckTimer below, so the countdown the
+      // client renders and the server's actual auto-roll moment agree (QA-3).
+      const rollDeadlineIso = new Date(
+        this.now().getTime() + Math.max(0, this.config.rollCheckTimeoutMs),
+      ).toISOString();
+      const next = reduce(current, { type: "DECLARE_CHECKS", checks: pendingChecks, rollDeadlineIso });
       if (next === current) {
         this.pendingResolutions.delete(roomId);
         return;
@@ -890,7 +904,7 @@ export class RoomOrchestrator {
 
     const rolled = this.coordinator.rollDeclaredCheck(declared);
     if (!rolled.ok) {
-      this.revertFailedResolution(roomId, this.loadState(roomId));
+      this.revertFailedResolution(roomId, this.loadState(roomId), "dice roll failed");
       return;
     }
     pending.resolvedByCheckId.set(checkId, rolled.value);
@@ -980,6 +994,32 @@ export class RoomOrchestrator {
     }
   }
 
+  private armFailedResolutionRetryTimer(roomId: string): void {
+    this.clearFailedResolutionRetryTimer(roomId);
+    const handle = this.scheduleTimer(() => {
+      this.failedResolutionRetryTimers.delete(roomId);
+      const state = this.store.get(roomId);
+      if (state === undefined || state.phase !== "ready_check") return;
+      const allReady =
+        state.readiness.length > 0 &&
+        state.readiness.every((entry) => entry.status === "ready");
+      if (!allReady || state.resolutionRequested) return;
+      const hostId = this.roomReader.getRoom(roomId)?.hostPlayerId;
+      if (hostId === undefined) return;
+      this.log("ready_force_retry", { roomId, round: state.roundNumber });
+      void this.dispatch(roomId, { type: "FORCE_PROCEED", by: hostId });
+    }, FAILED_RESOLUTION_RETRY_DELAY_MS);
+    this.failedResolutionRetryTimers.set(roomId, handle);
+  }
+
+  private clearFailedResolutionRetryTimer(roomId: string): void {
+    const handle = this.failedResolutionRetryTimers.get(roomId);
+    if (handle !== undefined) {
+      this.cancelTimer(handle);
+      this.failedResolutionRetryTimers.delete(roomId);
+    }
+  }
+
   private autoRollRemainingChecks(roomId: string): void {
     const pending = this.pendingResolutions.get(roomId);
     if (pending === undefined) return;
@@ -1020,7 +1060,7 @@ export class RoomOrchestrator {
     const current = this.loadState(roomId);
 
     if (!result.ok) {
-      this.revertFailedResolution(roomId, current);
+      this.revertFailedResolution(roomId, current, result.error.message);
       return;
     }
 
@@ -1135,7 +1175,7 @@ export class RoomOrchestrator {
    * without losing input (Requirements 17.2, 17.4). No-op if the round already
    * left `resolving` (e.g. halted by a revert).
    */
-  private revertFailedResolution(roomId: string, current: TurnState): void {
+  private revertFailedResolution(roomId: string, current: TurnState, reason: string): void {
     if (
       (current.phase !== "resolving" && current.phase !== "rolling") ||
       !current.resolutionRequested
@@ -1154,7 +1194,6 @@ export class RoomOrchestrator {
     };
     this.store.save(reverted);
     this.gateway.broadcastTurnState(roomId);
-    this.log("resolution_reverted", { roomId, round: reverted.roundNumber });
     // Re-arm the countdown so a reverted, all-ready round can retry once without
     // wedging forever. Further failures wait for a manual force/proceed path
     // instead of creating an unbounded AI-cost loop.
@@ -1162,6 +1201,16 @@ export class RoomOrchestrator {
     this.allReadyAt.delete(key);
     const retryCount = (this.failedResolutionRetries.get(key) ?? 0) + 1;
     this.failedResolutionRetries.set(key, retryCount);
+    const retryBudgetRemaining = retryCount <= MAX_AUTOMATIC_FAILED_RESOLUTION_RETRIES;
+    const allReady =
+      reverted.readiness.length > 0 &&
+      reverted.readiness.every((entry) => entry.status === "ready");
+    const retryInMs = retryBudgetRemaining
+      ? allReady
+        ? FAILED_RESOLUTION_RETRY_DELAY_MS
+        : reverted.readyCheckTimeoutMs
+      : undefined;
+    this.log("resolution_reverted", { roomId, round: reverted.roundNumber, reason, retryInMs });
     if (retryCount > MAX_AUTOMATIC_FAILED_RESOLUTION_RETRIES) {
       this.log("ready_retry_exhausted", { roomId, round: reverted.roundNumber, retries: retryCount });
       // Automatic retries are exhausted: surface an explicit room-visible
@@ -1170,12 +1219,17 @@ export class RoomOrchestrator {
       this.emitNarrationFailure(roomId, "resolution", "automatic retries exhausted");
       return;
     }
-    this.armReadyCheckTimer(roomId, reverted.readyCheckTimeoutMs);
+    this.emitNarrationFailure(roomId, "resolution", reason, true);
+    if (allReady) {
+      this.armFailedResolutionRetryTimer(roomId);
+    } else {
+      this.armReadyCheckTimer(roomId, reverted.readyCheckTimeoutMs);
+    }
   }
 
   /** Handle the no-scenario case: there is nothing to resolve, so just revert. */
   private applyResolutionFailure(roomId: string): void {
-    this.revertFailedResolution(roomId, this.loadState(roomId));
+    this.revertFailedResolution(roomId, this.loadState(roomId), "no scenario selected");
   }
 
   // -------------------------------------------------------------------------
@@ -1244,6 +1298,7 @@ export class RoomOrchestrator {
     roomId: string,
     phase: "opening" | "ending" | "resolution",
     reason: string,
+    retrying = false,
   ): void {
     this.gateway.broadcast(roomId, {
       type: "narration_failed",
@@ -1251,6 +1306,7 @@ export class RoomOrchestrator {
       phase,
       reason,
       retryable: true,
+      ...(retrying ? { retrying: true } : {}),
     });
   }
 

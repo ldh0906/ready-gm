@@ -364,6 +364,11 @@ function parseBlackboardDeltas(value: unknown): BlackboardDelta[] {
           deltas.push({ type: "npc_attitude", npcId: e.npcId, characterId: e.characterId, attitude: e.attitude, reason: e.reason });
         }
         break;
+      case "npc_reveal":
+        if (typeof e.npcId === "string") {
+          deltas.push({ type: "npc_reveal", npcId: e.npcId, reason: e.reason });
+        }
+        break;
       case "npc_location":
         if (typeof e.npcId === "string" && typeof e.location === "string") {
           deltas.push({ type: "npc_location", npcId: e.npcId, location: e.location, reason: e.reason });

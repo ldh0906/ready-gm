@@ -61,6 +61,7 @@ function makeState(playerIds: readonly string[], overrides: Partial<TurnState> =
       actionKind: "confirmed_action" as const,
       actionText: `${playerId}의 행동`,
     })),
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [],
@@ -1473,6 +1474,37 @@ describe("AiGmCoordinator scenario rules overlay", () => {
     const decisionPrompt = prompts.find((p) => p.includes("PHASE: decision"));
     expect(decisionPrompt).toBeDefined();
     expect(decisionPrompt).not.toContain("SCENARIO_RULES");
+  });
+
+  it("injects GM-only fronts and front progression guidance into the decision prompt", async () => {
+    const prompts: string[] = [];
+    const { coordinator } = makeHarness({
+      responder: (req) => {
+        prompts.push(req.prompt.user);
+        return phaseResponder()(req);
+      },
+    });
+    const blackboard = {
+      ...createEmptyBlackboard("room-1", "terrible-geese"),
+      fronts: [
+        { id: "pie_prank", name: "파이를 망쳐라", stage: "진행 중" },
+        { id: "laundry_prank", name: "빨래를 더럽혀라", stage: "대기" },
+      ],
+    };
+
+    const result = await coordinator.resolveRound({
+      state: makeState(["p1", "p2"]),
+      scenario: SCENARIO,
+      characters: [makeCharacter("p1", "보린"), makeCharacter("p2", "아리아")],
+      blackboard,
+    });
+
+    expect(result.ok).toBe(true);
+    const decisionPrompt = prompts.find((p) => p.includes("PHASE: decision"));
+    expect(decisionPrompt).toContain('"fronts":[{"id":"pie_prank","name":"파이를 망쳐라","stage":"진행 중"');
+    expect(decisionPrompt).toContain("fronts는 GM 전용 진행 의제입니다");
+    expect(decisionPrompt).toContain("advance_front로 stage를 \"완료\"로 바꾸고");
+    expect(decisionPrompt).toContain("\"대기\" | \"진행 중\" | \"완료\"");
   });
 });
 

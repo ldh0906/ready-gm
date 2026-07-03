@@ -63,6 +63,7 @@ function makeState(actionText: string): TurnState {
     readiness: [
       { playerId: "p1", status: "ready", actionKind: "confirmed_action", actionText },
     ],
+    actionHistory: [],
     chatLog: [],
     checks: [],
     narrativeContext: [],
