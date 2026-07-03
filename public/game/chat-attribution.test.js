@@ -10,7 +10,7 @@
  * from `characterName`; otherwise it renders just `characterName`.
  *
  * Approach mirrors integration.test.js: load the page's static <body> markup,
- * extract the inline module to a sibling temp file so `./logic.js` resolves,
+ * copy app.js to a sibling temp file so relative imports resolve,
  * dynamically import it to run the REAL wiring against the live DOM, then drive
  * turn_state / chat_message events through the injected fake channel.
  */
@@ -22,13 +22,12 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(here, "index.html"), "utf8");
 
-const scriptMatch = html.match(/<script type="module">([\s\S]*?)<\/script>/i);
-if (!scriptMatch) throw new Error("index.html must contain an inline module script");
-const inlineModuleSource = scriptMatch[1];
+const appModuleSource = readFileSync(join(here, "app.js"), "utf8");
+if (appModuleSource.trim().length === 0) throw new Error("app.js must not be empty");
 
 const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
 if (!bodyMatch) throw new Error("index.html must contain a <body>");
-const bodyMarkup = bodyMatch[1].replace(/<script[\s\S]*?<\/script>/i, "");
+const bodyMarkup = bodyMatch[1].replace(/<script\b[\s\S]*?<\/script>/gi, "");
 
 const tempFiles = [];
 let tempCounter = 0;
@@ -40,7 +39,7 @@ async function loadPage(opts = {}) {
   }
   document.body.innerHTML = bodyMarkup;
   const tmpPath = join(here, `__chat_attr_tmp_${tempCounter++}.js`);
-  writeFileSync(tmpPath, inlineModuleSource, "utf8");
+  writeFileSync(tmpPath, appModuleSource, "utf8");
   tempFiles.push(tmpPath);
   await import(/* @vite-ignore */ pathToFileURL(tmpPath).href);
 }

@@ -185,21 +185,30 @@
       parent.appendChild(typeof part === "string" ? document.createTextNode(part) : part);
     }
   }
+  const STICK_THRESHOLD_PX = 40;
+  function isNearBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD_PX;
+  }
+  function stickToBottom(el, wasNearBottom) {
+    if (wasNearBottom) el.scrollTop = el.scrollHeight;
+  }
 
   function gm(cls, who, text) {
+    const wasNearBottom = isNearBottom(storyEl);
     const d = document.createElement("div");
     d.className = "gm " + cls;
     d.append(textSpan("who", `[GM · ${who}]`), document.createTextNode(String(text)));
     storyEl.appendChild(d);
-    storyEl.scrollTop = storyEl.scrollHeight;
+    stickToBottom(storyEl, wasNearBottom);
     record(`[GM · ${who}]\n${text}\n`);
   }
   function log(cls, parts) {
+    const wasNearBottom = isNearBottom(sideEl);
     const d = document.createElement("div");
     d.className = "li " + cls;
     appendParts(d, parts);
     sideEl.appendChild(d);
-    sideEl.scrollTop = sideEl.scrollHeight;
+    stickToBottom(sideEl, wasNearBottom);
     record(`· ${d.textContent}`);
   }
 

@@ -684,6 +684,84 @@ export function buildProposalRequest(roomId, playerId, concept, traitKeys, token
 }
 
 /**
+ * `POST /rooms/{roomId}/players/{playerId}/narrative-draft` 요청 명세.
+ * @param {string} roomId
+ * @param {string} playerId
+ * @param {string} concept
+ * @param {string | null | undefined} selectedCardId
+ * @param {string} token
+ * @param {string=} ticket
+ * @returns {{ url: string, method: string, headers: Record<string, string>, body: string }}
+ */
+export function buildNarrativeDraftRequest(roomId, playerId, concept, selectedCardId, token, ticket) {
+  /** @type {Record<string, string>} */
+  const headers = {
+    "content-type": "application/json",
+    ...buildAuthHeaders(token),
+    ...buildTicketHeaders(ticket),
+  };
+  const body = { concept: trimEnds(concept) };
+  if (typeof selectedCardId === "string" && selectedCardId.trim().length > 0) {
+    body.selectedCardId = selectedCardId.trim();
+  }
+  return {
+    url:
+      "/rooms/" +
+      encodeURIComponent(toStringSafe(roomId)) +
+      "/players/" +
+      encodeURIComponent(toStringSafe(playerId)) +
+      "/narrative-draft",
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  };
+}
+
+/**
+ * Apply AI drafts only to currently blank fields, clamped to schema maxLength.
+ * @param {Record<string, string>} narrativeValues
+ * @param {SheetSchema} schema
+ * @param {Record<string, unknown>} drafts
+ * @returns {Record<string, string>}
+ */
+export function applyNarrativeDraftsToBlankFields(narrativeValues, schema, drafts) {
+  const next = { ...(narrativeValues || {}) };
+  const fields = schema && Array.isArray(schema.narrativeFields) ? schema.narrativeFields : [];
+  const byId = new Map(fields.map((field) => [field.id, field]));
+  const source = drafts && typeof drafts === "object" ? drafts : {};
+  for (const fieldId of Object.keys(source)) {
+    if (fieldId === "name") continue;
+    const field = byId.get(fieldId);
+    if (!field || typeof source[fieldId] !== "string") continue;
+    if (toStringSafe(next[fieldId]).trim().length > 0) continue;
+    next[fieldId] = clampFieldValue(source[fieldId], field.maxLength);
+  }
+  return next;
+}
+
+export function deriveWizardSteps(schema) {
+  const steps = [];
+  if (schema && Array.isArray(schema.characterCards) && schema.characterCards.length > 0) {
+    steps.push({ id: "cards", label: "역할 카드" });
+  }
+  steps.push({ id: "sheet", label: "캐릭터 시트" });
+  steps.push({ id: "confirm", label: "제안·확정" });
+  steps.push({ id: "readiness", label: "준비 현황" });
+  return steps;
+}
+
+export function wizardCanAdvance(stepId, state) {
+  if (stepId === "cards") {
+    return typeof (state && state.selectedCardId) === "string" && state.selectedCardId.trim().length > 0;
+  }
+  if (stepId === "sheet") {
+    const values = (state && state.narrativeValues) || {};
+    return toStringSafe(values.name).trim().length > 0;
+  }
+  return true;
+}
+
+/**
  * `POST /rooms/{roomId}/players/{playerId}/character` 요청 명세. (요구사항 6.1, 7.1)
  * @param {Handoff} handoff
  * @param {string} name

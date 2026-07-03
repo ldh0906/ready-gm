@@ -64,6 +64,20 @@ describe("game-play example DOM tests — static structure", () => {
     loadStaticMarkup();
   });
 
+  it("게임 CSS/JS를 외부 리소스로 로드하고 인라인 스타일·모듈 스크립트를 두지 않는다", () => {
+    const stylesheet = document.querySelector('link[rel="stylesheet"][href="./styles.css"]');
+    expect(stylesheet, "index.html must load ./styles.css").not.toBeNull();
+
+    const appScript = document.querySelector('script[type="module"][src="./app.js"]');
+    expect(appScript, "index.html must load ./app.js as a module").not.toBeNull();
+
+    expect(document.querySelectorAll("style").length, "inline style blocks are forbidden").toBe(0);
+    const inlineModules = Array.from(document.querySelectorAll('script[type="module"]')).filter(
+      (script) => !script.getAttribute("src"),
+    );
+    expect(inlineModules.length, "inline module scripts are forbidden").toBe(0);
+  });
+
   it("헤더(라운드·단계·준비·busy)·2분할 본문(#story/#side)·푸터 컨트롤이 모두 존재한다 (Req 5.1)", () => {
     // 헤더 상태 요소.
     for (const id of ["connStatus", "round", "phase", "ready", "countdown", "busy"]) {

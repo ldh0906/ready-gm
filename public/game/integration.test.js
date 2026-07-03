@@ -5,11 +5,10 @@
  * Feature: game-play
  *
  * Approach (real execution of the page, mirroring public/lobby/wiring.test.js):
- * The interactive markup and the side-effect wiring live inside index.html.
+ * The interactive markup lives in index.html and the side-effect wiring lives in app.js.
  * To exercise the REAL wiring (not a re-implementation), we:
  *   1. load the page's <body> markup into the happy-dom document,
- *   2. extract the page's inline <script type="module"> verbatim and write it to
- *      a sibling temp file so its relative `import "./logic.js"` resolves, then
+ *   2. copy app.js verbatim to a sibling temp file so relative imports resolve, then
  *   3. dynamically import that temp module so its top-level wiring runs against
  *      the live document.
  * Each test imports a freshly-named temp module so the wiring binds to a fresh
@@ -46,21 +45,20 @@ import { SESSION_ENDED_MESSAGE, CONNECTION_LOST_MESSAGE } from "./logic.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(here, "index.html"), "utf8");
 
-// 인라인 모듈 스크립트 본문(부수효과 배선)을 그대로 추출한다.
-const scriptMatch = html.match(/<script type="module">([\s\S]*?)<\/script>/i);
-if (!scriptMatch) throw new Error("index.html must contain an inline module script");
-const inlineModuleSource = scriptMatch[1];
+// 외부 모듈 스크립트 본문(부수효과 배선)을 그대로 읽는다.
+const appModuleSource = readFileSync(join(here, "app.js"), "utf8");
+if (appModuleSource.trim().length === 0) throw new Error("app.js must not be empty");
 
 // <body> 내부에서 스크립트를 제거한 정적 마크업.
 const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
 if (!bodyMatch) throw new Error("index.html must contain a <body>");
-const bodyMarkup = bodyMatch[1].replace(/<script[\s\S]*?<\/script>/i, "");
+const bodyMarkup = bodyMatch[1].replace(/<script\b[\s\S]*?<\/script>/gi, "");
 
 const tempFiles = [];
 let tempCounter = 0;
 
 /**
- * 현재 happy-dom 문서에 페이지를 적재하고, 실제 인라인 모듈을 실행한다.
+ * 현재 happy-dom 문서에 페이지를 적재하고, 실제 앱 모듈을 실행한다.
  * 주입 훅(window.__game*)은 호출 전에 이미 설정되어 있어야 한다.
  * @param {{ url?: string }} [opts]
  */
@@ -73,9 +71,9 @@ async function loadPage(opts = {}) {
   // 정적 마크업을 먼저 넣어 모듈이 참조할 DOM 요소가 존재하게 한다.
   document.body.innerHTML = bodyMarkup;
 
-  // 인라인 모듈을 형제 임시 파일로 써서 `./logic.js` 상대 import가 해석되게 한다.
+  // 앱 모듈을 형제 임시 파일로 써서 상대 import가 해석되게 한다.
   const tmpPath = join(here, `__integration_tmp_${tempCounter++}.js`);
-  writeFileSync(tmpPath, inlineModuleSource, "utf8");
+  writeFileSync(tmpPath, appModuleSource, "utf8");
   tempFiles.push(tmpPath);
   // 새 파일명이므로 매번 새 모듈 평가 → 깨끗한 초기 상태 + 현재 DOM에 배선.
   await import(/* @vite-ignore */ pathToFileURL(tmpPath).href);
@@ -426,6 +424,57 @@ describe("game-play integration tests — side-effect wiring", () => {
     expect(side.textContent).toContain("패스");
   });
 
+  it("행동 로그에 지난 라운드 이력과 라운드 구분선을 함께 렌더한다", async () => {
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+
+    fake.handlers.onOpen();
+    fake.handlers.onMessage(
+      baseTurnState({
+        roundNumber: 3,
+        actionHistory: [
+          {
+            round: 1,
+            playerId: "h1",
+            kind: "confirmed_action",
+            text: "파이를 엎는다",
+            characterName: "알렉스",
+            displayName: "라면",
+          },
+          { round: 2, playerId: "p2", kind: "pass", text: null, characterName: "브리" },
+        ],
+        readiness: [
+          {
+            playerId: "h1",
+            status: "ready",
+            actionKind: "confirmed_action",
+            actionText: "울타리를 넘는다",
+            characterName: "알렉스",
+            displayName: "라면",
+          },
+          { playerId: "p2", status: "not_ready", actionKind: null, actionText: null },
+        ],
+      }),
+    );
+    await flush();
+
+    const side = document.getElementById("side");
+    expect(Array.from(side.querySelectorAll(".round-sep")).map((el) => el.textContent)).toEqual([
+      "— 1라운드 —",
+      "— 2라운드 —",
+      "— 3라운드 —",
+    ]);
+    expect(side.textContent).toContain("파이를 엎는다");
+    expect(side.textContent).toContain("패스");
+    expect(side.textContent).toContain("울타리를 넘는다");
+  });
+
   it("입력 잠금(resolving) 동안에는 명령을 전송하지 않는다 (Req 7.3)", async () => {
     const fake = makeFakeConnect();
     const timers = makeManualTimers();
@@ -611,6 +660,66 @@ describe("game-play integration tests — side-effect wiring", () => {
     expect(second.classList.contains("full")).toBe(false);
     expect(second.querySelectorAll(".seg").length).toBe(8);
     expect(second.querySelectorAll(".seg.on").length).toBe(3);
+  });
+
+  it("분리된 app.js 모듈이 turn_state와 판정 이벤트를 한 흐름에서 렌더한다", async () => {
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+    fake.handlers.onOpen();
+    fake.handlers.onMessage(
+      baseTurnState({
+        readiness: [
+          { playerId: "h1", characterName: "용사", status: "ready", actionKind: null, actionText: null },
+          { playerId: "p2", characterName: "도적", status: "not_ready", actionKind: null, actionText: null },
+        ],
+      }),
+    );
+    await flush();
+
+    expect(document.getElementById("story").textContent).toContain("도입부 서사");
+    expect(document.getElementById("side").textContent).toContain("엘프");
+    expect(document.getElementById("roster").textContent).toContain("용사");
+
+    const pendingCheck = {
+      checkId: "check-1",
+      characterId: "c-h1",
+      characterName: "용사",
+      playerId: "h1",
+      attribute: "Wits",
+      attributeLabel: "지혜",
+      difficulty: "Average",
+      advantage: "none",
+      visibility: "player",
+      status: "pending",
+    };
+    fake.handlers.onMessage({ type: "checks_pending", checks: [pendingCheck] });
+    await flush();
+
+    const checkTray = document.getElementById("checkTray");
+    expect(checkTray.textContent).toContain("용사 · 지혜");
+    expect(checkTray.textContent).toContain("굴리기");
+
+    fake.handlers.onMessage({
+      type: "check_rolled",
+      check: {
+        ...pendingCheck,
+        status: "rolled",
+        roll: 2,
+        rolls: [2],
+        outcome: "Success",
+      },
+    });
+    await flush();
+
+    const renderedCheck = checkTray.querySelector('[data-check-id="check-1"]');
+    expect(renderedCheck).not.toBeNull();
+    expect(renderedCheck.querySelector(".fate-die")).not.toBeNull();
   });
 
   it("기본 connect는 /ws URL에 관전자 playerId를 포함한다(joined 플레이어 본인 식별자)", async () => {

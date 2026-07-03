@@ -93,14 +93,17 @@ export const NARRATION_FAILED_MESSAGES = {
   opening: "도입부 생성에 실패했습니다. 잠시 후 자동으로 다시 시도됩니다.",
   ending: "마무리 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
   resolution: "GM 서사 생성이 반복 실패했습니다. 준비 완료를 다시 눌러 재시도해 주세요.",
+  retrying: "GM이 결과를 쓰다 실패해 자동으로 다시 시도합니다. 판정이 다시 나타나면 한 번 더 굴려 주세요.",
 };
 
 /**
  * narration_failed의 phase를 한국어 안내로 변환한다(알 수 없는 phase는 일반 안내).
  * @param {unknown} phase
+ * @param {boolean=} retrying
  * @returns {string}
  */
-export function narrationFailureMessage(phase) {
+export function narrationFailureMessage(phase, retrying = false) {
+  if (retrying) return NARRATION_FAILED_MESSAGES.retrying;
   return (
     NARRATION_FAILED_MESSAGES[/** @type {keyof typeof NARRATION_FAILED_MESSAGES} */ (phase)] ||
     "GM 서사 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
@@ -152,6 +155,16 @@ export function narrationFailureMessage(phase) {
  */
 
 /**
+ * @typedef {Object} ActionHistoryEntry
+ * @property {number} round
+ * @property {string} playerId
+ * @property {"confirmed_action" | "pass" | "auto_pass"} kind
+ * @property {string | null} text
+ * @property {string=} characterName
+ * @property {string=} displayName
+ */
+
+/**
  * @typedef {Object} GameState
  * @property {Handoff} handoff                    인계(불변)
  * @property {boolean} handoffValid
@@ -162,7 +175,9 @@ export function narrationFailureMessage(phase) {
  * @property {number | null} roundNumber
  * @property {Phase | null} phase
  * @property {ReadinessEntry[]} readiness          준비 수 도출 원천 (요구사항 5.2, 5.3)
+ * @property {ActionHistoryEntry[]} actionHistory  지난 라운드 행동 이력(서버 권위)
  * @property {string | null} readyCheckDeadline    카운트다운 기준 (요구사항 5.4)
+ * @property {string | null} rollCheckDeadline     자동 굴림 카운트다운 기준 (QA-3)
  * @property {number} chatCount                    append-new-only 추적 (요구사항 4.1, 4.4)
  * @property {NarrationEntry[]} narrationEntries   MAX_ENTRIES 상한 (요구사항 3.3)
  * @property {ChatEntry[]} chatEntries             표시된 채팅(append-new-only)
@@ -242,7 +257,9 @@ export function createInitialState(handoff) {
     roundNumber: null,
     phase: null,
     readiness: [],
+    actionHistory: [],
     readyCheckDeadline: null,
+    rollCheckDeadline: null,
     chatCount: 0,
     narrationEntries: [],
     chatEntries: [],
@@ -425,7 +442,12 @@ export function eventToAction(event) {
     case "narration_failed":
       // 서버가 명시한 서사 생성 실패(도입부/마무리/라운드 재시도 소진). 사용자에게
       // 침묵 대신 실패와 재시도 방법을 알린다.
-      return { type: "NARRATION_FAILED", phase: event.phase, retryable: event.retryable === true };
+      return {
+        type: "NARRATION_FAILED",
+        phase: event.phase,
+        retryable: event.retryable === true,
+        retrying: event.retrying === true,
+      };
     case "checks_pending":
       return { type: "CHECKS_PENDING", checks: event.checks };
     case "check_rolled":
@@ -746,6 +768,27 @@ export function isInputLocked(phase) {
 }
 
 /**
+ * 본인 판정의 "굴리기" 버튼을 누를 수 있는지 판단한다(순수 함수).
+ *
+ * 채팅/행동 입력과 별도의 가드다: isInputLocked()는 rolling 단계에서 채팅 입력을
+ * 잠그지만, 굴림 자체는 rolling 단계에서만 가능한 동작이므로 전역 입력 잠금과
+ * 무관하게 허용해야 한다(QA: rolling 중 굴리기 버튼이 항상 비활성이던 회귀 수정).
+ *
+ * @param {{ handoffValid?: boolean, turnReceived?: boolean, ended?: boolean, connection?: string, phase?: string | null }} state
+ * @returns {boolean}
+ */
+export function canRollCheck(state) {
+  if (!state) return false;
+  return (
+    state.handoffValid === true &&
+    state.turnReceived === true &&
+    state.ended !== true &&
+    state.connection === ConnectionStatus.OPEN &&
+    state.phase === Phase.ROLLING
+  );
+}
+
+/**
  * 세션 종료 여부를 감지한다. `phase === "ended"` 또는 `narrationKind === "closing"`이면 true.
  * (요구사항 9.1)
  *
@@ -879,10 +922,17 @@ export function reduce(state, action) {
         roundNumber: turnState.roundNumber != null ? turnState.roundNumber : state.roundNumber,
         phase,
         readiness: Array.isArray(turnState.readiness) ? turnState.readiness : state.readiness,
+        actionHistory: Array.isArray(turnState.actionHistory) ? turnState.actionHistory : [],
         readyCheckDeadline:
           turnState.readyCheckDeadline !== undefined
             ? turnState.readyCheckDeadline
             : state.readyCheckDeadline,
+        rollCheckDeadline:
+          turnState.rollCheckDeadline !== undefined
+            ? turnState.rollCheckDeadline
+            : phase === Phase.ROLLING
+              ? state.rollCheckDeadline
+              : null,
         chatCount: nextCount,
         chatEntries,
         narrationEntries,
@@ -964,11 +1014,15 @@ export function reduce(state, action) {
     // 도입부/마무리/라운드 재시도 소진 실패를 사용자에게 표면화한다. 다음 서사가
     // 실제로 도착하면(NARRATION) 안내를 지운다.
     case "NARRATION_FAILED": {
-      return { ...state, narrationFailedNotice: narrationFailureMessage(action.phase) };
+      return { ...state, narrationFailedNotice: narrationFailureMessage(action.phase, action.retrying === true) };
     }
 
     case "CHECKS_PENDING": {
-      return { ...state, rollingChecks: Array.isArray(action.checks) ? action.checks : [] };
+      return {
+        ...state,
+        rollingChecks: Array.isArray(action.checks) ? action.checks : [],
+        narrationFailedNotice: null,
+      };
     }
 
     case "CHECK_ROLLED": {
@@ -1252,6 +1306,50 @@ export function actionLogModel(turnState) {
       text: isConfirm ? (item.actionText != null ? String(item.actionText) : "") : null,
       auto: kind === "auto_pass",
     });
+  }
+  return out;
+}
+
+/**
+ * 지난 라운드 행동 이력과 현재 라운드 readiness 기반 행동 로그를 병합한다.
+ *
+ * 서버가 확정한 `actionHistory`는 라운드 전환 뒤에도 유지되고, 현재 라운드의 아직
+ * 전환되지 않은 행동은 기존 `actionLogModel`로 도출해 같은 표시 모델로 이어 붙인다.
+ * 이름 폴백은 `actionLogModel`과 같은 규칙을 따른다. 예외를 던지지 않는다.
+ *
+ * @param {{ actionHistory?: any, readiness?: any, chatLog?: ChatEntry[], roundNumber?: any }} turnState
+ * @returns {Array<{ round: number, playerId: string, characterName: string, displayName: string, kind: "confirm" | "pass", text: string | null, auto: boolean }>}
+ */
+export function actionHistoryModel(turnState) {
+  const ts = turnState || {};
+  const history = Array.isArray(ts.actionHistory) ? ts.actionHistory : [];
+  const chatLog = Array.isArray(ts.chatLog) ? ts.chatLog : [];
+  const out = [];
+  for (const entry of history) {
+    const item = entry || {};
+    const rawKind = item.kind;
+    if (rawKind !== "confirmed_action" && rawKind !== "pass" && rawKind !== "auto_pass") {
+      continue;
+    }
+    const playerId = item.playerId;
+    const intendedDisplay = item.displayName != null ? trimToString(item.displayName) : "";
+    const displayName =
+      intendedDisplay.length > 0 ? intendedDisplay : latestChatDisplayName(playerId, chatLog);
+    const characterName = characterNameFor(playerId, item, chatLog);
+    const isConfirm = rawKind === "confirmed_action";
+    out.push({
+      round: Number.isFinite(Number(item.round)) ? Number(item.round) : 0,
+      playerId,
+      characterName,
+      displayName,
+      kind: isConfirm ? "confirm" : "pass",
+      text: isConfirm ? (item.text != null ? String(item.text) : "") : null,
+      auto: rawKind === "auto_pass",
+    });
+  }
+  const currentRound = Number.isFinite(Number(ts.roundNumber)) ? Number(ts.roundNumber) : 0;
+  for (const entry of actionLogModel(ts)) {
+    out.push({ round: currentRound, ...entry });
   }
   return out;
 }

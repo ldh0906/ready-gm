@@ -101,9 +101,17 @@
   // can hand out a single link without embedding the secret in the source.
   const TOKEN = new URLSearchParams(location.search).get("token") || "";
   let ws=null, roomId=null, playerId=null, ticket=null, myName="";
+  const STICK_THRESHOLD_PX = 40;
+  function isNearBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD_PX;
+  }
+  function stickToBottom(el, wasNearBottom) {
+    if (wasNearBottom) el.scrollTop = el.scrollHeight;
+  }
 
   function append(paneId, cls, parts) {
     const pane = $(paneId);
+    const wasNearBottom = isNearBottom(pane);
     const d = document.createElement("div");
     d.className = (paneId === "story" ? "gm " : "li ") + cls;
     for (const part of parts) {
@@ -111,7 +119,7 @@
     }
     pane.appendChild(d);
     while (pane.childElementCount > MAX_ENTRIES) pane.removeChild(pane.firstChild);
-    pane.scrollTop = pane.scrollHeight;
+    stickToBottom(pane, wasNearBottom);
   }
   function named(prefix, text) {
     const el = document.createElement(prefix === "strong" ? "b" : "span");
