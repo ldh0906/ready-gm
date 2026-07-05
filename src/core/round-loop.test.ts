@@ -107,6 +107,28 @@ describe("SEND_CHAT (Task 7.3, R6.1/6.3/6.4)", () => {
     expect(state.chatLog[1].characterName).toBe("Borin");
   });
 
+  it("carries in-character chat only when SEND_CHAT opts in", () => {
+    let state = started([HOST, P2]);
+    state = reduce(state, {
+      type: "SEND_CHAT",
+      from: HOST,
+      characterName: "Aria",
+      text: "누구 있어요?",
+      ts: "t1",
+      inCharacter: true,
+    });
+    state = reduce(state, {
+      type: "SEND_CHAT",
+      from: P2,
+      characterName: "Borin",
+      text: "table talk",
+      ts: "t2",
+    });
+
+    expect(state.chatLog[0]).toHaveProperty("inCharacter", true);
+    expect(state.chatLog[1]).not.toHaveProperty("inCharacter");
+  });
+
   it("rejects messages from non-members (no-op)", () => {
     const state = started([HOST, P2]);
     const next = reduce(state, {
@@ -119,7 +141,9 @@ describe("SEND_CHAT (Task 7.3, R6.1/6.3/6.4)", () => {
     expect(next).toEqual(state);
   });
 
-  it("rejects chat outside the free-chat phase (no-op)", () => {
+  it("accepts table talk while the round is resolving (P-1)", () => {
+    // P-1: waiting for a result is exactly when friends banter. Chat lands in
+    // chatLog during resolving/rolling; only the action controls stay locked.
     let state = started([HOST]);
     state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "swing", deadline: null });
     expect(state.phase).toBe("resolving");
@@ -127,7 +151,37 @@ describe("SEND_CHAT (Task 7.3, R6.1/6.3/6.4)", () => {
       type: "SEND_CHAT",
       from: HOST,
       characterName: "Aria",
-      text: "late",
+      text: "긴장되네",
+      ts: "t",
+    });
+    expect(next.chatLog.map((c) => c.text)).toEqual(["긴장되네"]);
+    expect(next.phase).toBe("resolving"); // chat does not disturb resolution
+  });
+
+  it("accepts table talk while rolling (P-1)", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "sneak", deadline: null });
+    state = reduce(state, { type: "DECLARE_CHECKS", checks: [samplePendingCheck] });
+    expect(state.phase).toBe("rolling");
+    const next = reduce(state, {
+      type: "SEND_CHAT",
+      from: HOST,
+      characterName: "Aria",
+      text: "굴려봐",
+      ts: "t",
+    });
+    expect(next.chatLog.map((c) => c.text)).toEqual(["굴려봐"]);
+    expect(next.phase).toBe("rolling");
+  });
+
+  it("rejects chat once the session has ended (no-op)", () => {
+    let state = started([HOST]);
+    state = { ...state, phase: "ended" };
+    const next = reduce(state, {
+      type: "SEND_CHAT",
+      from: HOST,
+      characterName: "Aria",
+      text: "끝난 뒤",
       ts: "t",
     });
     expect(next).toEqual(state);
@@ -350,6 +404,51 @@ describe("at-most-once resolution and round advancement (Task 9.6, R10.3/10.5/11
     expect(state.chatLog).toEqual([]);
   });
 
+  it("carries the finished round's chat into chatHistory on advance and clears chatLog (F8)", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "SEND_CHAT", from: HOST, characterName: "Aria", text: "안녕", ts: "t1" });
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "swing", deadline: null });
+    expect(state.phase).toBe("resolving");
+    state = reduce(state, {
+      type: "RESOLUTION_READY",
+      narration: "결과",
+      checks: [],
+      endingReached: false,
+    });
+    expect(state.chatLog).toEqual([]);
+    expect(state.chatHistory?.map((c) => c.text)).toEqual(["안녕"]);
+  });
+
+  it("accumulates chat across multiple rounds in chatHistory (F8)", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "SEND_CHAT", from: HOST, characterName: "Aria", text: "r1", ts: "t1" });
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "a", deadline: null });
+    state = reduce(state, { type: "RESOLUTION_READY", narration: "n1", checks: [], endingReached: false });
+    state = reduce(state, { type: "SEND_CHAT", from: HOST, characterName: "Aria", text: "r2", ts: "t2" });
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "b", deadline: null });
+    state = reduce(state, { type: "RESOLUTION_READY", narration: "n2", checks: [], endingReached: false });
+    expect(state.chatHistory?.map((c) => c.text)).toEqual(["r1", "r2"]);
+    expect(state.chatLog).toEqual([]);
+  });
+
+  it("retains chat in chatHistory when the session ends (F8)", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "SEND_CHAT", from: HOST, characterName: "Aria", text: "마지막", ts: "t1" });
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "a", deadline: null });
+    state = reduce(state, { type: "RESOLUTION_READY", narration: "끝", checks: [], endingReached: true });
+    expect(state.phase).toBe("ended");
+    expect(state.chatHistory?.map((c) => c.text)).toEqual(["마지막"]);
+  });
+
+  it("keeps chatHistory empty when no chat occurred (F8) — serializer drops it", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "go", deadline: null });
+    state = reduce(state, { type: "RESOLUTION_READY", narration: "n", checks: [], endingReached: false });
+    // START_SESSION seeds an empty chatHistory; with no chat it stays empty and
+    // serializeTurnState omits it entirely (see turn-state.test.ts).
+    expect(state.chatHistory ?? []).toEqual([]);
+  });
+
   it("RESOLUTION_READY appends confirmed/pass/auto_pass action history before resetting readiness", () => {
     let state = started([HOST, P2, P3]);
     state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다", deadline: null });
@@ -369,6 +468,35 @@ describe("at-most-once resolution and round advancement (Task 9.6, R10.3/10.5/11
       { round: 1, playerId: P3, kind: "auto_pass", text: null },
     ]);
     expect(next.readiness.every((entry) => entry.actionKind === null)).toBe(true);
+  });
+
+  it("RESOLUTION_READY appends public rolled check results to action history and excludes GM checks", () => {
+    let state = started([HOST, P2]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "문을 연다", deadline: null });
+    state = reduce(state, { type: "PASS", from: P2, deadline: null });
+    const publicPending = { ...samplePendingCheck, checkId: "public-check", playerId: HOST };
+    const gmPending = { ...samplePendingCheck, checkId: "gm-check", characterId: "gm-char", playerId: null, visibility: "gm" as const };
+    state = reduce(state, { type: "DECLARE_CHECKS", checks: [publicPending, gmPending] });
+    state = reduce(state, { type: "CHECK_ROLLED", checkId: "public-check", check: sampleCheck });
+
+    const next = reduce(state, {
+      type: "RESOLUTION_READY",
+      narration: "해결",
+      checks: [sampleCheck, { ...sampleCheck, characterId: "gm-char", attribute: "Wits", visibility: "gm" }],
+      endingReached: false,
+    });
+
+    expect(next.actionHistory).toContainEqual({
+      round: 1,
+      playerId: HOST,
+      kind: "check_result",
+      text: null,
+      attribute: samplePendingCheck.attribute,
+      difficulty: samplePendingCheck.difficulty,
+      roll: sampleCheck.roll,
+      outcome: sampleCheck.outcome,
+    });
+    expect(next.actionHistory.filter((entry) => entry.kind === "check_result")).toHaveLength(1);
   });
 
   it("RESOLUTION_READY keeps only the newest 200 action history entries", () => {
@@ -488,6 +616,42 @@ describe("two-phase check rolling", () => {
     ]);
     expect(rolled.checks).toEqual([sampleCheck]);
     expect(duplicate).toEqual(rolled);
+  });
+
+  it("CHECK_ROLLED updates the roll deadline only when nextRollDeadlineIso is supplied", () => {
+    let state = started([HOST]);
+    state = reduce(state, { type: "CONFIRM_ACTION", from: HOST, action: "go", deadline: null });
+    state = reduce(state, {
+      type: "DECLARE_CHECKS",
+      checks: [
+        samplePendingCheck,
+        { ...samplePendingCheck, checkId: "check-2", characterId: "char-2" },
+        { ...samplePendingCheck, checkId: "check-3", characterId: "char-3" },
+      ],
+      rollDeadlineIso: "2030-01-01T00:00:00.000Z",
+    });
+
+    const omitted = reduce(state, {
+      type: "CHECK_ROLLED",
+      checkId: samplePendingCheck.checkId,
+      check: sampleCheck,
+    });
+    const updated = reduce(state, {
+      type: "CHECK_ROLLED",
+      checkId: samplePendingCheck.checkId,
+      check: sampleCheck,
+      nextRollDeadlineIso: "2030-01-01T00:00:05.000Z",
+    });
+    const cleared = reduce(state, {
+      type: "CHECK_ROLLED",
+      checkId: samplePendingCheck.checkId,
+      check: sampleCheck,
+      nextRollDeadlineIso: null,
+    });
+
+    expect(omitted.rollCheckDeadline).toBe("2030-01-01T00:00:00.000Z");
+    expect(updated.rollCheckDeadline).toBe("2030-01-01T00:00:05.000Z");
+    expect(cleared.rollCheckDeadline).toBeNull();
   });
 });
 

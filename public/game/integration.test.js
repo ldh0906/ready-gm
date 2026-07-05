@@ -173,6 +173,7 @@ function clearHooks() {
   delete window.__gameNow;
   delete window.__gameSetInterval;
   delete window.__gameClearInterval;
+  delete window.__gameForceMotion;
 }
 
 beforeEach(() => {
@@ -183,6 +184,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   clearHooks();
 });
 
@@ -197,6 +199,10 @@ afterAll(() => {
 });
 
 describe("game-play integration tests — side-effect wiring", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("offline"))));
+  });
+
   it("유효 인계 시 connect가 roomId로 호출되고 onOpen → 연결 활성 표시 (Req 2.1)", async () => {
     const fake = makeFakeConnect();
     const timers = makeManualTimers();
@@ -283,6 +289,100 @@ describe("game-play integration tests — side-effect wiring", () => {
     expect(story.querySelector(".gm.opening")).not.toBeNull();
   });
 
+  it("sheet-schema 장르 메타를 body 무드 클래스로 반영한다", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ genre: "고딕 호러", scenarioTitle: "잿빛 저택" }),
+    })));
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+
+    expect(fetch).toHaveBeenCalledWith("/rooms/r1/sheet-schema", expect.objectContaining({
+      method: "GET",
+      credentials: "same-origin",
+    }));
+    expect(document.body.classList.contains("mood-horror")).toBe(true);
+  });
+
+  it("sheet-schema fetch 실패는 기존 화면 룩을 유지한다", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("network"))));
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+
+    expect(document.body.classList.contains("mood-horror")).toBe(false);
+    expect(document.body.classList.contains("mood-comedy")).toBe(false);
+    expect(document.body.classList.contains("mood-fantasy")).toBe(false);
+  });
+
+  it("turn_state sceneLocation을 장면 카드로 표시하고 없으면 숨긴다", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ genre: "정통 판타지", scenarioTitle: "잿빛 저택" }),
+    })));
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+    fake.handlers.onOpen();
+    fake.handlers.onMessage(baseTurnState({ sceneLocation: "검은 숲 입구" }));
+    await flush();
+
+    const card = document.getElementById("sceneCard");
+    expect(card.hidden).toBe(false);
+    expect(card.textContent).toContain("검은 숲 입구");
+    expect(card.textContent).toContain("잿빛 저택");
+
+    fake.handlers.onMessage(baseTurnState({ sceneLocation: null }));
+    await flush();
+    expect(card.hidden).toBe(true);
+  });
+
+  it("GM 서사 kind별 요소를 책자화 스타일 대상으로 유지한다", async () => {
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+
+    fake.handlers.onOpen();
+    for (const [kind, text] of [
+      ["opening", "장면이 열린다."],
+      ["resolution", "결과가 드러난다."],
+      ["closing", "막이 내린다."],
+    ]) {
+      fake.handlers.onMessage({
+        type: "narration",
+        roomId: "r1",
+        narration: { kind, roundNumber: 1, text },
+      });
+    }
+    await flush();
+
+    const story = document.getElementById("story");
+    expect(story.querySelector(".gm.opening")).not.toBeNull();
+    expect(story.querySelector(".gm.resolution")).not.toBeNull();
+    expect(story.querySelector(".gm.closing")).not.toBeNull();
+  });
+
   it("라이브 chat_message → characterName 귀속으로 사이드바에 추가된다 (Req 4.2, 4.3)", async () => {
     const fake = makeFakeConnect();
     const timers = makeManualTimers();
@@ -365,11 +465,19 @@ describe("game-play integration tests — side-effect wiring", () => {
     const msg = document.getElementById("msg");
     const side = document.getElementById("side");
 
-    // 대사("")는 채팅으로 전송 + 입력 비우기. 채팅은 서버 echo이므로 로컬 에코 없음.
+    // 대사("")는 인물 대사로 전송 + 입력 비우기. 대사는 서버 echo이므로 로컬 에코 없음.
     msg.value = '"안녕하세요"';
     document.getElementById("sendBtn").click();
     await flush();
-    expect(fake.sent).toContainEqual({ type: "chat", text: "안녕하세요" });
+    expect(fake.sent).toContainEqual({ type: "say", text: "안녕하세요" });
+    expect(msg.value).toBe("");
+
+    // 행동에 딸린 따옴표 대사는 say, 나머지 행동은 confirm으로 각각 전송된다.
+    msg.value = '문을 열며 "누구 있어요?"';
+    document.getElementById("sendBtn").click();
+    await flush();
+    expect(fake.sent).toContainEqual({ type: "say", text: "누구 있어요?" });
+    expect(fake.sent).toContainEqual({ type: "confirm", action: "문을 열며" });
     expect(msg.value).toBe("");
 
     // 따옴표 없는 행동은 확정으로 전송 + 입력 비우기.
@@ -475,7 +583,7 @@ describe("game-play integration tests — side-effect wiring", () => {
     expect(side.textContent).toContain("울타리를 넘는다");
   });
 
-  it("입력 잠금(resolving) 동안에는 명령을 전송하지 않는다 (Req 7.3)", async () => {
+  it("결과 대기(resolving) 중에는 행동 확정은 잠기지만 잡담(채팅)은 전송된다 (P-1)", async () => {
     const fake = makeFakeConnect();
     const timers = makeManualTimers();
     window.__gameConnect = fake.connect;
@@ -489,18 +597,30 @@ describe("game-play integration tests — side-effect wiring", () => {
     fake.handlers.onMessage(baseTurnState({ phase: "resolving" }));
     await flush();
 
-    // resolving이면 입력 컨트롤이 비활성이다(Req 7.1).
-    expect(document.getElementById("sendBtn").disabled).toBe(true);
-    expect(document.getElementById("msg").disabled).toBe(true);
+    // P-1: 채팅 입력/보내기는 열려 있고, 행동 컨트롤(패스/수정)은 잠긴다.
+    expect(document.getElementById("sendBtn").disabled).toBe(false);
+    expect(document.getElementById("msg").disabled).toBe(false);
+    expect(document.getElementById("passBtn").disabled).toBe(true);
+    expect(document.getElementById("reviseBtn").disabled).toBe(true);
 
+    // 입력 전량이 채팅으로 전송된다(따옴표 여부 무관). 행동 확정(confirm)은 전송되지 않는다.
     const before = fake.sent.length;
     const msg = document.getElementById("msg");
-    msg.value = "보내면 안 됨";
+    msg.value = "문을 열어본다";
     document.getElementById("sendBtn").click();
     await flush();
 
-    // 잠금 동안 클릭해도 아무 명령도 전송되지 않는다.
-    expect(fake.sent.length).toBe(before);
+    expect(fake.sent.length).toBe(before + 1);
+    const last = fake.sent[fake.sent.length - 1];
+    expect(last.type).toBe("chat");
+    expect(last.text).toBe("문을 열어본다");
+    expect(fake.sent.some((c) => c.type === "confirm")).toBe(false);
+    // 행동 구문이 감지되어도 별도 힌트는 표시하지 않는다.
+    expect(document.getElementById("chatOnlyHint")).toBeNull();
+    expect(document.body.textContent).not.toContain("지금은 대사만 보낼 수 있어요");
+    expect(msg.placeholder).toBe("행동을 적고, 대사는 따옴표로… (예: 문을 열며 \"누구 있어요?\")");
+    // 입력창은 비워진다.
+    expect(msg.value).toBe("");
   });
 
   it("끊김 표시 + 고정 간격 재연결, 끊김 동안 명령 미전송 (Req 8.1, 8.3, 8.4)", async () => {
@@ -702,8 +822,10 @@ describe("game-play integration tests — side-effect wiring", () => {
     await flush();
 
     const checkTray = document.getElementById("checkTray");
-    expect(checkTray.textContent).toContain("용사 · 지혜");
-    expect(checkTray.textContent).toContain("굴리기");
+    expect(checkTray.textContent).toContain("용사 차례");
+    expect(checkTray.textContent).toContain("내 판정 굴리기");
+    expect(document.getElementById("rollRitual").hidden).toBe(false);
+    expect(document.getElementById("rollRitual").textContent).toContain("용사 · 지혜");
 
     fake.handlers.onMessage({
       type: "check_rolled",
@@ -717,9 +839,185 @@ describe("game-play integration tests — side-effect wiring", () => {
     });
     await flush();
 
-    const renderedCheck = checkTray.querySelector('[data-check-id="check-1"]');
-    expect(renderedCheck).not.toBeNull();
-    expect(renderedCheck.querySelector(".fate-die")).not.toBeNull();
+    await vi.dynamicImportSettled?.();
+    expect(document.getElementById("rollRitual").textContent).toContain("난이도 보통 · 결과 성공");
+  });
+
+  it("로스터에 코인 이니셜과 본인/판정 대기 상태를 렌더한다", async () => {
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+    fake.handlers.onOpen();
+    fake.handlers.onMessage(
+      baseTurnState({
+        phase: "rolling",
+        readiness: [
+          { playerId: "h1", characterName: "용사", status: "ready", actionKind: "confirmed_action", actionText: "간다" },
+          { playerId: "p2", characterName: "도적", status: "not_ready", actionKind: null, actionText: null },
+        ],
+        rollingChecks: [
+          {
+            checkId: "check-h1",
+            characterId: "c-h1",
+            characterName: "용사",
+            playerId: "h1",
+            attribute: "Wits",
+            difficulty: "Average",
+            advantage: "none",
+            visibility: "player",
+            status: "pending",
+          },
+        ],
+      }),
+    );
+    await flush();
+
+    const selfRow = document.querySelector("#roster .roster-row.self");
+    expect(selfRow).not.toBeNull();
+    expect(selfRow.classList.contains("acted")).toBe(true);
+    expect(selfRow.classList.contains("rolling")).toBe(true);
+    expect(selfRow.querySelector(".roster-coin").textContent).toBe("용");
+    expect(selfRow.textContent).toContain("🎲");
+  });
+
+  it("본인 수동 check_rolled는 주사위 의식 오버레이를 표시하고 Esc로 닫는다", async () => {
+    vi.useFakeTimers();
+    window.__gameForceMotion = true;
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+    fake.handlers.onOpen();
+    const pendingCheck = {
+      checkId: "check-ritual",
+      characterId: "c-h1",
+      characterName: "용사",
+      playerId: "h1",
+      attribute: "Wits",
+      attributeLabel: "지혜",
+      difficulty: "Average",
+      advantage: "none",
+      visibility: "player",
+      status: "pending",
+    };
+    fake.handlers.onMessage(baseTurnState({ phase: "rolling", rollingChecks: [pendingCheck] }));
+    await flush();
+    fake.handlers.onMessage({
+      type: "check_rolled",
+      check: { ...pendingCheck, status: "rolled", roll: 2, rolls: [2], outcome: "Success" },
+    });
+    await flush();
+
+    const ritual = document.getElementById("rollRitual");
+    expect(ritual.hidden).toBe(false);
+    expect(ritual.textContent).toContain("용사 · 지혜");
+    await vi.advanceTimersByTimeAsync(3200);
+    await flush();
+    expect(ritual.textContent).toContain("난이도 보통 · 결과 성공");
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flush();
+    expect(ritual.hidden).toBe(true);
+  });
+
+  it("타인/자동 굴림은 자동 오픈하지 않고 reduced-motion은 오버레이를 유지한다", async () => {
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+    fake.handlers.onOpen();
+    const otherCheck = {
+      checkId: "check-other",
+      characterId: "c-p2",
+      characterName: "도적",
+      playerId: "p2",
+      attribute: "Agility",
+      difficulty: "Easy",
+      advantage: "none",
+      visibility: "player",
+      status: "pending",
+    };
+    fake.handlers.onMessage(baseTurnState({ phase: "rolling", rollingChecks: [otherCheck] }));
+    fake.handlers.onMessage({
+      type: "check_rolled",
+      check: { ...otherCheck, status: "rolled", roll: 1, rolls: [1], outcome: "Success" },
+    });
+    await flush();
+    expect(document.getElementById("rollRitual").hidden).toBe(true);
+
+    const myAutoCheck = { ...otherCheck, checkId: "check-auto", playerId: "h1", characterName: "용사" };
+    fake.handlers.onMessage(baseTurnState({ phase: "rolling", rollingChecks: [myAutoCheck] }));
+    await flush();
+    expect(document.getElementById("rollRitual").hidden).toBe(false);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flush();
+    expect(document.getElementById("rollRitual").hidden).toBe(true);
+    fake.handlers.onMessage({
+      type: "check_rolled",
+      check: { ...myAutoCheck, status: "rolled", roll: 1, rolls: [1], outcome: "Success", autoRolled: true },
+    });
+    await flush();
+    expect(document.getElementById("rollRitual").hidden).toBe(true);
+
+    const myReducedCheck = { ...otherCheck, checkId: "check-reduced", playerId: "h1", characterName: "용사" };
+    fake.handlers.onMessage(baseTurnState({ phase: "rolling", rollingChecks: [myReducedCheck] }));
+    fake.handlers.onMessage({
+      type: "check_rolled",
+      check: { ...myReducedCheck, status: "rolled", roll: 1, rolls: [1], outcome: "Success" },
+    });
+    await flush();
+    const ritual = document.getElementById("rollRitual");
+    expect(ritual.hidden).toBe(false);
+    expect(ritual.textContent).toContain("난이도 쉬움 · 결과 성공");
+  });
+
+  it("주사위 의식 오버레이는 클릭으로 즉시 닫힌다", async () => {
+    window.__gameForceMotion = true;
+    const fake = makeFakeConnect();
+    const timers = makeManualTimers();
+    window.__gameConnect = fake.connect;
+    window.__gameSetInterval = timers.setInterval;
+    window.__gameClearInterval = timers.clearInterval;
+
+    await loadPage();
+    await flush();
+    fake.handlers.onOpen();
+    const pendingCheck = {
+      checkId: "check-click-close",
+      characterId: "c-h1",
+      characterName: "용사",
+      playerId: "h1",
+      attribute: "Wits",
+      difficulty: "Average",
+      advantage: "none",
+      visibility: "player",
+      status: "pending",
+    };
+    fake.handlers.onMessage(baseTurnState({ phase: "rolling", rollingChecks: [pendingCheck] }));
+    fake.handlers.onMessage({
+      type: "check_rolled",
+      check: { ...pendingCheck, status: "rolled", roll: 2, rolls: [2], outcome: "Success" },
+    });
+    await flush();
+
+    const ritual = document.getElementById("rollRitual");
+    expect(ritual.hidden).toBe(false);
+    ritual.click();
+    await flush();
+    expect(ritual.hidden).toBe(true);
   });
 
   it("기본 connect는 /ws URL에 관전자 playerId를 포함한다(joined 플레이어 본인 식별자)", async () => {

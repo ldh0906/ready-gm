@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>ready-gm — 게임 플레이</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600&display=swap">
+<link rel="stylesheet" href="/theme.css">
 <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -62,6 +65,7 @@
 <div id="app">
   <section class="story" aria-label="GM 서사">
     <div class="paneHead">GM 서사</div>
+    <div id="sceneCard" class="scene-card" hidden></div>
     <div id="story" class="scroll" role="log" aria-live="polite" aria-label="GM 서사 로그"></div>
     <button id="newStoryBtn" class="new-message-btn" type="button" hidden>새 메시지 ↓</button>
   </section>
@@ -71,28 +75,16 @@
   </aside>
 </div>
 
-<!-- 주사위 패널: 세션 중 직접 굴리는 다이스 롤러 (d4~d20, 순차 굴림) -->
-<details class="dice-panel" id="dicePanel">
-  <summary>주사위</summary>
-  <div class="dice-controls" role="group" aria-label="주사위 굴리기">
-    <button class="die-btn" data-sides="4" type="button" aria-label="d4 굴리기">d4</button>
-    <button class="die-btn" data-sides="6" type="button" aria-label="d6 굴리기">d6</button>
-    <button class="die-btn" data-sides="8" type="button" aria-label="d8 굴리기">d8</button>
-    <button class="die-btn" data-sides="10" type="button" aria-label="d10 굴리기">d10</button>
-    <button class="die-btn" data-sides="12" type="button" aria-label="d12 굴리기">d12</button>
-    <button class="die-btn" data-sides="20" type="button" aria-label="d20 굴리기">d20</button>
-    <button class="seq-btn" id="diceCritBtn" type="button" aria-label="중요 판정 굴리기">중요 판정</button>
-    <button class="seq-btn secondary" id="diceClearBtn" type="button" aria-label="주사위 지우기">지우기</button>
-  </div>
-  <div id="diceTray" aria-live="polite" aria-label="주사위 트레이"></div>
-  <p id="diceResult" role="status" aria-live="polite"></p>
-</details>
 
 <!-- 판정 결과 "운명" 주사위 바: 서버가 굴린 이번 라운드 판정을 연출 (visibility=player만) -->
 <div id="checkBar" class="check-bar" hidden>
   <div class="paneHead">판정</div>
   <div id="rollCountdown" class="roll-countdown" role="status" aria-live="polite" hidden></div>
   <div id="checkTray" aria-live="polite" aria-label="판정 주사위 트레이"></div>
+</div>
+
+<div id="rollRitual" class="roll-ritual" role="status" aria-live="polite" hidden>
+  <div class="ritual-stage"></div>
 </div>
 
 <!-- 입력 푸터 (요구사항 6.x) -->

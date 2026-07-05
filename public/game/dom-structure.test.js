@@ -24,6 +24,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { esc, SESSION_ENDED_MESSAGE } from "./logic.js";
+import { hueForId, moodClassForGenre } from "./views/dom.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(here, "index.html"), "utf8");
@@ -68,6 +69,11 @@ describe("game-play example DOM tests — static structure", () => {
     const stylesheet = document.querySelector('link[rel="stylesheet"][href="./styles.css"]');
     expect(stylesheet, "index.html must load ./styles.css").not.toBeNull();
 
+    const serifFont = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).find((link) =>
+      String(link.getAttribute("href") || "").includes("Noto+Serif+KR"),
+    );
+    expect(serifFont, "index.html must load Noto Serif KR for GM narration").not.toBeNull();
+
     const appScript = document.querySelector('script[type="module"][src="./app.js"]');
     expect(appScript, "index.html must load ./app.js as a module").not.toBeNull();
 
@@ -107,6 +113,10 @@ describe("game-play example DOM tests — static structure", () => {
 
     // 인계 무효 안내 영역도 정적 마크업에 존재한다.
     expect(document.getElementById("handoffInvalid"), "#handoffInvalid must exist").not.toBeNull();
+    expect(document.getElementById("chatOnlyHint"), "chat-only hint must be removed").toBeNull();
+    expect(document.getElementById("dicePanel"), "dice panel must be removed from game page").toBeNull();
+    expect(document.getElementById("diceTray"), "game page dice tray must be removed").toBeNull();
+    expect(document.getElementById("diceResult"), "game page dice result must be removed").toBeNull();
   });
 
   it("모든 상호작용 요소가 비어 있지 않은 접근성 레이블을 가진다 (Req 11.5)", () => {
@@ -205,5 +215,19 @@ describe("game-play example DOM tests — static structure", () => {
     notice.textContent = SESSION_ENDED_MESSAGE;
     expect(notice.textContent).toBe(SESSION_ENDED_MESSAGE);
     expect(notice.textContent.length).toBeGreaterThan(0);
+  });
+
+  it("장르 문자열을 게임 화면 무드 클래스로 매핑한다", () => {
+    expect(moodClassForGenre("고딕 호러")).toBe("mood-horror");
+    expect(moodClassForGenre("미스터리 수사")).toBe("mood-horror");
+    expect(moodClassForGenre("슬랩스틱 코미디")).toBe("mood-comedy");
+    expect(moodClassForGenre("정통 판타지")).toBe("mood-fantasy");
+    expect(moodClassForGenre(null)).toBe("mood-fantasy");
+  });
+
+  it("playerId 색상 hue를 결정적으로 계산한다", () => {
+    expect(hueForId("player-1")).toBe(hueForId("player-1"));
+    expect(hueForId("player-1")).toBeGreaterThanOrEqual(0);
+    expect(hueForId("player-1")).toBeLessThan(360);
   });
 });

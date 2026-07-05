@@ -90,6 +90,35 @@ describe("serializeTurnState / deserializeTurnState", () => {
     expect(restored.actionHistory).toEqual([]);
   });
 
+  it("round-trips check_result actionHistory fields", () => {
+    const state = sampleTurnState();
+    state.actionHistory = [
+      {
+        round: 2,
+        playerId: "p1",
+        kind: "check_result",
+        text: null,
+        attribute: "Wits",
+        difficulty: "Average",
+        roll: 1,
+        outcome: "Success",
+        characterName: "Display Only",
+      },
+    ];
+    expect(deserializeTurnState(serializeTurnState(state)).actionHistory).toEqual([
+      {
+        round: 2,
+        playerId: "p1",
+        kind: "check_result",
+        text: null,
+        attribute: "Wits",
+        difficulty: "Average",
+        roll: 1,
+        outcome: "Success",
+      },
+    ]);
+  });
+
   it("round-trips non-empty actionHistory without display-only names", () => {
     const state = sampleTurnState();
     state.actionHistory = [
@@ -114,6 +143,13 @@ describe("serializeTurnState / deserializeTurnState", () => {
     const restored = deserializeTurnState(polluted);
     expect(restored).not.toHaveProperty("bogus");
     expect(restored).toEqual(sampleTurnState());
+  });
+
+  it("does not serialize display-only sceneLocation", () => {
+    const state = { ...sampleTurnState(), sceneLocation: "검은 숲 입구" };
+    const json = serializeTurnState(state);
+    expect(JSON.parse(json)).not.toHaveProperty("sceneLocation");
+    expect(deserializeTurnState(json)).not.toHaveProperty("sceneLocation");
   });
 
   it("is idempotent across repeated serialize/deserialize cycles", () => {
@@ -178,5 +214,64 @@ describe("serializeTurnState / deserializeTurnState", () => {
     const restored = deserializeTurnState(json);
     expect(restored.chatLog[0]).not.toHaveProperty("displayName");
     expect(restored).toStrictEqual(state);
+  });
+
+  it("round-trips in-character chat flags only when present", () => {
+    const state = sampleTurnState();
+    state.chatLog = [
+      {
+        playerId: "p1",
+        characterName: "알렉스",
+        text: "누구 있어요?",
+        ts: "2024-01-01T00:00:01.000Z",
+        inCharacter: true,
+      },
+      { playerId: "p2", characterName: "Borin", text: "OOC note", ts: "2024-01-01T00:00:02.000Z" },
+    ];
+    state.chatHistory = [
+      {
+        playerId: "p3",
+        characterName: "세라",
+        text: "여긴 조용해요.",
+        ts: "2024-01-01T00:00:03.000Z",
+        inCharacter: true,
+      },
+      { playerId: "p4", characterName: "Dain", text: "brb", ts: "2024-01-01T00:00:04.000Z" },
+    ];
+
+    const plain = JSON.parse(serializeTurnState(state));
+    expect(plain.chatLog[0]).toHaveProperty("inCharacter", true);
+    expect(plain.chatLog[1]).not.toHaveProperty("inCharacter");
+    expect(plain.chatHistory[0]).toHaveProperty("inCharacter", true);
+    expect(plain.chatHistory[1]).not.toHaveProperty("inCharacter");
+
+    const restored = deserializeTurnState(JSON.stringify(plain));
+    expect(restored.chatLog).toEqual(state.chatLog);
+    expect(restored.chatHistory).toEqual(state.chatHistory);
+    expect(restored).toStrictEqual(state);
+  });
+
+  it("round-trips non-empty chatHistory losslessly (F8)", () => {
+    const state = sampleTurnState();
+    state.chatHistory = [
+      { playerId: "p1", characterName: "Borin", text: "지난 라운드 잡담", ts: "2024-01-01T00:00:00.000Z" },
+      {
+        playerId: "p2",
+        characterName: "알렉스",
+        displayName: "라면",
+        text: "ㅋㅋ",
+        ts: "2024-01-01T00:00:01.000Z",
+      },
+    ];
+    const restored = deserializeTurnState(serializeTurnState(state));
+    expect(restored.chatHistory).toEqual(state.chatHistory);
+    expect(restored).toStrictEqual(state);
+  });
+
+  it("omits empty/absent chatHistory in serialized JSON (F8, legacy round-trip)", () => {
+    const json = serializeTurnState(sampleTurnState());
+    expect(JSON.parse(json)).not.toHaveProperty("chatHistory");
+    const restored = deserializeTurnState(json);
+    expect(restored).not.toHaveProperty("chatHistory");
   });
 });

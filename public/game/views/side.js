@@ -1,4 +1,5 @@
 import { MAX_ENTRIES, actionHistoryModel } from "../logic.js";
+import { ATTR_LABELS, DIFF_LABELS, OUTCOME_LABELS, fsign } from "./dom.js";
 
 export function createSideView(ctx) {
   const { els, helpers, getState } = ctx;
@@ -42,6 +43,17 @@ export function createSideView(ctx) {
         name.textContent = nameText;
         div.appendChild(name);
         appendText(div, ` 행동 확정: ${a.text}`);
+      } else if (a.kind === "check") {
+        const outcomeClass =
+          a.outcome === "Critical Success" ? "crit" :
+          a.outcome === "Success" ? "ok" :
+          a.outcome === "Partial Success" ? "partial" :
+          a.outcome === "Failure" ? "fail" : "";
+        div.className = `li check ${outcomeClass}`.trim();
+        const attr = ATTR_LABELS[a.attribute] || a.attribute || "판정";
+        const diff = DIFF_LABELS[a.difficulty] || a.difficulty || "";
+        const outcome = OUTCOME_LABELS[a.outcome] || a.outcome || "";
+        div.textContent = `🎲 ${a.characterName} — ${attr} · ${diff} → ${outcome} (${fsign(a.roll)})`;
       } else {
         div.className = "li pass";
         div.textContent = `${nameText} — ${a.auto ? "자동 패스" : "패스"}`;

@@ -82,3 +82,40 @@ describe("game-play action history", () => {
     ]);
   });
 });
+
+  it("includes check_result history and live rolled checks", () => {
+    const model = actionHistoryModel({
+      roundNumber: 4,
+      actionHistory: [
+        { round: 3, playerId: "p1", kind: "check_result", text: null, attribute: "Wits", difficulty: "Average", roll: 2, outcome: "Success", characterName: "아리아" },
+      ],
+      readiness: [{ playerId: "p2", characterName: "보린", displayName: "면", status: "ready", actionKind: null, actionText: null }],
+      rollingChecks: [
+        { checkId: "c1", characterId: "char-p2", characterName: "보린", playerId: "p2", attribute: "Might", difficulty: "Hard", status: "rolled", roll: -1, outcome: "Partial Success" },
+      ],
+      chatLog: [],
+    });
+
+    expect(model).toContainEqual({
+      round: 3,
+      playerId: "p1",
+      characterName: "아리아",
+      displayName: "",
+      kind: "check",
+      attribute: "Wits",
+      difficulty: "Average",
+      roll: 2,
+      outcome: "Success",
+    });
+    expect(model).toContainEqual({
+      round: 4,
+      playerId: "p2",
+      characterName: "보린",
+      displayName: "면",
+      kind: "check",
+      attribute: "Might",
+      difficulty: "Hard",
+      roll: -1,
+      outcome: "Partial Success",
+    });
+  });

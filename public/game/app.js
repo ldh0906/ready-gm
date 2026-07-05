@@ -16,11 +16,14 @@
     describeCharacterState,
     describeBlackboard,
     buildChatCommand,
+    buildSayCommand,
     buildConfirmCommand,
     buildPassCommand,
     buildReviseCommand,
     buildRollCheckCommand,
     canRollCheck,
+    canSendChat,
+    isChatOnlyPhase,
     reduce,
     computeVisibility,
     describeClock,
@@ -36,7 +39,16 @@
   import { createSideView } from "./views/side.js";
   import { createSheetDrawerView } from "./views/sheet-drawer.js";
   import { createPanelsView } from "./views/panels.js";
-  import { textSpan, appendText, isNearBottom, stickToBottom, prefersReducedMotion, frand, fsign } from "./views/dom.js";
+  import {
+    textSpan,
+    appendText,
+    isNearBottom,
+    stickToBottom,
+    prefersReducedMotion,
+    frand,
+    fsign,
+    moodClassForGenre,
+  } from "./views/dom.js";
 
   const $ = (id) => document.getElementById(id);
 
@@ -56,6 +68,7 @@
   const charStatesEl = $("charStates");
   const blackboardEl = $("blackboard");
   const storyEl = $("story");
+  const sceneCardEl = $("sceneCard");
   const newStoryBtn = $("newStoryBtn");
   const sideEl = $("side");
   const msgEl = $("msg");
@@ -66,6 +79,7 @@
   const checkBar = $("checkBar");
   const rollCountdownEl = $("rollCountdown");
   const checkTray = $("checkTray");
+  const rollRitualEl = $("rollRitual");
   // 멀티플레이 표시 계층 DOM 참조 (multiplayer-game-ux)
   const turnIndicatorEl = $("turnIndicator");
   const selfStatusEl = $("selfStatus");
@@ -126,6 +140,36 @@
   let sideView = null;
   let sheetDrawerView = null;
   let panelsView = null;
+  let scenarioGenre = "";
+  let scenarioTitle = "";
+
+  function sheetSchemaFetchHeaders() {
+    const headers = {};
+    if (state.handoff.token) headers["x-playtest-token"] = state.handoff.token;
+    if (state.handoff.ticket) headers["x-connection-ticket"] = state.handoff.ticket;
+    return headers;
+  }
+
+  async function loadSheetSchemaMeta() {
+    if (!state.handoffValid) return;
+    try {
+      const response = await fetch(`/rooms/${encodeURIComponent(state.handoff.roomId)}/sheet-schema`, {
+        method: "GET",
+        headers: sheetSchemaFetchHeaders(),
+        credentials: "same-origin",
+      });
+      if (!response.ok) return;
+      const body = await response.json();
+      scenarioGenre = typeof body.genre === "string" ? body.genre : "";
+      scenarioTitle = typeof body.scenarioTitle === "string" ? body.scenarioTitle : "";
+      const moodClass = moodClassForGenre(scenarioGenre);
+      document.body.classList.remove("mood-horror", "mood-comedy", "mood-fantasy");
+      if (moodClass) document.body.classList.add(moodClass);
+      if (storyView) storyView.renderStory();
+    } catch {
+      /* Sheet schema metadata is cosmetic on this screen. */
+    }
+  }
 
   // 단방향 흐름: dispatch → reduce → render. render는 상태의 순수 함수다.
   function dispatch(action) {
@@ -158,9 +202,12 @@
       }
     }
 
-    // 헤더: 라운드 / 단계 (요구사항 5.1)
-    roundEl.textContent = state.roundNumber != null ? state.roundNumber : "-";
-    phaseEl.textContent = state.phase != null ? state.phase : "-";
+    // 헤더: 라운드 / 단계 (요구사항 5.1). F7: 결과 서사가 도착할 때까지 다음 라운드로의
+    // 헤더 전환을 잠깐 유예하기 위해 headerRound/headerPhase(파생)를 사용한다.
+    const headerRound = state.headerRound != null ? state.headerRound : state.roundNumber;
+    const headerPhase = state.headerPhase != null ? state.headerPhase : state.phase;
+    roundEl.textContent = headerRound != null ? headerRound : "-";
+    phaseEl.textContent = headerPhase != null ? headerPhase : "-";
 
     // 헤더: 준비 X/total (요구사항 5.2, 5.3)
     readyEl.textContent = `준비 ${v.ready.ready}/${v.ready.total}`;
@@ -221,9 +268,13 @@
     }
 
     // 입력 컨트롤 비활성 (요구사항 1.4, 7.1, 9.2)
+    // 행동 컨트롤(패스/수정)은 기존 inputDisabled 그대로 잠근다.
     const disabled = v.inputDisabled;
-    msgEl.disabled = disabled;
-    sendBtn.disabled = disabled;
+    // P-1: resolving/rolling 중에도 채팅(테이블 잡담)은 허용한다 — 그때만 메시지
+    // 입력과 보내기 버튼을 chat-only 모드로 열어 둔다. 행동 확정은 여전히 잠김.
+    const chatOnly = isChatOnlyPhase(state) && canSendChat(state);
+    msgEl.disabled = disabled && !chatOnly;
+    sendBtn.disabled = disabled && !chatOnly;
     passBtn.disabled = disabled;
     reviseBtn.disabled = disabled;
   }
@@ -294,11 +345,6 @@
         }
         if (parsed && parsed.type === "check_rolled") {
           checksView.animateRolledCheck(parsed.check);
-        }
-        // 서버가 굴린 이번 라운드 판정을 "운명" 주사위로 연출(visibility=player만).
-        // 결과는 resolution 내레이션 payload의 checks로 전달된다.
-        if (parsed && parsed.type === "narration" && parsed.narration) {
-          checksView.maybeAnimateChecks(parsed.narration.checks);
         }
       },
       onClose: () => {
@@ -392,6 +438,16 @@
 
   // 보내기: 대사("")는 채팅으로(서버가 echo), 행동은 확정으로 전송 + 본인 로컬 에코.
   function submit() {
+    // P-1: 결과 대기(resolving/rolling) 중에는 입력 전량을 채팅으로 보낸다(따옴표
+    // 여부 무관). 행동 확정은 하지 않고 안내 문구도 표시하지 않는다.
+    if (isChatOnlyPhase(state) && canSendChat(state)) {
+      const raw = msgEl.value.trim();
+      if (!raw) return;
+      const c = buildChatCommand(raw);
+      if (c) sendCommand(c);
+      msgEl.value = "";
+      return;
+    }
     if (!canSend()) return;
     const perm = permission();
     const text = msgEl.value.trim();
@@ -400,7 +456,7 @@
     // 말하기: canChat이 허용할 때만 전송한다(요구사항 3.4).
     for (const s of says) {
       if (!perm.canChat) break;
-      const c = buildChatCommand(s);
+      const c = buildSayCommand(s);
       if (c) sendCommand(c);
     }
     const confirmText = action || (says.length === 0 ? text : "");
@@ -455,11 +511,13 @@
       charStatesEl,
       blackboardEl,
       storyEl,
+      sceneCardEl,
       newStoryBtn,
       sideEl,
       checkBar,
       rollCountdownEl,
       checkTray,
+      rollRitualEl,
       turnIndicatorEl,
       selfStatusEl,
       rosterEl,
@@ -486,6 +544,7 @@
     sendCommand,
     getViewerPlayerId,
     dispatch,
+    getScenarioTitle: () => scenarioTitle,
   };
   sheetDrawerView = createSheetDrawerView(viewCtx);
   viewCtx.openSheetDrawer = sheetDrawerView.openSheetDrawer;
@@ -498,66 +557,7 @@
   render();
   // 인계가 유효할 때만 채널을 연다(무효면 안내만 표시, 요구사항 1.3/1.4).
   if (state.handoffValid) {
+    void loadSheetSchemaMeta();
     openChannel();
     startCountdownTimer();
-  }
-
-  // 주사위 패널 배선: 세션 중 직접 굴리는 다이스 롤러. 기존 게임 로직과 독립적인
-  // 별도 모듈로 두어 부수효과 계층(채널/리듀서) 테스트와 간섭하지 않는다.
-  import { createDiceTray } from "./dice-tray.js";
-
-  const trayEl = document.getElementById("diceTray");
-  const resultEl = document.getElementById("diceResult");
-  if (trayEl) {
-    const tray = createDiceTray(trayEl);
-    const diceButtons = Array.from(document.querySelectorAll(".dice-panel button"));
-
-    const setBusy = (busy) => {
-      for (const b of diceButtons) b.disabled = busy;
-    };
-    const summarize = (plans) => {
-      const parts = plans.map((p) => {
-        const tag =
-          p.criticality === "crit" ? " (대성공!)" : p.criticality === "fumble" ? " (대실패!)" : "";
-        return `${p.label ? p.label + " " : ""}d${p.sides} → ${p.result}${tag}`;
-      });
-      const total = plans.reduce((s, p) => s + p.result, 0);
-      resultEl.replaceChildren(document.createTextNode("결과: "));
-      parts.forEach((part, index) => {
-        if (index > 0) appendText(resultEl, " · ");
-        const strong = document.createElement("b");
-        strong.textContent = part;
-        resultEl.appendChild(strong);
-      });
-      if (plans.length > 1) appendText(resultEl, ` (합계 ${total})`);
-    };
-    const run = async (specs) => {
-      setBusy(true);
-      resultEl.textContent = "굴리는 중…";
-      try {
-        summarize(await tray.rollSequence(specs));
-      } finally {
-        setBusy(false);
-      }
-    };
-
-    for (const b of document.querySelectorAll(".dice-panel .die-btn")) {
-      b.addEventListener("click", () => run([{ sides: Number(b.getAttribute("data-sides")) }]));
-    }
-    const critBtn = document.getElementById("diceCritBtn");
-    if (critBtn) {
-      critBtn.addEventListener("click", () =>
-        run([
-          { sides: 6, speed: "fast", label: "보너스" },
-          { sides: 20, speed: "slow", emphasis: true, label: "운명의 판정" },
-        ]),
-      );
-    }
-    const clearBtn = document.getElementById("diceClearBtn");
-    if (clearBtn) {
-      clearBtn.addEventListener("click", () => {
-        tray.clear();
-        resultEl.textContent = "";
-      });
-    }
   }

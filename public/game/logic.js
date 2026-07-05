@@ -185,6 +185,7 @@ export function narrationFailureMessage(phase, retrying = false) {
  * @property {VisibleClock[]} clocks               최근 노출된 Progress Clock 스냅샷(노출 시나리오만)
  * @property {any[]} characterStates               player-visible 캐릭터 상태 스냅샷(turn_state로 갱신)
  * @property {any} blackboard                      player-visible 시나리오 블랙보드(발견한 단서/NPC/위협)
+ * @property {string | null} sceneLocation         player-visible 현재 장면 위치(장식 전용)
  * @property {any[]} rollingChecks                 현재 라운드의 pending/rolled 공개 판정 목록
  * @property {boolean} ended                       Session_Ended (요구사항 9.1)
  * @property {string | null} [activePlayerId]      [intended] 활성 플레이어(없으면 null) (요구사항 2.3)
@@ -256,6 +257,12 @@ export function createInitialState(handoff) {
     turnReceived: false,
     roundNumber: null,
     phase: null,
+    // F7: 헤더에 실제로 표시하는 라운드/단계. 보통 roundNumber/phase를 따라가지만,
+    // 해석이 끝나 다음 라운드로 넘어간 turn_state가 결과 서사보다 먼저 도착할 때는
+    // 서사가 도착할 때까지 이전 값을 유지해 "서사 → 전환" 순서를 지킨다.
+    headerRound: null,
+    headerPhase: null,
+    pendingHeaderAdvance: false,
     readiness: [],
     actionHistory: [],
     readyCheckDeadline: null,
@@ -267,6 +274,7 @@ export function createInitialState(handoff) {
     clocks: [],
     characterStates: [],
     blackboard: null,
+    sceneLocation: null,
     rollingChecks: [],
     ended: false,
     // [intended] 턴 메타: turn_state 최상위 필드. 없으면 기본값 유지(단계 기반 폴백). (요구사항 2.3, 2.4, 7.2, 7.4)
@@ -696,6 +704,40 @@ export function computeBusy(phase) {
   return phase === Phase.RESOLVING;
 }
 
+/**
+ * 대기 중 GM 진행 표시(P-2). "GM이 서술을 쓰는 중" 한 줄 대신 지금 GM이 무슨
+ * 단계에 있는지 알려 주는 문구를 상태에서 파생한다(신규 서버 이벤트 없음).
+ *
+ * - resolving + pending 판정 없음(rollingChecks 빔) → 상황을 읽고 판정을 고르는 중
+ * - rolling + pending 판정 있음 → 판정 UI가 주인공이므로 대기 표시를 숨긴다(null)
+ * - resolving/rolling + 모든 판정이 rolled → 결과 서술을 쓰는 중
+ *
+ * 반환값의 `key`는 문구가 바뀐 시점을 감지해 경과 시간 카운터를 리셋하는 데 쓴다.
+ * 티커에 의존하지 않는 순수 함수이므로 단위 테스트가 가능하다.
+ *
+ * @param {string} phase
+ * @param {Array<{status?: string}>} rollingChecks
+ * @returns {{ key: string, text: string } | null}
+ */
+export function waitingIndicator(phase, rollingChecks) {
+  if (phase !== Phase.RESOLVING && phase !== Phase.ROLLING) return null;
+  const checks = Array.isArray(rollingChecks) ? rollingChecks : [];
+  if (checks.length === 0) {
+    // 아직 판정이 선언되지 않음: resolving에서만 "판정을 고르는 중"을 보여 준다.
+    // (rolling인데 판정이 비어 있는 순간은 과도기이므로 표시하지 않는다.)
+    if (phase === Phase.RESOLVING) {
+      return { key: "declaring", text: "GM이 상황을 읽고 판정을 고르는 중" };
+    }
+    return null;
+  }
+  const allRolled = checks.every((c) => c && c.status === "rolled");
+  if (allRolled) {
+    return { key: "narrating", text: "GM이 결과 서술을 쓰는 중" };
+  }
+  // 아직 굴리지 않은 판정이 남음 → 판정 트레이 UI가 주인공. 대기 표시 숨김.
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // 입력 명령 빌더 (Command Builders) — 작업 3.8
 // ---------------------------------------------------------------------------
@@ -709,6 +751,18 @@ export function buildChatCommand(text) {
   const trimmed = trimToString(text);
   if (trimmed.length === 0) return null;
   return { type: "chat", text: trimmed };
+}
+
+/**
+ * 인물 대사(in-character) 전송 명령. 트림 후 비면 null. 서버가 chatLog에 inCharacter로 저장하고
+ * 클라이언트는 중앙 무대에 표시한다.
+ * @param {string} text
+ * @returns {{ type: "say", text: string } | null}
+ */
+export function buildSayCommand(text) {
+  const trimmed = trimToString(text);
+  if (trimmed.length === 0) return null;
+  return { type: "say", text: trimmed };
 }
 
 /**
@@ -765,6 +819,52 @@ export function buildRollCheckCommand(checkId) {
  */
 export function isInputLocked(phase) {
   return phase === Phase.RESOLVING || phase === Phase.ROLLING || phase === Phase.ENDED;
+}
+
+/**
+ * 채팅(테이블 잡담) 전송 가능 여부를 판단한다(순수 함수, P-1).
+ *
+ * 행동 확정(CONFIRM/PASS/REVISE)과 별개의 게이트다: isInputLocked()는 resolving/
+ * rolling에서 행동 컨트롤을 잠그지만, 결과를 기다리는 동안 친구들이 떠들 수 있어야
+ * 하므로 채팅은 종료 전 모든 단계에서 허용한다. 연결이 열려 있고, 인계가 유효하며,
+ * 첫 turn_state를 받았고, 세션이 끝나지 않았을 때만 true.
+ *
+ * @param {{ handoffValid?: boolean, turnReceived?: boolean, ended?: boolean, connection?: string }} state
+ * @returns {boolean}
+ */
+export function canSendChat(state) {
+  if (!state) return false;
+  return (
+    state.handoffValid === true &&
+    state.turnReceived === true &&
+    state.ended !== true &&
+    state.connection === ConnectionStatus.OPEN
+  );
+}
+
+/**
+ * 지금이 "채팅만 가능한" 대기 단계(resolving/rolling)인지 판단한다(P-1).
+ * 이 모드에서는 입력 전량을 채팅으로 보내고 행동 확정은 잠근다.
+ *
+ * @param {{ phase?: string | null }} state
+ * @returns {boolean}
+ */
+export function isChatOnlyPhase(state) {
+  if (!state) return false;
+  return state.phase === Phase.RESOLVING || state.phase === Phase.ROLLING;
+}
+
+/**
+ * 순차 굴림의 현재 차례 판정 = rollingChecks의 첫 미굴림 항목. 없으면 null.
+ * @param {{ rollingChecks?: Array<{status?: string}> }} state
+ * @returns {object | null}
+ */
+export function activeRollingCheck(state) {
+  const checks = state && Array.isArray(state.rollingChecks) ? state.rollingChecks : [];
+  for (const check of checks) {
+    if (check && check.status !== "rolled") return check;
+  }
+  return null;
 }
 
 /**
@@ -893,9 +993,21 @@ export function reduce(state, action) {
       // append-new-only로 새 채팅만 추가하고 chatCount 갱신(요구사항 4.1/4.4).
       const chatLog = Array.isArray(turnState.chatLog) ? turnState.chatLog : [];
       const { entries: newChats, nextCount } = appendNewChats(state.chatCount, chatLog);
+      const newOoc = newChats.filter((c) => !(c && c.inCharacter));
+      const newIc = newChats.filter((c) => c && c.inCharacter);
       let chatEntries = state.chatEntries;
-      if (newChats.length > 0) {
-        chatEntries = state.chatEntries.concat(newChats);
+      // 재연결/재동기화 시 지난 라운드 채팅 이력을 시드한다(F8). 표시된 채팅이 아직
+      // 없을 때(=새 클라이언트/재접속)에만 시드해, 라이브로 이미 누적한 화면과의
+      // 중복을 막는다. 라운드가 넘어가도 접속 유지 중인 클라이언트는 로컬 누적을 보존한다.
+      if (
+        chatEntries.length === 0 &&
+        Array.isArray(turnState.chatHistory) &&
+        turnState.chatHistory.length > 0
+      ) {
+        chatEntries = turnState.chatHistory.filter((c) => !(c && c.inCharacter)).slice(-MAX_ENTRIES);
+      }
+      if (newOoc.length > 0) {
+        chatEntries = chatEntries.concat(newOoc);
         if (chatEntries.length > MAX_ENTRIES) {
           chatEntries = chatEntries.slice(chatEntries.length - MAX_ENTRIES);
         }
@@ -911,16 +1023,50 @@ export function reduce(state, action) {
       }
       const phase = turnState.phase != null ? turnState.phase : state.phase;
       const ended = state.ended || detectSessionEnded({ phase });
+      const roundNumber = turnState.roundNumber != null ? turnState.roundNumber : state.roundNumber;
+      if (newIc.length > 0) {
+        const dialogueEntries = newIc.map((c) => ({
+          kind: "dialogue",
+          roundNumber,
+          speaker: typeof c.characterName === "string" ? c.characterName : "",
+          displayName: c.displayName,
+          text: typeof c.text === "string" ? c.text : String(c.text),
+        }));
+        narrationEntries = narrationEntries.concat(dialogueEntries);
+        if (narrationEntries.length > MAX_ENTRIES) {
+          narrationEntries = narrationEntries.slice(narrationEntries.length - MAX_ENTRIES);
+        }
+      }
       const rollingChecks = Array.isArray(turnState.rollingChecks)
         ? turnState.rollingChecks
         : phase === Phase.ROLLING
           ? state.rollingChecks
           : [];
+      // F7: 이 turn_state가 "해석 완료 → 다음 라운드/종료" 전환이면(직전 단계가
+      // resolving/rolling), 결과 서사가 도착할 때까지 헤더를 이전 라운드/단계에 붙들어
+      // 둔다. 그 외에는 헤더를 실제 값으로 동기화한다(재연결·정상 진행 포함).
+      const wasResolving = state.phase === Phase.RESOLVING || state.phase === Phase.ROLLING;
+      const roundAdvanced =
+        roundNumber != null && state.roundNumber != null && roundNumber > state.roundNumber;
+      const holdHeader = wasResolving && (roundAdvanced || phase === Phase.ENDED);
+      const headerRound = holdHeader
+        ? state.headerRound != null
+          ? state.headerRound
+          : state.roundNumber
+        : roundNumber;
+      const headerPhase = holdHeader
+        ? state.headerPhase != null
+          ? state.headerPhase
+          : state.phase
+        : phase;
       return {
         ...state,
         turnReceived: true,
-        roundNumber: turnState.roundNumber != null ? turnState.roundNumber : state.roundNumber,
+        roundNumber,
         phase,
+        headerRound,
+        headerPhase,
+        pendingHeaderAdvance: holdHeader,
         readiness: Array.isArray(turnState.readiness) ? turnState.readiness : state.readiness,
         actionHistory: Array.isArray(turnState.actionHistory) ? turnState.actionHistory : [],
         readyCheckDeadline:
@@ -947,6 +1093,10 @@ export function reduce(state, action) {
           turnState.blackboard != null && typeof turnState.blackboard === "object"
             ? turnState.blackboard
             : state.blackboard,
+        sceneLocation:
+          typeof turnState.sceneLocation === "string" && turnState.sceneLocation.length > 0
+            ? turnState.sceneLocation
+            : null,
         rollingChecks,
         // [intended] 턴 메타 선택적 흡수: 값이 없으면 기존 상태 보존(요구사항 2.3, 2.4, 7.2, 7.4).
         activePlayerId:
@@ -982,7 +1132,18 @@ export function reduce(state, action) {
           ? action.blackboard
           : state.blackboard;
       // 서사가 실제로 도착했으므로 이전의 서사 생성 실패 안내는 지운다.
-      return { ...state, narrationEntries, clocks, blackboard, ended, narrationFailedNotice: null };
+      // F7: 유예해 둔 헤더 전환을 지금(서사 도착) 실제 라운드/단계로 반영한다.
+      return {
+        ...state,
+        narrationEntries,
+        clocks,
+        blackboard,
+        ended,
+        narrationFailedNotice: null,
+        headerRound: state.roundNumber,
+        headerPhase: state.phase,
+        pendingHeaderAdvance: false,
+      };
     }
 
     // -- 준비 갱신 (요구사항 5.2, 5.3) ---------------------------------------
@@ -1318,7 +1479,7 @@ export function actionLogModel(turnState) {
  * 이름 폴백은 `actionLogModel`과 같은 규칙을 따른다. 예외를 던지지 않는다.
  *
  * @param {{ actionHistory?: any, readiness?: any, chatLog?: ChatEntry[], roundNumber?: any }} turnState
- * @returns {Array<{ round: number, playerId: string, characterName: string, displayName: string, kind: "confirm" | "pass", text: string | null, auto: boolean }>}
+ * @returns {Array<{ round: number, playerId: string, characterName: string, displayName: string, kind: "confirm" | "pass" | "check", text?: string | null, auto?: boolean, attribute?: string, difficulty?: string, roll?: number, outcome?: string }>}
  */
 export function actionHistoryModel(turnState) {
   const ts = turnState || {};
@@ -1328,7 +1489,12 @@ export function actionHistoryModel(turnState) {
   for (const entry of history) {
     const item = entry || {};
     const rawKind = item.kind;
-    if (rawKind !== "confirmed_action" && rawKind !== "pass" && rawKind !== "auto_pass") {
+    if (
+      rawKind !== "confirmed_action" &&
+      rawKind !== "pass" &&
+      rawKind !== "auto_pass" &&
+      rawKind !== "check_result"
+    ) {
       continue;
     }
     const playerId = item.playerId;
@@ -1337,6 +1503,20 @@ export function actionHistoryModel(turnState) {
       intendedDisplay.length > 0 ? intendedDisplay : latestChatDisplayName(playerId, chatLog);
     const characterName = characterNameFor(playerId, item, chatLog);
     const isConfirm = rawKind === "confirmed_action";
+    if (rawKind === "check_result") {
+      out.push({
+        round: Number.isFinite(Number(item.round)) ? Number(item.round) : 0,
+        playerId,
+        characterName,
+        displayName,
+        kind: "check",
+        attribute: item.attribute != null ? String(item.attribute) : "",
+        difficulty: item.difficulty != null ? String(item.difficulty) : "",
+        roll: Number.isFinite(Number(item.roll)) ? Number(item.roll) : 0,
+        outcome: item.outcome != null ? String(item.outcome) : "",
+      });
+      continue;
+    }
     out.push({
       round: Number.isFinite(Number(item.round)) ? Number(item.round) : 0,
       playerId,
@@ -1350,6 +1530,23 @@ export function actionHistoryModel(turnState) {
   const currentRound = Number.isFinite(Number(ts.roundNumber)) ? Number(ts.roundNumber) : 0;
   for (const entry of actionLogModel(ts)) {
     out.push({ round: currentRound, ...entry });
+  }
+  const rollingChecks = Array.isArray(ts.rollingChecks) ? ts.rollingChecks : [];
+  for (const check of rollingChecks) {
+    if (!check || check.status !== "rolled") continue;
+    const playerId = check.playerId;
+    const readinessEntry = (Array.isArray(ts.readiness) ? ts.readiness : []).find((entry) => entry && entry.playerId === playerId);
+    out.push({
+      round: currentRound,
+      playerId,
+      characterName: check.characterName || characterNameFor(playerId, readinessEntry, chatLog),
+      displayName: readinessEntry && readinessEntry.displayName != null ? trimToString(readinessEntry.displayName) : latestChatDisplayName(playerId, chatLog),
+      kind: "check",
+      attribute: check.attribute != null ? String(check.attribute) : "",
+      difficulty: check.difficulty != null ? String(check.difficulty) : "",
+      roll: Number.isFinite(Number(check.roll)) ? Number(check.roll) : 0,
+      outcome: check.outcome != null ? String(check.outcome) : "",
+    });
   }
   return out;
 }

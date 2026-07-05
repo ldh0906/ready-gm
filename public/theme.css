@@ -1,0 +1,72 @@
+:root {
+  color-scheme: dark;
+  --bg-base: linear-gradient(135deg, #161922, #10131b 70%);
+  --bg-tint-1: radial-gradient(circle at 18% 12%, #3a4a7022, transparent 50%);
+  --bg-tint-2: radial-gradient(circle at 82% 18%, #4a3f6322, transparent 52%);
+  --bg-tint-3: radial-gradient(circle at 50% 95%, #2e4a5522, transparent 55%);
+  --text: #e8eaf2;
+  --text-2: #aab2e0;
+  --text-3: #8089b5;
+  --text-4: #6f76a0;
+  --glass-bg: rgba(255,255,255,.07);
+  --glass-border: rgba(255,255,255,.18);
+  --card-bg: rgba(255,255,255,.06);
+  --card-border: rgba(255,255,255,.14);
+  --inset-bg: rgba(255,255,255,.05);
+  --inset-border: rgba(255,255,255,.10);
+  --input-bg: rgba(255,255,255,.08);
+  --input-border: rgba(255,255,255,.20);
+  --shadow-shell: 0 24px 70px rgba(0,0,0,.45);
+  --blur-shell: 20px;
+  --blur-panel: 12px;
+  --r-shell: 22px;
+  --r-card: 16px;
+  --r-input: 12px;
+  --r-pill: 999px;
+  --gm: #ffd9a8;
+  --gm-bg: rgba(255,217,168,.16);
+  --gm-border: rgba(255,217,168,.45);
+  --mint: #9affd0;
+  --mint-bg: rgba(154,255,208,.14);
+  --blue: #8fc2ff;
+  --blue-bg: rgba(106,169,255,.14);
+  --amber: #ffce6b;
+  --amber-bg: rgba(255,206,107,.14);
+  --danger: #ff9a9a;
+  --danger-bg: rgba(255,110,110,.18);
+  --danger-border: rgba(255,110,110,.5);
+  --btn-primary-bg: rgba(255,255,255,.92);
+  --btn-primary-text: #1b1f3a;
+}
+
+[hidden] { display: none !important; }
+
+body {
+  color: var(--text);
+  font-family: "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  background: var(--bg-tint-1), var(--bg-tint-2), var(--bg-tint-3), var(--bg-base);
+  background-attachment: fixed;
+}
+
+body.mood-comedy {
+  --bg-tint-1: radial-gradient(circle at 18% 12%, #70563a22, transparent 50%);
+  --bg-tint-2: radial-gradient(circle at 82% 18%, #63523f22, transparent 52%);
+  --bg-tint-3: radial-gradient(circle at 50% 95%, #554a2e22, transparent 55%);
+}
+
+body.mood-horror {
+  --bg-base: linear-gradient(135deg,#12141c,#0b0d13 70%);
+  --bg-tint-1: radial-gradient(circle at 18% 12%, #2e3a5522, transparent 50%);
+  --bg-tint-2: radial-gradient(circle at 82% 18%, #3f2e4a22, transparent 52%);
+  --bg-tint-3: radial-gradient(circle at 50% 95%, #1e2a3522, transparent 55%);
+  --text-2: #9aa9c8;
+}
+
+body.mood-horror::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(5,7,12,.55));
+}

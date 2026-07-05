@@ -125,11 +125,17 @@ export function createEngine(deps: CreateEngineDeps): Engine {
       const actionHistory = Array.isArray(state.actionHistory) ? state.actionHistory : [];
       const characterStates = persistence.characterStateStore.get(roomId);
       const blackboard = persistence.blackboardStore.get(roomId);
+      const scene = persistence.sceneStore.get(roomId);
+      const sceneLocation =
+        typeof scene?.location === "string" && scene.location.trim().length > 0
+          ? scene.location.trim()
+          : undefined;
       if (
         readiness.length === 0 &&
         actionHistory.length === 0 &&
         characterStates.length === 0 &&
-        blackboard === undefined
+        blackboard === undefined &&
+        sceneLocation === undefined
       ) return state;
       const displayById = new Map(
         persistence.roomStore.listPlayers(roomId).map((p) => [p.id, p.displayName]),
@@ -176,6 +182,7 @@ export function createEngine(deps: CreateEngineDeps): Engine {
             }
           : {}),
         ...(blackboard !== undefined ? { blackboard: toVisibleBlackboard(blackboard) } : {}),
+        ...(sceneLocation !== undefined ? { sceneLocation } : {}),
       };
     },
   });

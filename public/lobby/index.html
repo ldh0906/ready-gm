@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>ready-gm — 로비 / 대기실</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="/theme.css">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -149,6 +151,11 @@
   /* ---- 커스텀 시나리오 콤보박스 ---------------------------------------- */
   .combo-label { display: block; font-size: 13px; color: #9fb0c8; margin-bottom: 6px; }
 
+  /* 시나리오 카드는 콤보박스 드롭다운이 아래 '캐릭터 만들기' 카드에 가려지지 않도록
+     자체 stacking context를 뒤 카드 위로 올린다. .card의 backdrop-filter가 카드마다
+     새 stacking context를 만들어, 리스트박스의 z-index만으로는 다음 카드를 넘지 못한다. */
+  .scenario-card { position: relative; z-index: 3; }
+
   .combobox { position: relative; width: 100%; margin-bottom: 10px; }
 
   .combobox-trigger {
@@ -237,6 +244,52 @@
     .actions button { width: 100%; }
     .combobox-listbox { max-height: 260px; }
   }
+
+  /* glass restyle overrides */
+  body {
+    font: 15px/1.65 "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+    background: var(--bg-tint-1), var(--bg-tint-2), var(--bg-tint-3), var(--bg-base);
+    background-attachment: fixed;
+    color: var(--text);
+  }
+  header { background: rgba(255,255,255,.06); border-bottom-color: var(--glass-border); backdrop-filter: blur(var(--blur-panel)); }
+  header strong { color: var(--gm); }
+  header .badge, header .conn { background: rgba(255,255,255,.12); color: var(--text-2); border: 1px solid rgba(255,255,255,.20); border-radius: var(--r-pill); }
+  header .conn.active { color: var(--mint); }
+  header .conn.active::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 10px var(--mint); margin-right: 6px; }
+  main { max-width: 680px; }
+  .intro h1, .card h2, .scenario-title { color: var(--text); }
+  .intro p, label, .roster-count, .scenario-summary, .scenario-meta, .combo-label { color: var(--text-2); }
+  .card { background: var(--glass-bg); border-color: var(--glass-border); border-radius: var(--r-shell); box-shadow: var(--shadow-shell); backdrop-filter: blur(var(--blur-shell)); }
+  input[type=text], select, .combobox-trigger { background: var(--input-bg); color: var(--text); border-color: var(--input-border); border-radius: var(--r-input); outline: none; }
+  input[type=text]:focus, select:focus, .combobox-trigger:focus, .combobox-trigger:focus-visible, .combobox-listbox:focus-visible { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(143,194,255,.15); outline: none; }
+  input[readonly] { color: var(--text-2); }
+  button { background: var(--btn-primary-bg); color: var(--btn-primary-text); border-radius: var(--r-input); font-weight: 600; transition: transform 140ms ease, filter 140ms ease, background 140ms ease, border-color 140ms ease; }
+  button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
+  button.secondary { background: rgba(255,255,255,.12); color: var(--text); border: 1px solid rgba(255,255,255,.22); }
+  button:disabled, select:disabled, .combobox-trigger:disabled { opacity: .4; }
+  a:focus-visible, input:focus-visible, button:focus-visible { outline-color: var(--amber); }
+  .link-text, .copy-confirm { color: var(--mint); }
+  .copy-fallback, .scenario-notice, .progress { color: var(--amber); }
+  .notice, .field-error { color: var(--danger); }
+  .notice { background: var(--danger-bg); border-color: var(--danger-border); border-radius: 10px; }
+  .roster-empty { color: var(--text-3); }
+  .roster-list { padding-left: 0; list-style: none; }
+  .roster-player { margin: 6px 0; padding: 8px 10px; border-radius: 12px; background: var(--inset-bg); border: 1px solid var(--inset-border); }
+  .host-mark { color: var(--gm); }
+  .combobox-arrow { color: var(--text-2); }
+  .combobox-listbox { background: rgba(20,23,32,.96); border-color: var(--glass-border); border-radius: var(--r-card); box-shadow: var(--shadow-shell); backdrop-filter: blur(var(--blur-panel)); }
+  .combobox-group { border-top-color: var(--inset-border); }
+  .combobox-group-label { color: var(--text-2); }
+  .combobox-group-desc { color: var(--text-4); }
+  .combobox-option { border-radius: 10px; }
+  .combobox-option:hover, .combobox-option.active { background: var(--blue-bg); }
+  .combobox-option[aria-selected="true"] { background: var(--blue-bg); outline-color: var(--blue); }
+  .combobox-option-title { color: var(--text); }
+  .combobox-option-meta { background: var(--inset-bg); border-color: var(--inset-border); border-radius: 8px; color: var(--text-2); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; transform: none !important; animation: none !important; }
+  }
 </style>
 </head>
 <body>
@@ -300,7 +353,7 @@
   </section>
 
   <!-- 시나리오 (요구사항 5.x) -->
-  <section class="card" aria-labelledby="scenario-title">
+  <section class="card scenario-card" aria-labelledby="scenario-title">
     <h2 id="scenario-title">시나리오</h2>
 
     <span id="scenarioComboLabel" class="combo-label">시나리오 선택</span>

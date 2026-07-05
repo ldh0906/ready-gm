@@ -1737,6 +1737,9 @@ function buildCheckSelectionPrompt(
       "행동에 능동적 시도가 없으면 player 판정을 만들지 마세요.\n" +
       "- action coverage: CONTEXT.actions의 confirmed_action마다 checks에 해당 캐릭터 판정을 만들거나, " +
       "판정이 필요 없으면 noRollRationales에 그 캐릭터 이름과 이유를 반드시 넣으세요.\n" +
+      "- difficulty calibration: 난이도 기본값은 Average입니다. 행동이 캐릭터의 강점 능력치와 잘 맞고 상황이 우호적이면 Easy를 적극 사용하세요. " +
+      "Hard는 명백한 위험·반대 압력·시간 압박이 있을 때만, Formidable은 클라이맥스급 순간에만 사용하세요.\n" +
+      "- difficulty calibration: 가벼운 톤(코미디 등 저위험 룰)의 시나리오에서는 Hard 이상을 연속 사용하지 마세요.\n" +
       "- advantage: 상황에 맞게 실제로 제안하세요. 기습/조준/협공/유리한 지형 → \"advantage\", " +
       "어둠/속박/부상/불리한 지형 → \"disadvantage\", 특별한 사정이 없으면 \"none\".\n" +
       "- characterDeltas: 캐릭터의 조건, 자원, 장비, 관계, 개인 clock, 기억 변화가 필요하면 typed delta로 제안하세요. " +
@@ -1830,6 +1833,17 @@ function buildNarrationPrompt(
         JSON.stringify(blackboardDeltaApplication.rejected) +
         "\n"
       : "";
+  const dialogueLines = ctx.thisRound.chat
+    .filter((c) => c.inCharacter === true)
+    .map((c) => ({ speaker: c.characterName, text: c.text }));
+  const dialogueBlock =
+    dialogueLines.length > 0
+      ? "PLAYER_DIALOGUE (플레이어 인물들이 이번 장면에서 실제로 소리 내어 말한 대사입니다. " +
+        "관련 NPC가 이 대사에 자연스럽게 반응하거나 대답하도록 서술에 반영하세요. 대사 자체를 " +
+        "그대로 되풀이하지는 마세요.)\n" +
+        formatUntrustedJsonBlock("UNTRUSTED_PLAYER_DIALOGUE", dialogueLines) +
+        "\n"
+      : "";
   return {
     system: GM_SYSTEM + formatSafetyPolicy(safetyProfile),
     user:
@@ -1840,6 +1854,8 @@ function buildNarrationPrompt(
       "행동이 여러 개이고 판정도 여러 개면, 각 행동의 성패를 그에 대응하는 판정 결과대로 따로따로 묘사하세요. " +
       "속도·민첩 계열 판정이 있고 그것이 실패(Failure)했다면, 다 해내지 못한 행동을 " +
       "\"~하려 했지만 속도가 느려서 ~\"처럼 미완·실패로 서술하세요. " +
+      "Partial Success는 실패가 아닙니다. 목표는 달성되되 대가·꼬임·소음이 따라붙는 것으로 서술하세요. " +
+      "Failure도 이야기를 앞으로 미는 실패로, 새 기회나 다음 전개를 열어 주는 방식으로 서술하세요. " +
       "단, visibility가 \"gm\"인 판정은 비공개 굴림이므로 주사위나 판정이 있었다는 사실을 드러내지 말고, " +
       "그 결과를 사건·분위기로만 자연스럽게 녹여내세요.\n" +
       'Respond as {"narration": "<korean text>", "endingReached": <bool>, "stateChanges": []}.\n' +
@@ -1850,6 +1866,7 @@ function buildNarrationPrompt(
       firedBlock +
       formatScene(scene) +
       formatRecentNarrative(ctx.recentNarrative) +
+      dialogueBlock +
       formatUntrustedJsonBlock("UNTRUSTED_PLAYER_ACTIONS", ctx.thisRound.actions) +
       "\n" +
       `RESOLVED_CHECKS: ${JSON.stringify(resolved)}`,

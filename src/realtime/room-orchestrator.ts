@@ -121,7 +121,7 @@ interface PendingResolution {
  */
 export type OrchestratorCommand =
   | { type: "START_SESSION"; by: PlayerId }
-  | { type: "SEND_CHAT"; from: PlayerId; text: string }
+  | { type: "SEND_CHAT"; from: PlayerId; text: string; inCharacter?: boolean }
   | { type: "CONFIRM_ACTION"; from: PlayerId; action: string }
   | { type: "PASS"; from: PlayerId }
   | { type: "REVISE"; from: PlayerId; action: string | null }
@@ -304,6 +304,13 @@ export class RoomOrchestrator {
   private readonly rollCheckTimers = new Map<string, unknown>();
   /** roomId → in-flight short retry after a failed all-ready resolution. */
   private readonly failedResolutionRetryTimers = new Map<string, unknown>();
+  /**
+   * roomId → in-flight opening-narration generation promise (T-2). Present only
+   * between session start and opening delivery/failure; round resolution chains
+   * behind it so a fast all-ready never runs the round-1 GM decision before the
+   * opening is on screen. Removed when the opening settles (success or failure).
+   */
+  private readonly openingInFlight = new Map<string, Promise<void>>();
   private readonly scheduleTimer: (fn: () => void, ms: number) => unknown;
   private readonly cancelTimer: (handle: unknown) => void;
   /** Best-effort flow logger for session tracing (no-op when not provided). */
@@ -561,6 +568,7 @@ export class RoomOrchestrator {
           text: command.text,
           ts: this.nowIso(),
           ...(displayName !== undefined ? { displayName } : {}),
+          ...(command.inCharacter ? { inCharacter: true } : {}),
         };
       }
       case "CONFIRM_ACTION":
@@ -594,8 +602,7 @@ export class RoomOrchestrator {
 
   /** Generate and deliver the session opening narration (Requirements 5.2, 5.3). */
   private launchOpening(roomId: string, startedState: TurnState): void {
-    this.track(
-      (async () => {
+    const opening = (async () => {
         const scenario = this.scenarioResolver.getSelectedScenario(roomId);
         if (scenario === null) return;
         const ctx = toContext(startedState, scenario, this.charactersFor(roomId));
@@ -637,8 +644,17 @@ export class RoomOrchestrator {
           roundNumber: startedState.roundNumber,
           text: result.value,
         });
-      })(),
-    );
+    })();
+    // Register the opening so a fast all-ready round waits for it (T-2); clear
+    // the gate once it settles either way (delivered OR failed — a failed
+    // opening must never wedge the round forever).
+    const gated = opening.finally(() => {
+      if (this.openingInFlight.get(roomId) === gated) {
+        this.openingInFlight.delete(roomId);
+      }
+    });
+    this.openingInFlight.set(roomId, gated);
+    this.track(gated);
   }
 
   // -------------------------------------------------------------------------
@@ -656,6 +672,21 @@ export class RoomOrchestrator {
     this.log("resolution_start", { roomId, round: resolving.roundNumber });
     this.track(
       (async () => {
+        // T-2: gate round resolution behind opening delivery. A player can go
+        // all-ready before the opening AI call returns; without this the round-1
+        // GM decision runs blind to the opening. Chain behind the opening's
+        // settle (success OR failure), then re-validate at fire time — a revert
+        // during the wait may have left `resolving`.
+        const opening = this.openingInFlight.get(roomId);
+        if (opening !== undefined) {
+          this.log("resolution_awaiting_opening", { roomId, round: resolving.roundNumber });
+          await opening.catch(() => undefined);
+          const current = this.store.get(roomId);
+          if (current === undefined || current.phase !== "resolving" || !current.resolutionRequested) {
+            this.log("resolution_gated_stale", { roomId, round: resolving.roundNumber });
+            return;
+          }
+        }
         const scenario = this.scenarioResolver.getSelectedScenario(roomId);
         if (scenario === null) {
           this.log("resolution_no_scenario", { roomId, round: resolving.roundNumber });
@@ -892,6 +923,7 @@ export class RoomOrchestrator {
     if (pending === undefined) return;
     if (pending.status === "rolled") return;
     if (pending.playerId !== playerId) return;
+    if (this.activePlayerCheck(current)?.checkId !== checkId) return;
     this.rollDeclaredCheck(roomId, checkId, false);
   }
 
@@ -911,10 +943,18 @@ export class RoomOrchestrator {
 
     if (declared.visibility === "player") {
       const current = this.loadState(roomId);
+      const remaining = (current.rollingChecks ?? []).filter(
+        (check) => check.checkId !== checkId && check.status !== "rolled",
+      );
+      const hasNext = remaining.length > 0;
+      const nextRollDeadlineIso = hasNext
+        ? new Date(this.now().getTime() + Math.max(0, this.config.rollCheckTimeoutMs)).toISOString()
+        : null;
       const next = reduce(current, {
         type: "CHECK_ROLLED",
         checkId,
         check: rolled.value,
+        nextRollDeadlineIso,
         ...(autoRolled ? { autoRolled: true } : {}),
       });
       if (next !== current) {
@@ -932,9 +972,15 @@ export class RoomOrchestrator {
           ...(autoRolled ? { autoRolled: true } : {}),
         },
       });
+      if (hasNext) this.armRollCheckTimer(roomId);
     }
 
     this.maybeLaunchDeclaredNarration(roomId);
+  }
+
+  /** Current sequential roll turn: the first unrolled check in declaration order. */
+  private activePlayerCheck(state: TurnState): PendingCheck | undefined {
+    return (state.rollingChecks ?? []).find((check) => check.status !== "rolled");
   }
 
   private hasUnrolledChecks(roomId: string): boolean {
@@ -981,7 +1027,7 @@ export class RoomOrchestrator {
     this.clearRollCheckTimer(roomId);
     const handle = this.scheduleTimer(() => {
       this.rollCheckTimers.delete(roomId);
-      void this.enqueue(roomId, () => this.autoRollRemainingChecks(roomId));
+      void this.enqueue(roomId, () => this.autoRollActiveCheck(roomId));
     }, Math.max(0, this.config.rollCheckTimeoutMs));
     this.rollCheckTimers.set(roomId, handle);
   }
@@ -1020,14 +1066,11 @@ export class RoomOrchestrator {
     }
   }
 
-  private autoRollRemainingChecks(roomId: string): void {
-    const pending = this.pendingResolutions.get(roomId);
-    if (pending === undefined) return;
-    for (const check of pending.declaration.checks) {
-      if (!pending.resolvedByCheckId.has(check.checkId)) {
-        this.rollDeclaredCheck(roomId, check.checkId, true);
-      }
-    }
+  private autoRollActiveCheck(roomId: string): void {
+    const current = this.loadState(roomId);
+    const active = this.activePlayerCheck(current);
+    if (active === undefined) return;
+    this.rollDeclaredCheck(roomId, active.checkId, true);
   }
 
   private toPendingCheck(check: DeclaredCheck, status: PendingCheck["status"]): PendingCheck {

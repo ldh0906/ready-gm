@@ -7,6 +7,7 @@ import {
   readyTally,
   selfStatus,
 } from "../logic.js";
+import { hueForId } from "./dom.js";
 
 export function createPanelsView(ctx) {
   const { els, helpers, getState, getViewerPlayerId } = ctx;
@@ -228,10 +229,20 @@ export function createPanelsView(ctx) {
   // 로스터 패널: readiness당 한 행(캐릭터명 esc · 연결 배지 · 준비 · 행동완료 · 본인) (요구사항 1.3, 1.4, 4.2, 5.2)
   function renderRoster(roster, phaseModel) {
     const actable = new Set(phaseModel.actablePlayerIds);
+    const pendingCheckPlayers = new Set(
+      (Array.isArray(getState().rollingChecks) ? getState().rollingChecks : [])
+        .filter((check) => check && check.status !== "rolled" && check.playerId != null)
+        .map((check) => check.playerId),
+    );
     const frag = document.createDocumentFragment();
     for (const r of roster) {
       const li = document.createElement("li");
-      li.className = "roster-row" + (r.isSelf ? " self" : "");
+      li.className =
+        "roster-row" +
+        (r.isSelf ? " self" : "") +
+        (r.hasActed ? " acted" : "") +
+        (r.connectionStatus === "disconnected" ? " disconnected" : "") +
+        (pendingCheckPlayers.has(r.playerId) ? " rolling" : "");
       // 키보드 포커스 가능(요구사항 8.4의 보이는 포커스 표시 대상).
       li.tabIndex = 0;
       li.setAttribute("role", "button");
@@ -261,6 +272,9 @@ export function createPanelsView(ctx) {
         }
       });
       const name = textSpan("r-name", nameText);
+      const coin = textSpan("roster-coin", Array.from(nameText || r.playerId || "?")[0] || "?");
+      coin.style.setProperty("--coin-hue", String(hueForId(r.playerId)));
+      coin.setAttribute("aria-hidden", "true");
       const badges = [name];
       if (r.isSelf) {
         const self = textSpan("r-self", "나");
@@ -279,7 +293,12 @@ export function createPanelsView(ctx) {
       ready.setAttribute("aria-hidden", "true");
       const acted = textSpan(`r-acted ${r.hasActed ? "on" : ""}`, actedLabel);
       acted.setAttribute("aria-hidden", "true");
-      li.replaceChildren(...badges, conn, ready, acted);
+      if (pendingCheckPlayers.has(r.playerId)) {
+        const rolling = textSpan("r-rolling", "🎲");
+        rolling.setAttribute("aria-hidden", "true");
+        badges.push(rolling);
+      }
+      li.replaceChildren(coin, ...badges, conn, ready, acted);
       frag.appendChild(li);
     }
     rosterEl.replaceChildren(frag);

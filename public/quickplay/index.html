@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>TRPG Session Engine — 로컬 플레이테스트</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="/theme.css">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -49,6 +51,53 @@
   #controls { display:none; gap:8px; }
   #controls.live { display:flex; }
   #msg { }
+  [hidden] { display: none !important; }
+
+  /* glass restyle overrides */
+  body {
+    font: 15px/1.65 "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+    background: var(--bg-tint-1), var(--bg-tint-2), var(--bg-tint-3), var(--bg-base);
+    background-attachment: fixed;
+    color: var(--text);
+  }
+  header { background: rgba(255,255,255,.06); border-bottom-color: var(--glass-border); backdrop-filter: blur(var(--blur-panel)); }
+  header strong { color: var(--gm); }
+  header .badge, .pill { background: rgba(255,255,255,.12); color: var(--text-2); border: 1px solid rgba(255,255,255,.20); border-radius: var(--r-pill); }
+  .meta { color: var(--text-2); }
+  .spinner { color: var(--amber); }
+  #setup { background: var(--glass-bg); border-color: var(--glass-border); border-radius: var(--r-shell); box-shadow: var(--shadow-shell); backdrop-filter: blur(var(--blur-shell)); }
+  input[type=text] { background: var(--input-bg); color: var(--text); border-color: var(--input-border); border-radius: var(--r-input); outline: none; }
+  input[type=text]::placeholder { color: var(--text-3); }
+  input[type=text]:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(143,194,255,.15); }
+  button { background: var(--btn-primary-bg); color: var(--btn-primary-text); border-radius: var(--r-input); font-weight: 600; transition: transform 140ms ease, filter 140ms ease, background 140ms ease, border-color 140ms ease; }
+  button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
+  button.secondary { background: rgba(255,255,255,.12); color: var(--text); border: 1px solid rgba(255,255,255,.22); }
+  button:disabled { opacity: .4; }
+  .sys, .li.sys { color: var(--text-3); }
+  .story, .sidebar { background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--r-shell); backdrop-filter: blur(var(--blur-panel)); box-shadow: var(--shadow-shell); overflow: hidden; }
+  #app.live { gap: 16px; padding: 16px; }
+  .story { border-right: 1px solid var(--glass-border); }
+  .paneHead { color: var(--text-2); border-bottom-color: var(--card-border); font-size: 11px; letter-spacing: .08em; }
+  .gm { background: var(--inset-bg); border-left-color: var(--gm); border-radius: 10px; padding: 14px; line-height: 1.75; }
+  .gm.opening { border-left-color: var(--gm); }
+  .gm.closing { border-left-color: var(--danger); }
+  .gm .who { color: var(--gm); font-weight: 700; }
+  .li { border-radius: 10px; }
+  .li.chat { background: var(--inset-bg); }
+  .li.chat b { color: var(--blue); }
+  .li.chat .chat-handle { color: var(--text-3); }
+  .li.act { background: var(--gm-bg); border-left-color: var(--gm-border); }
+  .li.pass { background: var(--inset-bg); color: var(--text-3); }
+  footer { border-top-color: var(--card-border); background: rgba(255,255,255,.06); backdrop-filter: blur(var(--blur-panel)); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; transform: none !important; animation: none !important; }
+  }
+  @media (max-width: 767px) {
+    #app.live { flex-direction: column; padding: 12px; }
+    .story, .sidebar { min-width: 0; max-width: none; }
+    #controls.live { flex-wrap: wrap; }
+    #controls.live button { flex: 1 1 auto; }
+  }
 </style>
 </head>
 <body>

@@ -49,8 +49,12 @@ export interface ReadinessEntry {
 export interface ActionHistoryEntry {
   round: number;
   playerId: string;
-  kind: "confirmed_action" | "pass" | "auto_pass";
+  kind: "confirmed_action" | "pass" | "auto_pass" | "check_result";
   text: string | null;
+  attribute?: string;
+  difficulty?: DifficultyGrade;
+  roll?: number;
+  outcome?: OutcomeGrade;
   /** Display-only: injected by the realtime fan-out, never persisted canonically. */
   characterName?: string;
   /** Display-only: injected by the realtime fan-out, never persisted canonically. */
@@ -69,6 +73,8 @@ export interface ChatEntry {
    * attribution; optional/absent on legacy entries.
    */
   displayName?: string;
+  /** In-character dialogue flag; used for center-stage display and AI context. */
+  inCharacter?: boolean;
 }
 
 /**
@@ -164,6 +170,15 @@ export interface TurnState {
   actionHistory: ActionHistoryEntry[];
   /** Current round's chat in send order (R6.4). */
   chatLog: ChatEntry[];
+  /**
+   * Chat from prior (completed) rounds, retained across round advances so a
+   * reconnecting client can rehydrate the full table conversation (F8). The
+   * current round's chat lives in {@link chatLog}; on each round advance the
+   * finished round's chatLog is appended here (bounded). Optional/absent when
+   * no prior-round chat exists, so legacy persisted Turn_State round-trips
+   * unchanged.
+   */
+  chatHistory?: ChatEntry[];
   /** Checks resolved this round (R11.5). */
   checks: CheckRecord[];
   /** Pending/rolled player-visible checks during the two-phase rolling window. */
@@ -192,6 +207,8 @@ export interface TurnState {
   characterStates?: VisibleCharacterState[];
   /** Player-visible ScenarioBlackboard projection, injected at fan-out only. */
   blackboard?: VisibleBlackboard;
+  /** Player-visible scene location, injected at fan-out only and never serialized canonically. */
+  sceneLocation?: string;
 }
 
 /**
@@ -243,6 +260,10 @@ function toPlain(state: TurnState): TurnState {
       playerId: entry.playerId,
       kind: entry.kind,
       text: entry.kind === "confirmed_action" ? (entry.text ?? null) : null,
+      ...(entry.attribute !== undefined ? { attribute: entry.attribute } : {}),
+      ...(entry.difficulty !== undefined ? { difficulty: entry.difficulty } : {}),
+      ...(entry.roll !== undefined ? { roll: entry.roll } : {}),
+      ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
     })),
     chatLog: state.chatLog.map((entry) => ({
       playerId: entry.playerId,
@@ -252,6 +273,7 @@ function toPlain(state: TurnState): TurnState {
       // Carry the room display name through ONLY when present so entries
       // without it serialize/deserialize unchanged (no extraneous key).
       ...(entry.displayName !== undefined ? { displayName: entry.displayName } : {}),
+      ...(entry.inCharacter ? { inCharacter: true } : {}),
     })),
     checks: state.checks.map((entry) => ({
       characterId: entry.characterId,
@@ -299,6 +321,18 @@ function toPlain(state: TurnState): TurnState {
   // predates the rolling-window countdown) round-trips unchanged.
   if (state.rollCheckDeadline !== undefined) {
     plain.rollCheckDeadline = state.rollCheckDeadline;
+  }
+  // Prior-round chat (F8). Carried ONLY when non-empty so states without any
+  // retained chat (including all legacy persisted JSON) round-trip unchanged.
+  if (Array.isArray(state.chatHistory) && state.chatHistory.length > 0) {
+    plain.chatHistory = state.chatHistory.map((entry) => ({
+      playerId: entry.playerId,
+      characterName: entry.characterName,
+      text: entry.text,
+      ts: entry.ts,
+      ...(entry.displayName !== undefined ? { displayName: entry.displayName } : {}),
+      ...(entry.inCharacter ? { inCharacter: true } : {}),
+    }));
   }
   return plain;
 }

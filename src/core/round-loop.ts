@@ -82,6 +82,8 @@ export interface SendChatCommand {
   /** The sender's room join display name, for `characterName(displayName)`
    * attribution; optional and carried through to the {@link ChatEntry}. */
   displayName?: string;
+  /** 인물 대사(따옴표로 말한 in-character 발화)면 true. 표시는 중앙 무대, AI 문맥에 반영. */
+  inCharacter?: boolean;
 }
 
 /**
@@ -192,6 +194,9 @@ export interface CheckRolledCommand {
   checkId: string;
   check: CheckRecord;
   autoRolled?: boolean;
+  /** Next active player check auto-roll deadline (ISO). Null when no player checks remain.
+   *  Undefined preserves the existing deadline for legacy callers/tests. */
+  nextRollDeadlineIso?: string | null;
 }
 
 /** The discriminated union of every command the round-loop reducer accepts. */
@@ -312,6 +317,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
         readiness,
         actionHistory: [],
         chatLog: [],
+        chatHistory: [],
         checks: [],
         rollingChecks: [],
         rollCheckDeadline: null,
@@ -322,10 +328,15 @@ export function reduce(state: TurnState, command: Command): TurnState {
     }
 
     case "SEND_CHAT": {
-      // Chat is accepted during free-chat AND ready-check (players keep talking
-      // while actions are being confirmed), but not once resolution begins or the
-      // session has ended (R6.1). Only active room members may chat.
-      if (state.phase !== "free_chat" && state.phase !== "ready_check") return state;
+      // Chat (table talk) is accepted in EVERY non-terminal phase — free-chat,
+      // ready-check, and while the round is resolving/rolling (P-1): waiting for
+      // a result is exactly when friends want to banter. Only CONFIRM/PASS/REVISE
+      // action controls stay locked during resolving/rolling (see those cases).
+      // A chat that arrives mid-resolution does not affect the already-snapshotted
+      // resolution; it simply lands in chatLog and feeds the next round's AI
+      // context (intended — no extra handling). Only `ended` is blocked (R6.1).
+      // Only active room members may chat.
+      if (state.phase === "ended") return state;
       if (!isMember(state, command.from)) return state;
       const entry: ChatEntry = {
         playerId: command.from,
@@ -334,6 +345,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
         ts: command.ts,
         // Carry the sender's room display name when supplied (R6.3, R6.4).
         ...(command.displayName !== undefined ? { displayName: command.displayName } : {}),
+        ...(command.inCharacter ? { inCharacter: true } : {}),
       };
       // Append in send order, attributed to the sender's character (R6.3, R6.4).
       return { ...state, chatLog: [...state.chatLog, entry] };
@@ -470,6 +482,9 @@ export function reduce(state: TurnState, command: Command): TurnState {
         rollingChecks: rollingChecks.map((check) =>
           check.checkId === command.checkId ? rolled : check,
         ),
+        ...(command.nextRollDeadlineIso !== undefined
+          ? { rollCheckDeadline: command.nextRollDeadlineIso }
+          : {}),
       };
     }
 
@@ -495,9 +510,45 @@ export function reduce(state: TurnState, command: Command): TurnState {
           kind: entry.actionKind as ActionHistoryEntry["kind"],
           text: entry.actionKind === "confirmed_action" ? (entry.actionText ?? null) : null,
         }));
+      const publicRolledChecks = (state.rollingChecks ?? []).filter((check) => check.status === "rolled");
+      const visibleResolvedChecks = new Set(
+        command.checks.map((check) =>
+          [check.characterId, check.attribute, check.difficulty, check.roll, check.outcome].join("\u0000"),
+        ),
+      );
+      const checkResults: ActionHistoryEntry[] = publicRolledChecks.flatMap((check) => {
+        if (check.playerId == null || check.roll === undefined || check.outcome === undefined) {
+          return [];
+        }
+        if (
+          !visibleResolvedChecks.has(
+            [check.characterId, check.attribute, check.difficulty, check.roll, check.outcome].join("\u0000"),
+          )
+        ) {
+          return [];
+        }
+        return [{
+          round: state.roundNumber,
+          playerId: check.playerId,
+          kind: "check_result",
+          text: null,
+          attribute: check.attribute,
+          difficulty: check.difficulty,
+          roll: check.roll,
+          outcome: check.outcome,
+        }];
+      });
       const actionHistory = [
         ...(Array.isArray(state.actionHistory) ? state.actionHistory : []),
         ...roundActions,
+        ...checkResults,
+      ].slice(-200);
+      // Retain the finished round's chat so a reconnecting client can rehydrate
+      // the full table conversation (F8). Bounded like actionHistory. Only set
+      // when non-empty so chat-free sessions keep the field absent.
+      const carriedChat: ChatEntry[] = [
+        ...(Array.isArray(state.chatHistory) ? state.chatHistory : []),
+        ...state.chatLog,
       ].slice(-200);
 
       if (command.endingReached) {
@@ -512,6 +563,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
           narrativeContext,
           resolutionRequested: false,
           readyCheckDeadline: null,
+          ...(carriedChat.length > 0 ? { chatHistory: carriedChat } : {}),
         };
       }
 
@@ -539,6 +591,7 @@ export function reduce(state: TurnState, command: Command): TurnState {
         narrativeContext,
         readyCheckDeadline: null,
         resolutionRequested: false,
+        ...(carriedChat.length > 0 ? { chatHistory: carriedChat } : {}),
       };
     }
 

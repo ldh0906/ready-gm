@@ -12,6 +12,7 @@ import type { Connection, ServerEvent } from "./connection.js";
 import type { AiGmClient } from "../ai/ai-gm-client.js";
 import { makeTokenUsage } from "../ai/ai-gm-client.js";
 import { makeCharacterState, type VisibleCharacterState } from "../core/character-state.js";
+import { makeSceneState } from "../core/scene-state.js";
 import type { TurnState } from "../core/turn-state.js";
 
 const fakeAiClient: AiGmClient = {
@@ -152,5 +153,49 @@ describe("createEngine — fan-out state decoration", () => {
       characterName: "고블린 사냥꾼",
       displayName: "라면",
     });
+  });
+
+  it("decorates sceneLocation only from the current scene location", () => {
+    const { engine, roomId } = setup();
+    engine.persistence.sceneStore.save(roomId, makeSceneState({
+      sceneId: "scene-1",
+      location: "검은 숲 입구",
+      sceneGoal: "숨은 제단 찾기",
+      currentTension: "늑대 울음",
+      presentNpcs: [{ id: "npc-1", name: "은둔자", disposition: "wary", visibleIntent: "길을 막는다" }],
+      availableClues: ["secret-clue"],
+    }));
+
+    const { connection, events } = makeConnection(roomId, "p1");
+    engine.gateway.connect(connection);
+
+    const turnStateEvent = events.find((event) => event.type === "turn_state");
+    expect(turnStateEvent).toBeDefined();
+    const state = (turnStateEvent as { state: TurnState }).state;
+    expect(state.sceneLocation).toBe("검은 숲 입구");
+    const serialized = JSON.stringify(state);
+    expect(serialized).not.toContain("숨은 제단");
+    expect(serialized).not.toContain("은둔자");
+    expect(serialized).not.toContain("secret-clue");
+    expect(serialized).not.toContain("presentNpcs");
+    expect(serialized).not.toContain("availableClues");
+  });
+
+  it("omits sceneLocation when the scene is absent or has an empty location", () => {
+    const { engine, roomId } = setup();
+    let conn = makeConnection(roomId, "p1");
+    engine.gateway.connect(conn.connection);
+    let turnStateEvent = conn.events.find((event) => event.type === "turn_state");
+    expect((turnStateEvent as { state: TurnState }).state.sceneLocation).toBeUndefined();
+
+    engine.persistence.sceneStore.save(roomId, makeSceneState({
+      sceneId: "scene-empty",
+      location: "   ",
+      sceneGoal: "목표",
+    }));
+    conn = makeConnection(roomId, "p1");
+    engine.gateway.connect(conn.connection);
+    turnStateEvent = conn.events.find((event) => event.type === "turn_state");
+    expect((turnStateEvent as { state: TurnState }).state.sceneLocation).toBeUndefined();
   });
 });

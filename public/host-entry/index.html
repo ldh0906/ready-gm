@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>ready-gm — 방 만들기</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="/theme.css">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -122,6 +124,37 @@
   @media (max-width: 767px) {
     main { padding: 16px 12px 40px; }
     .actions button { width: 100%; }
+  }
+
+  /* glass restyle overrides */
+  body {
+    font: 15px/1.65 "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+    background: var(--bg-tint-1), var(--bg-tint-2), var(--bg-tint-3), var(--bg-base);
+    background-attachment: fixed;
+    color: var(--text);
+  }
+  header { background: rgba(255,255,255,.06); border-bottom-color: var(--glass-border); backdrop-filter: blur(var(--blur-panel)); }
+  header strong { color: var(--gm); }
+  header .badge { background: rgba(255,255,255,.12); color: var(--text-2); border: 1px solid rgba(255,255,255,.20); border-radius: var(--r-pill); }
+  main { max-width: 480px; }
+  .intro h1, .card h2 { color: var(--text); }
+  .intro p, .intro ol, label { color: var(--text-2); }
+  .card { background: var(--glass-bg); border-color: var(--glass-border); border-radius: var(--r-shell); box-shadow: var(--shadow-shell); backdrop-filter: blur(var(--blur-shell)); }
+  input[type=text] { background: var(--input-bg); color: var(--text); border-color: var(--input-border); border-radius: var(--r-input); outline: none; }
+  input[type=text]::placeholder { color: var(--text-3); }
+  input[type=text]:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(143,194,255,.15); }
+  input[readonly] { color: var(--text-2); }
+  button { background: var(--btn-primary-bg); color: var(--btn-primary-text); border-radius: var(--r-input); font-weight: 600; transition: transform 140ms ease, filter 140ms ease, background 140ms ease, border-color 140ms ease; }
+  button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
+  button.secondary { background: rgba(255,255,255,.12); color: var(--text); border: 1px solid rgba(255,255,255,.22); }
+  button:disabled { opacity: .4; }
+  a:focus-visible, input:focus-visible, button:focus-visible { outline-color: var(--amber); }
+  .field-error, .form-error { color: var(--danger); }
+  .form-error { background: var(--danger-bg); border-color: var(--danger-border); border-radius: 10px; }
+  .progress, .copy-fallback { color: var(--amber); }
+  .invite-panel .link-text, .copy-confirm { color: var(--mint); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; transform: none !important; animation: none !important; }
   }
 </style>
 </head>

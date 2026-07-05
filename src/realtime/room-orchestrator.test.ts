@@ -201,6 +201,8 @@ class FakeCoordinator implements OrchestratorCoordinator {
       ending?: { closing: Narration; summary: SessionSummary };
       openingFailure?: string;
       endingFailure?: string;
+      /** When set, generateOpening resolves only after this gate settles (T-2 tests). */
+      openingGate?: Promise<void>;
       /** Side effect run synchronously inside resolveRound (e.g. advance clock). */
       onResolve?: () => void;
     } = {},
@@ -282,13 +284,14 @@ class FakeCoordinator implements OrchestratorCoordinator {
 
   generateOpening(): Promise<GenerationResult<Narration>> {
     this.openingCalls += 1;
-    if (this.opts.openingFailure !== undefined) {
-      return Promise.resolve({
-        ok: false,
-        error: { reason: "ai_request_failed", message: this.opts.openingFailure },
-      });
+    const finish = (): GenerationResult<Narration> =>
+      this.opts.openingFailure !== undefined
+        ? { ok: false, error: { reason: "ai_request_failed", message: this.opts.openingFailure } }
+        : { ok: true, value: this.opts.opening ?? "오프닝 내레이션" };
+    if (this.opts.openingGate !== undefined) {
+      return this.opts.openingGate.then(finish);
     }
-    return Promise.resolve({ ok: true, value: this.opts.opening ?? "오프닝 내레이션" });
+    return Promise.resolve(finish());
   }
 
   facilitateSinksOpening(): Promise<GenerationResult<Narration>> {
@@ -795,6 +798,74 @@ describe("RoomOrchestrator", () => {
     expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(true);
   });
 
+  it("enforces declaration order for player rolls and refreshes the next turn deadline", async () => {
+    const clock = makeClock();
+    const coordinator = new FakeCoordinator({
+      declaredChecks: [
+        {
+          checkId: "round-1-check-1",
+          characterId: "c1",
+          playerId: HOST,
+          characterName: "Aria",
+          attribute: "Might",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+        {
+          checkId: "round-1-check-2",
+          characterId: "c2",
+          playerId: PLAYER_2,
+          characterName: "Borin",
+          attribute: "Spirit",
+          difficulty: "Hard",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 1,
+        },
+      ],
+    });
+    const h = makeHarness(coordinator, clock);
+    await start(h);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    const initialDeadline = h.turnStateStore.get(ROOM_ID)?.rollCheckDeadline;
+    await h.orchestrator.dispatch(ROOM_ID, { type: "ROLL_CHECK", from: PLAYER_2, checkId: "round-1-check-2" });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(0);
+    expect(h.connection.checksRolled()).toHaveLength(0);
+    expect(h.turnStateStore.get(ROOM_ID)?.rollingChecks?.map((check) => check.status)).toEqual([
+      "pending",
+      "pending",
+    ]);
+
+    clock.advance(1_000);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "ROLL_CHECK", from: HOST, checkId: "round-1-check-1" });
+    await h.orchestrator.whenSettled();
+
+    const afterFirst = h.turnStateStore.get(ROOM_ID);
+    expect(coordinator.rollCalls).toBe(1);
+    expect(afterFirst?.rollingChecks?.map((check) => check.status)).toEqual(["rolled", "pending"]);
+    expect(afterFirst?.rollCheckDeadline).not.toBe(initialDeadline);
+    expect(afterFirst?.rollCheckDeadline).not.toBeNull();
+    expect(coordinator.narrateCalls).toBe(0);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "ROLL_CHECK", from: PLAYER_2, checkId: "round-1-check-2" });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(2);
+    expect(h.connection.checksRolled().map((event) => event.check.checkId)).toEqual([
+      "round-1-check-1",
+      "round-1-check-2",
+    ]);
+    expect(h.turnStateStore.get(ROOM_ID)?.rollCheckDeadline).toBeNull();
+    expect(coordinator.narrateCalls).toBe(1);
+  });
+
   it("auto-rolls pending checks on timeout and proceeds to narration", async () => {
     const timers = makeManualTimers();
     const coordinator = new FakeCoordinator({
@@ -828,6 +899,137 @@ describe("RoomOrchestrator", () => {
       autoRolled: true,
     });
     expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(true);
+  });
+
+  it("auto-rolls only the active check per timeout and rearms for the next check", async () => {
+    const timers = makeManualTimers();
+    const coordinator = new FakeCoordinator({
+      declaredChecks: [
+        {
+          checkId: "round-1-check-1",
+          characterId: "c1",
+          playerId: HOST,
+          characterName: "Aria",
+          attribute: "Might",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+        {
+          checkId: "round-1-check-2",
+          characterId: "c2",
+          playerId: PLAYER_2,
+          characterName: "Borin",
+          attribute: "Spirit",
+          difficulty: "Hard",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 1,
+        },
+      ],
+    });
+    const h = makeHarness(coordinator, makeClock(), undefined, undefined, undefined, timers);
+    await start(h);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    timers.runLatest();
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(1);
+    expect(coordinator.narrateCalls).toBe(0);
+    expect(h.connection.checksRolled()).toHaveLength(1);
+    expect(h.connection.checksRolled()[0]?.check).toMatchObject({
+      checkId: "round-1-check-1",
+      autoRolled: true,
+    });
+    expect(h.turnStateStore.get(ROOM_ID)?.rollingChecks?.map((check) => check.status)).toEqual([
+      "rolled",
+      "pending",
+    ]);
+    expect(timers.pendingCount()).toBe(1);
+
+    timers.runLatest();
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(2);
+    expect(coordinator.narrateCalls).toBe(1);
+    expect(h.connection.checksRolled()[1]?.check).toMatchObject({
+      checkId: "round-1-check-2",
+      autoRolled: true,
+    });
+    expect(h.turnStateStore.get(ROOM_ID)?.rollCheckDeadline).toBeNull();
+    expect(h.connection.narrations().some((n) => n.kind === "resolution")).toBe(true);
+  });
+
+  it("rolls hidden and ownerless declarations immediately before the first owned active check", async () => {
+    const coordinator = new FakeCoordinator({
+      declaredChecks: [
+        {
+          checkId: "round-1-hidden",
+          characterId: "gm-char",
+          playerId: null,
+          characterName: "GM",
+          attribute: "Wits",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "gm",
+          attributeLevel: 0,
+        },
+        {
+          checkId: "round-1-ownerless",
+          characterId: "npc-char",
+          playerId: null,
+          characterName: "NPC",
+          attribute: "Agility",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+        {
+          checkId: "round-1-check-1",
+          characterId: "c1",
+          playerId: HOST,
+          characterName: "Aria",
+          attribute: "Might",
+          difficulty: "Average",
+          advantage: "none",
+          visibility: "player",
+          attributeLevel: 0,
+        },
+      ],
+    });
+    const h = makeHarness(coordinator);
+    await start(h);
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "a" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(2);
+    expect(coordinator.narrateCalls).toBe(0);
+    expect(h.connection.checksPending()[0]?.checks.map((check) => check.checkId)).toEqual([
+      "round-1-ownerless",
+      "round-1-check-1",
+    ]);
+    expect(h.connection.checksRolled()).toHaveLength(1);
+    expect(h.connection.checksRolled()[0]?.check).toMatchObject({
+      checkId: "round-1-ownerless",
+      status: "rolled",
+      autoRolled: true,
+    });
+    expect(h.turnStateStore.get(ROOM_ID)?.rollingChecks).toMatchObject([
+      { checkId: "round-1-ownerless", status: "rolled" },
+      { checkId: "round-1-check-1", status: "pending" },
+    ]);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "ROLL_CHECK", from: HOST, checkId: "round-1-check-1" });
+    await h.orchestrator.whenSettled();
+
+    expect(coordinator.rollCalls).toBe(3);
+    expect(coordinator.narrateCalls).toBe(1);
   });
 
   it("seeds scenario clocks, supplies them to resolution, and persists the applied result", async () => {
@@ -1432,5 +1634,58 @@ describe("RoomOrchestrator", () => {
     const state = h.turnStateStore.get(ROOM_ID) as TurnState;
     expect(state.phase).toBe("ended");
     expect(coordinator.openingCalls).toBe(0);
+  });
+});
+
+describe("RoomOrchestrator — opening gate (T-2)", () => {
+  // Let the queued command + tracked resolution IIFE run up to their first
+  // suspension (the `await opening`) without releasing the opening gate.
+  const flush = () => new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+
+  it("does not start round resolution until the opening narration settles", async () => {
+    let releaseOpening!: () => void;
+    const openingGate = new Promise<void>((resolve) => {
+      releaseOpening = resolve;
+    });
+    const coordinator = new FakeCoordinator({ openingGate, declaredChecks: [] });
+    const h = makeHarness(coordinator);
+
+    // Start the session but DO NOT drain — the opening is held pending.
+    await h.orchestrator.dispatch(ROOM_ID, { type: "START_SESSION", by: HOST });
+    // Both players go all-ready BEFORE the opening returns (the F4 race).
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "달린다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await flush();
+
+    // The round entered resolving, but the GM decision is GATED behind opening.
+    expect((h.turnStateStore.get(ROOM_ID) as TurnState).phase).toBe("resolving");
+    expect(coordinator.openingCalls).toBe(1);
+    expect(coordinator.declareCalls).toBe(0);
+    expect(h.connection.checksPending()).toHaveLength(0);
+
+    // Release the opening → resolution proceeds automatically.
+    releaseOpening();
+    await h.orchestrator.whenSettled();
+    expect(coordinator.declareCalls).toBeGreaterThan(0);
+  });
+
+  it("still starts resolution when the opening generation fails (never wedges)", async () => {
+    let releaseOpening!: () => void;
+    const openingGate = new Promise<void>((resolve) => {
+      releaseOpening = resolve;
+    });
+    const coordinator = new FakeCoordinator({ openingGate, openingFailure: "boom", declaredChecks: [] });
+    const h = makeHarness(coordinator);
+
+    await h.orchestrator.dispatch(ROOM_ID, { type: "START_SESSION", by: HOST });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "CONFIRM_ACTION", from: HOST, action: "달린다" });
+    await h.orchestrator.dispatch(ROOM_ID, { type: "PASS", from: PLAYER_2 });
+    await flush();
+    expect(coordinator.declareCalls).toBe(0);
+
+    // A FAILED opening must release the gate too, or the round wedges forever.
+    releaseOpening();
+    await h.orchestrator.whenSettled();
+    expect(coordinator.declareCalls).toBeGreaterThan(0);
   });
 });

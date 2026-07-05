@@ -1824,6 +1824,16 @@ function toCommand(
         });
         return text.ok ? { type: "SEND_CHAT", from: playerId, text: text.value } : null;
       }
+    case "say":
+      if (typeof msg.text !== "string") return null;
+      {
+        const text = readBoundedText(msg.text, {
+          field: "Chat message",
+          maxLength: MAX_CHAT_LENGTH,
+          required: true,
+        });
+        return text.ok ? { type: "SEND_CHAT", from: playerId, text: text.value, inCharacter: true } : null;
+      }
     case "confirm":
       if (typeof msg.action !== "string") return null;
       {

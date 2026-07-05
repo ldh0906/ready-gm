@@ -1,12 +1,17 @@
-import { Phase, MAX_ENTRIES } from "../logic.js";
+import { Phase, MAX_ENTRIES, waitingIndicator } from "../logic.js";
 
 export function createStoryView(ctx) {
   const { els, helpers, getState } = ctx;
-  const { storyEl, newStoryBtn } = els;
+  const { storyEl, newStoryBtn, sceneCardEl } = els;
   const { textSpan, isNearBottom, stickToBottom, prefersReducedMotion } = helpers;
+  const nowMs = () => (typeof helpers.now === "function" ? helpers.now() : Date.now());
+
+  // P-2: 대기 진행 표시의 경과 시간. 문구(key)가 바뀌면 시작 시각을 리셋한다.
+  let waitingKey = "";
+  let waitingSinceMs = 0;
 
   function narrationKey(entry) {
-    return `${entry.roundNumber ?? ""}|${entry.kind || ""}|${String(entry.text)}`;
+    return `${entry.roundNumber ?? ""}|${entry.kind || ""}|${entry.speaker ?? ""}|${String(entry.text)}`;
   }
   let lastStoryKey = "";
   let lastAnimatedStoryKey = "";
@@ -44,8 +49,33 @@ export function createStoryView(ctx) {
     stickToBottom(storyEl, true);
   }
 
+  function renderSceneCard() {
+    if (!sceneCardEl) return;
+    const location = typeof getState().sceneLocation === "string" ? getState().sceneLocation.trim() : "";
+    if (!location) {
+      sceneCardEl.hidden = true;
+      sceneCardEl.replaceChildren();
+      return;
+    }
+    const title = document.createElement("div");
+    title.className = "scene-location";
+    title.textContent = `🕯 ${location}`;
+    const scenarioTitle =
+      typeof ctx.getScenarioTitle === "function" ? String(ctx.getScenarioTitle() || "").trim() : "";
+    if (scenarioTitle) {
+      const sub = document.createElement("div");
+      sub.className = "scene-scenario";
+      sub.textContent = scenarioTitle;
+      sceneCardEl.replaceChildren(title, sub);
+    } else {
+      sceneCardEl.replaceChildren(title);
+    }
+    sceneCardEl.hidden = false;
+  }
+
   // 상태의 narrationEntries를 통째로 다시 그린다(<= MAX_ENTRIES이므로 비용 안전).
   function renderStory() {
+    renderSceneCard();
     const wasNearBottom = isNearBottom(storyEl);
     const previousKey = lastStoryKey;
     const entries = Array.isArray(getState().narrationEntries) ? getState().narrationEntries : [];
@@ -61,6 +91,15 @@ export function createStoryView(ctx) {
     stopTypewriter();
     const frag = document.createDocumentFragment();
     for (const entry of entries) {
+      if (entry.kind === "dialogue") {
+        const div = document.createElement("div");
+        div.className = "line say";
+        const speaker =
+          typeof entry.speaker === "string" && entry.speaker.trim() ? entry.speaker.trim() : "누군가";
+        div.append(textSpan("who say", speaker), document.createTextNode(` 「${entry.text}」`));
+        frag.appendChild(div);
+        continue;
+      }
       const div = document.createElement("div");
       div.className = "gm " + (entry.kind || "");
       const label = entry.kind || "narration";
@@ -76,11 +115,23 @@ export function createStoryView(ctx) {
       div.append(textSpan("who", `[GM · ${label}]`), textNode);
       frag.appendChild(div);
     }
-    if (getState().phase === Phase.RESOLVING) {
+    const indicator = waitingIndicator(getState().phase, getState().rollingChecks);
+    if (indicator) {
+      // 문구가 바뀐 렌더에서만 경과 시각을 리셋한다(1초 렌더 티커가 갱신을 보장).
+      if (indicator.key !== waitingKey) {
+        waitingKey = indicator.key;
+        waitingSinceMs = nowMs();
+      }
+      const elapsedSec = Math.max(0, Math.floor((nowMs() - waitingSinceMs) / 1000));
       const div = document.createElement("div");
       div.className = "gm waiting";
-      div.append(textSpan("who", "[GM]"), document.createTextNode("GM이 서술을 쓰는 중"));
+      div.append(
+        textSpan("who", "[GM]"),
+        document.createTextNode(`${indicator.text} (${elapsedSec}초)`),
+      );
       frag.appendChild(div);
+    } else {
+      waitingKey = "";
     }
     storyEl.replaceChildren(frag);
     // DOM 상한(방어적): 상태가 이미 상한을 지키지만 동일 정책을 DOM에도 적용.
